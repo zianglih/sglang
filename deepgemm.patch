@@ -1,0 +1,903 @@
+diff --git a/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py b/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py
+index 88d0a959b..609fec04c 100644
+--- a/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py
++++ b/python/sglang/srt/layers/deep_gemm_wrapper/entrypoint.py
+@@ -45,7 +45,6 @@ def grouped_gemm_nt_f8f8bf16_masked(
+         with configure_deep_gemm_num_sms(
+             overlap_args.num_sms if overlap_args is not None else None
+         ):
+-
+             return deep_gemm.fp8_m_grouped_gemm_nt_masked(
+                 lhs,
+                 rhs,
+@@ -85,6 +84,9 @@ def gemm_nt_f8f8bf16(
+     lhs: Tuple[torch.Tensor, torch.Tensor],
+     rhs: Tuple[torch.Tensor, torch.Tensor],
+     out: torch.Tensor,
++    recipe: Optional[list[int]] = None,
++    compiled_dims: str = "nk",
++    disable_ue8m0_cast: bool = False,
+ ):
+     m, k = lhs[0].shape
+     n, _ = rhs[0].shape
+@@ -94,11 +96,16 @@ def gemm_nt_f8f8bf16(
+     _sanity_check_input(lhs)
+     _sanity_check_input(rhs)
+ 
++    print(f"@@@ before fp8_gemm_nt")
++    print(f"@@@ {recipe=} {compiled_dims=} {disable_ue8m0_cast=}")
+     with compile_utils.deep_gemm_execution_hook(m, n, k, num_groups, kernel_type):
+         deep_gemm.fp8_gemm_nt(
+             lhs,
+             rhs,
+             out,
++            recipe=tuple(recipe) if recipe is not None else None,
++            compiled_dims=compiled_dims,
++            disable_ue8m0_cast=disable_ue8m0_cast,
+         )
+ 
+ 
+diff --git a/python/sglang/srt/layers/moe/cutlass_moe.py b/python/sglang/srt/layers/moe/cutlass_moe.py
+index 135211282..b1d3385be 100755
+--- a/python/sglang/srt/layers/moe/cutlass_moe.py
++++ b/python/sglang/srt/layers/moe/cutlass_moe.py
+@@ -5,7 +5,7 @@ from typing import Optional, Tuple
+ import torch
+ 
+ from sglang.srt.layers.moe.cutlass_moe_params import CutlassMoEParams
+-from sglang.srt.utils import is_cuda, is_sm90_supported
++from sglang.srt.utils import is_cuda, is_sm90_supported, is_sm100_supported
+ 
+ _is_cuda = is_cuda()
+ if _is_cuda:
+@@ -13,6 +13,8 @@ if _is_cuda:
+         apply_shuffle_mul_sum,
+         cutlass_fp4_group_mm,
+         es_fp8_blockwise_scaled_grouped_mm,
++        es_sm100_mxfp8_blockscaled_grouped_mm,
++        es_sm100_mxfp8_blockscaled_grouped_quant,
+         fp8_blockwise_scaled_grouped_mm,
+         prepare_moe_input,
+         scaled_fp4_experts_quant,
+@@ -43,6 +45,7 @@ def cutlass_fused_experts_fp8(
+     problem_sizes1: torch.Tensor,
+     problem_sizes2: torch.Tensor,
+     use_fp8_blockscale: bool = True,
++    use_mxfp8: bool = False,
+     output: Optional[torch.Tensor] = None,
+     enable_es: Tuple[bool, bool] = (False, False),
+ ) -> torch.Tensor:
+@@ -99,6 +102,8 @@ def cutlass_fused_experts_fp8(
+         b_scales_ptrs (torch.Tensor): Pointers container for calculating offsets of the input scales for each expert.
+         use_fp8_blockscale (bool, optional): Flag indicating usage of FP8 with
+             block scaling. Currently, only `True` is supported. Defaults to `True`.
++        use_mxfp8 (bool, optional): Flag indicating usage of MXFP8 (UE8M0 scales)
++            with SM100 expert-specialization kernels. Defaults to `False`.
+         output (torch.Tensor, optional): Output tensor. If not provided, a new tensor will be created.
+         enable_es (tuple(bool, bool)): Flag indicating usage of expert specialization kernel for (up-projection, down-projection)
+     Returns:
+@@ -137,6 +142,36 @@ def cutlass_fused_experts_fp8(
+     a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+     c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+ 
++    if use_mxfp8:
++        assert es_up and es_down, "MXFP8 requires expert-specialization for both GEMMs"
++        assert is_sm100_supported(), "MXFP8 requires SM100"
++        assert w1_scale.dtype == torch.uint8, "MXFP8 w1_scale must be uint8"
++        assert w2_scale.dtype == torch.uint8, "MXFP8 w2_scale must be uint8"
++        assert k % 32 == 0, "MXFP8 requires hidden size to be divisible by 32"
++        assert n % 32 == 0, "MXFP8 requires intermediate size to be divisible by 32"
++        expected_w1_scale_shape = (
++            num_experts,
++            w1_q.shape[1] // 32,
++            w1_q.shape[2],
++        )
++        expected_w2_scale_shape = (
++            num_experts,
++            w2_q.shape[1] // 32,
++            w2_q.shape[2],
++        )
++        assert w1_scale.shape == expected_w1_scale_shape, (
++            f"MXFP8 w1_scale must be {expected_w1_scale_shape}, got {w1_scale.shape}"
++        )
++        assert w2_scale.shape == expected_w2_scale_shape, (
++            f"MXFP8 w2_scale must be {expected_w2_scale_shape}, got {w2_scale.shape}"
++        )
++
++    blockscale_offsets = None
++    if use_mxfp8 and (es_up or es_down):
++        blockscale_offsets = torch.empty(
++            (num_experts + 1,), dtype=torch.int32, device=device
++        )
++
+     prepare_moe_input(
+         topk_ids,
+         expert_offsets,
+@@ -147,11 +182,28 @@ def cutlass_fused_experts_fp8(
+         num_experts,
+         n,
+         k,
++        blockscale_offsets,
+     )
+ 
+-    a_q, a1_scale = sglang_per_token_group_quant_fp8(a, 128)
+-    rep_a_q = shuffle_rows(a_q, a_map, (m * topk, k))
+-    rep_a1_scales = shuffle_rows(a1_scale, a_map, (m * topk, int(k / 128)))
++    if use_mxfp8 and es_up:
++        rep_a = shuffle_rows(a, a_map, (m * topk, k))
++        rep_a_q = torch.empty_like(rep_a, dtype=torch.float8_e4m3fn)
++        total_blockscale = int(blockscale_offsets[-1].item())
++        rep_a1_scales = torch.empty(
++            (total_blockscale, k // 32), dtype=torch.uint8, device=device
++        )
++        es_sm100_mxfp8_blockscaled_grouped_quant(
++            rep_a,
++            problem_sizes1,
++            expert_offsets[:-1],
++            blockscale_offsets[:-1],
++            rep_a_q,
++            rep_a1_scales,
++        )
++    else:
++        a_q, a1_scale = sglang_per_token_group_quant_fp8(a, 128)
++        rep_a_q = shuffle_rows(a_q, a_map, (m * topk, k))
++        rep_a1_scales = shuffle_rows(a1_scale, a_map, (m * topk, int(k / 128)))
+ 
+     c1 = torch.empty((m * topk, n * 2), device=device, dtype=out_dtype)
+     c2 = torch.empty((m * topk, k), device=device, dtype=out_dtype)
+@@ -159,7 +211,18 @@ def cutlass_fused_experts_fp8(
+     a_sf_layout = torch.empty((num_experts, 5), device=device, dtype=torch.int)
+     w_sf_layout = torch.empty((num_experts, 5), device=device, dtype=torch.int)
+ 
+-    if is_sm90_supported() and es_up:
++    if use_mxfp8 and es_up:
++        es_sm100_mxfp8_blockscaled_grouped_mm(
++            c1,
++            rep_a_q,
++            w1_q,
++            rep_a1_scales,
++            w1_scale,
++            problem_sizes1,
++            expert_offsets[:-1],
++            blockscale_offsets[:-1],
++        )
++    elif is_sm90_supported() and es_up:
+         es_fp8_blockwise_scaled_grouped_mm(
+             c1,
+             rep_a_q,
+@@ -198,9 +261,35 @@ def cutlass_fused_experts_fp8(
+     intermediate = torch.empty((m * topk, n), device=device, dtype=out_dtype)
+     silu_and_mul(c1, intermediate)
+ 
+-    intemediate_q, a2_scale = sglang_per_token_group_quant_fp8(intermediate, 128)
++    if use_mxfp8 and es_down:
++        intemediate_q = torch.empty_like(intermediate, dtype=torch.float8_e4m3fn)
++        total_blockscale = int(blockscale_offsets[-1].item())
++        a2_scale = torch.empty(
++            (total_blockscale, n // 32), dtype=torch.uint8, device=device
++        )
++        es_sm100_mxfp8_blockscaled_grouped_quant(
++            intermediate,
++            problem_sizes2,
++            expert_offsets[:-1],
++            blockscale_offsets[:-1],
++            intemediate_q,
++            a2_scale,
++        )
++    else:
++        intemediate_q, a2_scale = sglang_per_token_group_quant_fp8(intermediate, 128)
+ 
+-    if is_sm90_supported() and es_down:
++    if use_mxfp8 and es_down:
++        es_sm100_mxfp8_blockscaled_grouped_mm(
++            c2,
++            intemediate_q,
++            w2_q,
++            a2_scale,
++            w2_scale,
++            problem_sizes2,
++            expert_offsets[:-1],
++            blockscale_offsets[:-1],
++        )
++    elif is_sm90_supported() and es_down:
+         es_fp8_blockwise_scaled_grouped_mm(
+             c2,
+             intemediate_q,
+@@ -322,13 +411,13 @@ def cutlass_moe_fp4(
+         "Number of experts must match",
+         " between weights.",
+     )
+-    assert (
+-        k_a // 2 == half_k_w1 and params.hidden_size == k_w2
+-    ), "Hidden size mismatch between a, w1 and w2"
++    assert k_a // 2 == half_k_w1 and params.hidden_size == k_w2, (
++        "Hidden size mismatch between a, w1 and w2"
++    )
+     assert (
+         nx2_w1 == params.intermediate_size_per_partition * 2
+         and half_n_w2 == params.intermediate_size_per_partition // 2
+-    ), ("mismatch in " "expected `n`")
++    ), "mismatch in expected `n`"
+     assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
+     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
+ 
+diff --git a/python/sglang/srt/layers/quantization/__init__.py b/python/sglang/srt/layers/quantization/__init__.py
+index c16d8a1a1..e8d4bbd1c 100644
+--- a/python/sglang/srt/layers/quantization/__init__.py
++++ b/python/sglang/srt/layers/quantization/__init__.py
+@@ -51,6 +51,7 @@ if TYPE_CHECKING:
+ # Base quantization methods
+ BASE_QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
+     "fp8": Fp8Config,
++    "mxfp8": Fp8Config,
+     "blockwise_int8": BlockInt8Config,
+     "modelopt": ModelOptFp8Config,  # Auto-detect, defaults to FP8
+     "modelopt_fp8": ModelOptFp8Config,
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index a2d31e9c2..7d1cbfa2a 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -111,6 +111,7 @@ class Fp8Config(QuantizationConfig):
+         activation_scheme: str = "dynamic",
+         ignored_layers: Optional[List[str]] = None,
+         weight_block_size: List[int] = None,
++        use_mxfp8: bool = False,
+     ) -> None:
+         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+         if is_checkpoint_fp8_serialized:
+@@ -119,6 +120,7 @@ class Fp8Config(QuantizationConfig):
+             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
+         self.activation_scheme = activation_scheme
+         self.ignored_layers = ignored_layers or []
++        self.use_mxfp8 = use_mxfp8
+         if weight_block_size is not None:
+             if not is_checkpoint_fp8_serialized:
+                 raise ValueError(
+@@ -132,19 +134,22 @@ class Fp8Config(QuantizationConfig):
+                 raise ValueError(
+                     f"The block-wise quantization only supports dynamic activation scheme for now, but got {activation_scheme} activation scheme."
+                 )
++        if self.use_mxfp8:
++            if weight_block_size is None:
++                weight_block_size = [1, 32]
++            elif weight_block_size != [1, 32]:
++                raise ValueError("MXFP8 requires weight_block_size=[1, 32].")
+         self.weight_block_size = weight_block_size
+ 
+-    @classmethod
+-    def get_name(cls) -> str:
+-        return "fp8"
++    def get_name(self) -> str:
++        return "mxfp8" if self.use_mxfp8 else "fp8"
+ 
+     @classmethod
+     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+         return [torch.bfloat16, torch.half]
+ 
+-    @classmethod
+-    def get_min_capability(cls) -> int:
+-        return 80
++    def get_min_capability(self) -> int:
++        return 100 if self.use_mxfp8 else 80
+ 
+     @classmethod
+     def get_config_filenames(cls) -> List[str]:
+@@ -153,7 +158,8 @@ class Fp8Config(QuantizationConfig):
+     @classmethod
+     def from_config(cls, config: Dict[str, Any]) -> Fp8Config:
+         quant_method = cls.get_from_keys(config, ["quant_method"])
+-        is_checkpoint_fp8_serialized = "fp8" in quant_method
++        use_mxfp8 = "mxfp8" in quant_method
++        is_checkpoint_fp8_serialized = ("fp8" in quant_method) or use_mxfp8
+         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+         ignored_layers = cls.get_from_keys_or(
+             config, ["ignored_layers", "modules_to_not_convert"], None
+@@ -162,11 +168,16 @@ class Fp8Config(QuantizationConfig):
+             # hack for ministral
+             ignored_layers = [layer.replace("model.", "") for layer in ignored_layers]
+         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
++        if use_mxfp8 and weight_block_size is not None:
++            raise ValueError(
++                "MXFP8 does not accept weight_block_size in config.json; it is fixed to [1, 32]."
++            )
+         return cls(
+             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
+             activation_scheme=activation_scheme,
+             ignored_layers=ignored_layers,
+             weight_block_size=weight_block_size,
++            use_mxfp8=use_mxfp8,
+         )
+ 
+     def get_quant_method(
+@@ -222,7 +233,10 @@ class Fp8LinearMethod(LinearMethodBase):
+             auto_enable = can_auto_enable_marlin_fp8()
+             self.use_marlin = force_marlin or auto_enable
+ 
+-        self.block_quant = self.quant_config.weight_block_size is not None
++        self.use_mxfp8 = getattr(self.quant_config, "use_mxfp8", False)
++        self.block_quant = (
++            self.use_mxfp8 or self.quant_config.weight_block_size is not None
++        )
+         self.w8a8_block_fp8_linear = dispatch_w8a8_block_fp8_linear()
+         self.is_checkpoint_fp8_serialized = (
+             self.quant_config.is_checkpoint_fp8_serialized
+@@ -321,18 +335,25 @@ class Fp8LinearMethod(LinearMethodBase):
+                     assert self.quant_config.activation_scheme == "dynamic"
+                 elif hasattr(self.quant_config, "linear_activation_scheme"):
+                     assert self.quant_config.linear_activation_scheme == "dynamic"
++                if self.use_mxfp8 and not self.is_checkpoint_fp8_serialized:
++                    raise ValueError(
++                        "MXFP8 requires fp8-serialized checkpoint for linear layers."
++                    )
++                scale_dtype = torch.uint8 if self.use_mxfp8 else torch.float32
++                scale_init = torch.zeros if scale_dtype == torch.uint8 else torch.empty
+                 scale = BlockQuantScaleParameter(
+-                    data=torch.empty(
++                    data=scale_init(
+                         (output_size_per_partition + block_n - 1) // block_n,
+                         (input_size_per_partition + block_k - 1) // block_k,
+-                        dtype=torch.float32,
++                        dtype=scale_dtype,
+                     ),
+                     input_dim=1,
+                     output_dim=0,
+                     weight_loader=weight_loader,
+                 )
+-                scale.format_ue8m0 = False
+-                scale[:] = torch.finfo(torch.float32).min
++                scale.format_ue8m0 = self.use_mxfp8
++                if scale_dtype != torch.uint8:
++                    scale[:] = torch.finfo(torch.float32).min
+                 layer.register_parameter("weight_scale_inv", scale)
+             else:
+                 scale = PerTensorScaleParameter(
+@@ -361,6 +382,12 @@ class Fp8LinearMethod(LinearMethodBase):
+                 layer.register_parameter("input_scale", None)
+ 
+     def process_weights_after_loading_block_quant(self, layer: Module) -> None:
++        if self.use_mxfp8:
++            # MXFP8 scales are stored as UE8M0 uint8; no requantization here.
++            layer.weight_scale_inv = torch.nn.Parameter(
++                layer.weight_scale_inv.data, requires_grad=False
++            )
++            return
+         # If ROCm, normalize the weights and scales to e4m3fnuz
+         if _is_fp8_fnuz:
+             # activation_scheme: dynamic
+@@ -371,9 +398,9 @@ class Fp8LinearMethod(LinearMethodBase):
+             )
+             layer.input_scale = None
+         elif _is_cpu:
+-            assert (
+-                _is_cpu_amx_available
+-            ), "Fp8LinearMethod on CPU requires that CPU has AMX support"
++            assert _is_cpu_amx_available, (
++                "Fp8LinearMethod on CPU requires that CPU has AMX support"
++            )
+             _amx_process_weight_after_loading(layer, ["weight"])
+             layer.weight_scale_inv = torch.nn.Parameter(
+                 layer.weight_scale_inv.data, requires_grad=False
+@@ -521,6 +548,17 @@ class Fp8LinearMethod(LinearMethodBase):
+             )
+ 
+         if self.block_quant:
++            if self.use_mxfp8:
++                from sglang.srt.layers.quantization.fp8_utils import (
++                    deepgemm_mxfp8_linear_with_fallback,
++                )
++
++                return deepgemm_mxfp8_linear_with_fallback(
++                    input=x,
++                    weight=layer.weight,
++                    weight_scale=layer.weight_scale_inv,
++                    bias=bias,
++                )
+             if use_intel_amx_backend(layer):
+                 return torch.ops.sgl_kernel.fp8_scaled_mm_cpu(
+                     x,
+@@ -577,11 +615,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+ 
+     def __init__(self, quant_config: Fp8Config):
+         self.quant_config = quant_config
+-        self.block_quant = self.quant_config.weight_block_size is not None
++        self.use_mxfp8 = getattr(self.quant_config, "use_mxfp8", False)
++        self.block_quant = (
++            self.use_mxfp8 or self.quant_config.weight_block_size is not None
++        )
+         if get_moe_runner_backend().is_cutlass():
+-            assert (
+-                cutlass_fp8_supported()
+-            ), "cutlass_fp8 MoE requires CUDA 12.0+ with SM90 or CUDA 12.4+ with SM89"
++            assert cutlass_fp8_supported(), (
++                "cutlass_fp8 MoE requires CUDA 12.0+ with SM90 or CUDA 12.4+ with SM89"
++            )
+             assert self.block_quant, "cutlass_fp8 MoE requires block quantization"
+             assert is_sm100_supported() or is_sm90_supported()
+ 
+@@ -685,27 +726,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+ 
+         # WEIGHT_SCALES
+         if self.block_quant:
++            scale_dtype = torch.uint8 if self.use_mxfp8 else torch.float32
++            scale_init = torch.zeros if scale_dtype == torch.uint8 else torch.ones
+             w13_weight_scale = torch.nn.Parameter(
+-                torch.ones(
++                scale_init(
+                     num_experts,
+                     2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                     (hidden_size + block_k - 1) // block_k,
+-                    dtype=torch.float32,
++                    dtype=scale_dtype,
+                 ),
+                 requires_grad=False,
+             )
+             w2_weight_scale = torch.nn.Parameter(
+-                torch.ones(
++                scale_init(
+                     num_experts,
+                     (hidden_size + block_n - 1) // block_n,
+                     (intermediate_size_per_partition + block_k - 1) // block_k,
+-                    dtype=torch.float32,
++                    dtype=scale_dtype,
+                 ),
+                 requires_grad=False,
+             )
+             # w13_weight and w2_weight are always requanted together
+-            w13_weight_scale.format_ue8m0 = False
+-            w2_weight_scale.format_ue8m0 = False
++            w13_weight_scale.format_ue8m0 = self.use_mxfp8
++            w2_weight_scale.format_ue8m0 = self.use_mxfp8
+             layer.register_parameter("w13_weight_scale_inv", w13_weight_scale)
+             layer.register_parameter("w2_weight_scale_inv", w2_weight_scale)
+             assert self.quant_config.activation_scheme == "dynamic"
+@@ -829,9 +872,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                 layer.w2_weight.contiguous(), (16, 16)
+             )
+         elif _is_cpu:
+-            assert (
+-                _is_cpu_amx_available
+-            ), "Fp8MoEMethod on CPU requires that CPU has AMX support"
++            assert _is_cpu_amx_available, (
++                "Fp8MoEMethod on CPU requires that CPU has AMX support"
++            )
+             _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
+         else:
+             # For fp8 moe run with deepgemm, the expert weights and scales need be requantized to ue8m0
+@@ -852,9 +895,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                 and will_use_deepgemm
+                 and not layer.w13_weight_scale_inv.format_ue8m0
+             ):
+-                assert isinstance(
+-                    layer, DeepEPMoE
+-                ), "DeepGemm MoE is only supported with DeepEPMoE"
++                assert isinstance(layer, DeepEPMoE), (
++                    "DeepGemm MoE is only supported with DeepEPMoE"
++                )
+                 weight_block_size = self.quant_config.weight_block_size
+                 requant_weight_ue8m0_inplace(
+                     layer.w13_weight, layer.w13_weight_scale_inv, weight_block_size
+@@ -1026,9 +1069,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                     int4_rescale = (
+                         layer.w13_weight_scale[expert_id][shard_id] / max_w13_scale_fp8
+                     )
+-                    layer.w13_weight_scale1[expert_id][
+-                        start : start + shard_size
+-                    ] *= int4_rescale
++                    layer.w13_weight_scale1[expert_id][start : start + shard_size] *= (
++                        int4_rescale
++                    )
+                 start += shard_size
+ 
+         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales, requires_grad=False)
+@@ -1098,7 +1141,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+         layer: torch.nn.Module,
+         dispatch_output: DispatchOutput,
+     ) -> CombineInput:
+-
+         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+ 
+         x = dispatch_output.hidden_states
+@@ -1172,12 +1214,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
+                 self.problem_sizes1,
+                 self.problem_sizes2,
+                 use_fp8_blockscale=True,
++                use_mxfp8=getattr(self.quant_config, "use_mxfp8", False),
+                 output=symm_output,
+             )
+             return StandardCombineInput(hidden_states=output)
+ 
+         if self.runner.runner_backend.is_deep_gemm():
+-
+             w13_weight = layer.w13_weight
+             w2_weight = layer.w2_weight
+ 
+diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
+index 7701f9757..0e3018ddd 100644
+--- a/python/sglang/srt/layers/quantization/fp8_kernel.py
++++ b/python/sglang/srt/layers/quantization/fp8_kernel.py
+@@ -101,8 +101,20 @@ def deep_gemm_fp8_fp8_bf16_nt(
+     B: torch.Tensor,
+     Bs: torch.Tensor,
+     C: torch.Tensor,
++    recipe: Optional[List[int]] = None,
++    compiled_dims: str = "nk",
++    disable_ue8m0_cast: bool = False,
+ ) -> None:
+-    deep_gemm_wrapper.gemm_nt_f8f8bf16((A, As), (B, Bs), C)
++    print(f"@@@ before deep_gemm_wrapper.gemm_nt_f8f8bf16")
++    print(f"@@@ {recipe=} {compiled_dims=} {disable_ue8m0_cast=}")
++    deep_gemm_wrapper.gemm_nt_f8f8bf16(
++        (A, As),
++        (B, Bs),
++        C,
++        recipe=tuple(recipe) if recipe is not None else None,
++        compiled_dims=compiled_dims,
++        disable_ue8m0_cast=disable_ue8m0_cast,
++    )
+ 
+ 
+ @triton.jit
+@@ -222,9 +234,9 @@ def _per_token_group_quant_8bit_raw(
+     Returns:
+         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the scaling factor for quantization.
+     """
+-    assert (
+-        x.shape[-1] % group_size == 0
+-    ), "the last dimension of `x` cannot be divisible by `group_size`"
++    assert x.shape[-1] % group_size == 0, (
++        "the last dimension of `x` cannot be divisible by `group_size`"
++    )
+     assert x.is_contiguous(), "`x` is not contiguous"
+ 
+     if _is_hip:
+@@ -293,15 +305,27 @@ def _per_token_group_quant_8bit_raw(
+     if scale_ue8m0:
+         from deep_gemm import transform_sf_into_required_layout
+ 
+-        assert group_size == 128
+-        x_s = transform_sf_into_required_layout(
+-            x_s,
+-            num_groups=None,
+-            mn=x_q.shape[0],
+-            k=x_q.shape[1],
+-            recipe=(1, group_size, group_size),
+-            is_sfa=True,
+-        )
++        if group_size == 32:
++            # MXFP8 activation scales: (gran_mn=1, gran_k=32)
++            print(f"@@@ MXFP8 activation scales: (gran_mn=1, gran_k=32)")
++            x_s = transform_sf_into_required_layout(
++                x_s,
++                num_groups=None,
++                mn=x_q.shape[0],
++                k=x_q.shape[1],
++                recipe=(1, 1, 32),
++                is_sfa=True,
++            )
++        else:
++            assert group_size == 128
++            x_s = transform_sf_into_required_layout(
++                x_s,
++                num_groups=None,
++                mn=x_q.shape[0],
++                k=x_q.shape[1],
++                recipe=(1, group_size, group_size),
++                is_sfa=True,
++            )
+ 
+     return x_q, x_s
+ 
+@@ -428,7 +452,7 @@ def create_per_token_group_quant_fp8_output_scale(
+     if scale_ue8m0:
+         assert column_major_scales and scale_tma_aligned
+         *x_batch, x_q_mn, x_q_k = x_shape
+-        x_s_mn, x_s_k = x_q_mn, x_q_k // 128
++        x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
+         aligned_mn = ceil_align(x_s_mn, 4)
+         aligned_k = ceil_align(x_s_k, 4)
+         # TODO(FIXME): Fix cuda kernel and recover here to empty.
+@@ -472,9 +496,9 @@ def sglang_per_token_group_quant_fp8(
+     masked_m: Optional[torch.Tensor] = None,
+     enable_v2: Optional[bool] = None,
+ ):
+-    assert (
+-        x.shape[-1] % group_size == 0
+-    ), "the last dimension of `x` cannot be divisible by `group_size`"
++    assert x.shape[-1] % group_size == 0, (
++        "the last dimension of `x` cannot be divisible by `group_size`"
++    )
+     assert x.is_contiguous(), "`x` is not contiguous"
+ 
+     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
+@@ -488,10 +512,15 @@ def sglang_per_token_group_quant_fp8(
+         scale_tma_aligned=scale_tma_aligned,
+         scale_ue8m0=scale_ue8m0,
+     )
++    print(f"@@@ {group_size=}")
++    print(f"@@@ {x.shape=} {out_shape=}")
++    print(f"@@@ {x_s.shape=}")
++    print(f"@@@ {enable_sgl_per_token_group_quant_8bit=}")
+ 
+     if x.shape[0] > 0:
+         # Temporary
+         if enable_sgl_per_token_group_quant_8bit:
++            print(f"@@@ if branch")
+             sgl_per_token_group_quant_8bit(
+                 x,
+                 x_q,
+@@ -506,11 +535,12 @@ def sglang_per_token_group_quant_fp8(
+                 enable_v2=enable_v2,
+             )
+         else:
++            print(f"@@@ else branch")
+             assert not enable_v2
+             sgl_per_token_group_quant_fp8(
+                 x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
+             )
+-
++    print(f"@@@ {x_q.shape=} {x_s.shape=}")
+     return x_q, x_s
+ 
+ 
+@@ -1025,9 +1055,14 @@ def prepare_block_fp8_matmul_inputs(
+     if As.dtype == torch.float:
+         assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
+     elif As.dtype == torch.int:
+-        assert (
+-            triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4) == As.shape[-1]
+-        ), f"{A.shape=} {As.shape=} {block_size=}"
++        print(f"@@@ {block_k=}")
++        print(f"@@@ {A.shape=} {As.shape=} {block_size=}")
++        print(
++            f"@@@ lhs:{triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4)=} rhs:{As.shape[-1]=}"
++        )
++        assert triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4) == As.shape[-1], (
++            f"{A.shape=} {As.shape=} {block_size=}"
++        )
+     else:
+         raise NotImplementedError
+ 
+@@ -1043,9 +1078,9 @@ def prepare_block_fp8_matmul_inputs(
+         assert triton.cdiv(K, block_k) == Bs.shape[1]
+     elif Bs.dtype == torch.int:
+         assert N == Bs.shape[0], f"{B.shape=} {Bs.shape=} {block_size=}"
+-        assert (
+-            triton.cdiv(triton.cdiv(K, block_k), 4) == Bs.shape[1]
+-        ), f"{B.shape=} {Bs.shape=} {block_size=}"
++        assert triton.cdiv(triton.cdiv(K, block_k), 4) == Bs.shape[1], (
++            f"{B.shape=} {Bs.shape=} {block_size=}"
++        )
+     else:
+         raise NotImplementedError
+ 
+@@ -1062,13 +1097,27 @@ def w8a8_block_fp8_matmul_deepgemm(
+     Bs: torch.Tensor,
+     block_size: List[int],
+     output_dtype: torch.dtype,
++    recipe: Optional[List[int]] = None,
++    compiled_dims: str = "nk",
++    disable_ue8m0_cast: bool = False,
+ ) -> torch.Tensor:
+     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size, output_dtype)
+ 
+     # Deepgemm only supports output tensor type as bfloat16
+     assert C.dtype == torch.bfloat16 and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+ 
+-    deep_gemm_fp8_fp8_bf16_nt(A, As, B, Bs, C)
++    print(f"@@@ before deep_gemm_fp8_fp8_bf16_nt")
++    print(f"@@@ {A.shape=} {As.shape=} {B.shape=} {Bs.shape=} {C.shape=}")
++    deep_gemm_fp8_fp8_bf16_nt(
++        A,
++        As,
++        B,
++        Bs,
++        C,
++        recipe=recipe,
++        compiled_dims=compiled_dims,
++        disable_ue8m0_cast=disable_ue8m0_cast,
++    )
+ 
+     return C
+ 
+@@ -1425,9 +1474,9 @@ if _is_hip:
+                     torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
+         else:
+             # Static scaling
+-            assert (
+-                scale.numel() == 1
+-            ), f"Expected scalar scale, got numel={scale.numel()}"
++            assert scale.numel() == 1, (
++                f"Expected scalar scale, got numel={scale.numel()}"
++            )
+             if _use_aiter:
+                 static_per_tensor_quant(output, input, scale)
+             else:
+@@ -1443,7 +1492,6 @@ else:
+         num_token_padding: Optional[int] = None,
+         use_per_token_if_dynamic: bool = False,
+     ) -> tuple[torch.Tensor, torch.Tensor]:
+-
+         assert input.ndim == 2, f"Expected 2D input tensor, got {input.ndim}D"
+         shape = input.shape
+         if num_token_padding:
+@@ -1464,9 +1512,9 @@ else:
+                 )  # False for dynamic
+         else:
+             # Static scaling
+-            assert (
+-                scale.numel() == 1
+-            ), f"Expected scalar scale, got numel={scale.numel()}"
++            assert scale.numel() == 1, (
++                f"Expected scalar scale, got numel={scale.numel()}"
++            )
+             sgl_per_tensor_quant_fp8(
+                 input, output, scale, is_static=True
+             )  # True for static
+@@ -1544,9 +1592,9 @@ def per_token_group_quant_fp8_hopper_moe_mn_major(
+ ) -> Tuple[torch.Tensor, torch.Tensor]:
+     assert A.dim() == 2
+     assert A.is_contiguous(), "`A` is not contiguous"
+-    assert (
+-        A.shape[-1] % group_size == 0
+-    ), "the last dimension of `A` cannot be divisible by `group_size`"
++    assert A.shape[-1] % group_size == 0, (
++        "the last dimension of `A` cannot be divisible by `group_size`"
++    )
+ 
+     a_q = torch.empty_like(A, device=A.device, dtype=fp8_dtype)
+     M, K = A.shape[0], A.shape[1]
+diff --git a/python/sglang/srt/layers/quantization/fp8_utils.py b/python/sglang/srt/layers/quantization/fp8_utils.py
+index 61219f6b0..04a5f06bc 100644
+--- a/python/sglang/srt/layers/quantization/fp8_utils.py
++++ b/python/sglang/srt/layers/quantization/fp8_utils.py
+@@ -6,6 +6,7 @@ from functools import lru_cache
+ from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
+ 
+ import torch
++import torch.nn.functional as F
+ 
+ from sglang.srt.environ import envs
+ from sglang.srt.layers import deep_gemm_wrapper
+@@ -409,7 +410,83 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
+     )
+ 
+     output = w8a8_block_fp8_matmul_deepgemm(
+-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
++        q_input,
++        weight,
++        x_scale,
++        weight_scale,
++        block_size,
++        output_dtype=output_dtype,
++        recipe=[1, 1, 32],
++    )
++    if bias is not None:
++        output += bias
++    return output.to(dtype=output_dtype).view(*output_shape)
++
++
++def _pack_ue8m0_scales(scale_u8: torch.Tensor) -> torch.Tensor:
++    """Pack UE8M0 uint8 scales into int32 (4 scales per int)."""
++    if scale_u8.dtype != torch.uint8:
++        raise ValueError("Expected uint8 UE8M0 scales for packing.")
++    last_dim = scale_u8.shape[-1]
++    pad = (-last_dim) % 4
++    if pad:
++        scale_u8 = F.pad(scale_u8, (0, pad))
++    packed = scale_u8.view(*scale_u8.shape[:-1], -1, 4).to(torch.int32)
++    return (
++        packed[..., 0]
++        | (packed[..., 1] << 8)
++        | (packed[..., 2] << 16)
++        | (packed[..., 3] << 24)
++    )
++
++
++def deepgemm_mxfp8_linear_with_fallback(
++    input: torch.Tensor,
++    weight: torch.Tensor,
++    weight_scale: torch.Tensor,
++    bias: Optional[torch.Tensor] = None,
++) -> torch.Tensor:
++    output_dtype = input.dtype
++    dtype_supported = output_dtype == torch.bfloat16
++
++    # mxfp8 uses 1x32 scaling
++    block_size = [1, 32]
++    shape_supported = weight.shape[0] % 64 == 0 and weight.shape[1] % 128 == 0
++
++    if not (
++        shape_supported and dtype_supported and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
++    ):
++        raise ValueError(
++            "MXFP8 linear requires DeepGEMM on bf16 with weight.shape[0] % 64 == 0 "
++            "and weight.shape[1] % 128 == 0; got "
++            f"{weight.shape=}, {output_dtype=}, "
++            f"{deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM=}"
++        )
++
++    input_2d = input.view(-1, input.shape[-1])
++    output_shape = [*input.shape[:-1], weight.shape[0]]
++
++    q_input, x_scale = sglang_per_token_group_quant_fp8(
++        input_2d,
++        block_size[1],
++        column_major_scales=True,
++        scale_tma_aligned=True,
++        scale_ue8m0=True,
++    )
++    if weight_scale.dtype == torch.uint8:
++        weight_scale = _pack_ue8m0_scales(weight_scale)
++    print(f"@@@ before w8a8_block_fp8_matmul_deepgemm")
++    print(
++        f"@@@ {q_input.shape=} {x_scale.shape=} {weight.shape=} {weight_scale.shape=}"
++    )
++    output = w8a8_block_fp8_matmul_deepgemm(
++        q_input,
++        weight,
++        x_scale,
++        weight_scale,
++        block_size,
++        output_dtype=output_dtype,
++        recipe=[1, 1, 32],
+     )
+     if bias is not None:
+         output += bias
+@@ -691,9 +768,9 @@ def quant_weight_ue8m0(
+     weight_block_size: List[int],
+ ):
+     assert weight_block_size == [128, 128]
+-    assert (
+-        weight_dequant.dtype == torch.bfloat16
+-    ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
++    assert weight_dequant.dtype == torch.bfloat16, (
++        f"{weight_dequant.dtype=} {weight_dequant.shape=}"
++    )
+ 
+     *batch_dims, n, k = weight_dequant.shape
+ 
+@@ -767,9 +844,9 @@ def inverse_transform_scale_ue8m0(sf_packed, mn):
+     sf_fp32 = _inverse_transform_scale_ue8m0_impl(sf_packed)
+     # Can call consistency check every time since this is only called on startup
+     sf_packed_recreated = transform_scale_ue8m0(sf_fp32, mn=mn, use_torch_impl=True)
+-    assert torch.all(
+-        sf_packed == sf_packed_recreated
+-    ), f"{sf_packed=} {sf_packed_recreated=} {sf_fp32=}"
++    assert torch.all(sf_packed == sf_packed_recreated), (
++        f"{sf_packed=} {sf_packed_recreated=} {sf_fp32=}"
++    )
+     return sf_fp32
+ 
+ 
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 78ec3fc71..8ab30a063 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -1216,7 +1216,8 @@ class ServerArgs:
+                 if (
+                     self.moe_a2a_backend == "none"
+                     and self.moe_runner_backend == "auto"
+-                    and self.quantization in ["fp8", "modelopt_fp8", "modelopt_fp4"]
++                    and self.quantization
++                    in ["fp8", "mxfp8", "modelopt_fp8", "modelopt_fp4"]
+                 ):
+                     self.moe_runner_backend = "flashinfer_trtllm"
+                     logger.info(
+diff --git a/sgl-kernel/python/sgl_kernel/gemm.py b/sgl-kernel/python/sgl_kernel/gemm.py
+index 4e23ebdd9..ad331d0cb 100644
+--- a/sgl-kernel/python/sgl_kernel/gemm.py
++++ b/sgl-kernel/python/sgl_kernel/gemm.py
+@@ -110,11 +110,12 @@ def sgl_per_token_group_quant_8bit(
+     masked_m: Optional[torch.Tensor] = None,
+     enable_v2: Optional[bool] = None,
+ ) -> None:
++    print(f"@@@ hello")
+     if enable_v2 is None:
+         from sglang.srt.utils import get_bool_env_var
+ 
+         enable_v2 = get_bool_env_var("SGLANG_PER_TOKEN_GROUP_QUANT_8BIT_V2")
+-
++    print(f"@@@ {enable_v2=}")
+     if enable_v2:
+         return torch.ops.sgl_kernel.sgl_per_token_group_quant_8bit_v2.default(
+             input,

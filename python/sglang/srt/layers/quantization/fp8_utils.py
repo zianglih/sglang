@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 
 from sglang.srt.environ import envs
 from sglang.srt.layers import deep_gemm_wrapper
@@ -409,7 +410,83 @@ def deepgemm_w8a8_block_fp8_linear_with_fallback(
     )
 
     output = w8a8_block_fp8_matmul_deepgemm(
-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=output_dtype
+        q_input,
+        weight,
+        x_scale,
+        weight_scale,
+        block_size,
+        output_dtype=output_dtype,
+        recipe=[1, 1, 32],
+    )
+    if bias is not None:
+        output += bias
+    return output.to(dtype=output_dtype).view(*output_shape)
+
+
+def _pack_ue8m0_scales(scale_u8: torch.Tensor) -> torch.Tensor:
+    """Pack UE8M0 uint8 scales into int32 (4 scales per int)."""
+    if scale_u8.dtype != torch.uint8:
+        raise ValueError("Expected uint8 UE8M0 scales for packing.")
+    last_dim = scale_u8.shape[-1]
+    pad = (-last_dim) % 4
+    if pad:
+        scale_u8 = F.pad(scale_u8, (0, pad))
+    packed = scale_u8.view(*scale_u8.shape[:-1], -1, 4).to(torch.int32)
+    return (
+        packed[..., 0]
+        | (packed[..., 1] << 8)
+        | (packed[..., 2] << 16)
+        | (packed[..., 3] << 24)
+    )
+
+
+def deepgemm_mxfp8_linear_with_fallback(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    output_dtype = input.dtype
+    dtype_supported = output_dtype == torch.bfloat16
+
+    # mxfp8 uses 1x32 scaling
+    block_size = [1, 32]
+    shape_supported = weight.shape[0] % 64 == 0 and weight.shape[1] % 128 == 0
+
+    if not (
+        shape_supported and dtype_supported and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+    ):
+        raise ValueError(
+            "MXFP8 linear requires DeepGEMM on bf16 with weight.shape[0] % 64 == 0 "
+            "and weight.shape[1] % 128 == 0; got "
+            f"{weight.shape=}, {output_dtype=}, "
+            f"{deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM=}"
+        )
+
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[0]]
+
+    q_input, x_scale = sglang_per_token_group_quant_fp8(
+        input_2d,
+        block_size[1],
+        column_major_scales=True,
+        scale_tma_aligned=True,
+        scale_ue8m0=True,
+    )
+    if weight_scale.dtype == torch.uint8:
+        weight_scale = _pack_ue8m0_scales(weight_scale)
+    print(f"@@@ before w8a8_block_fp8_matmul_deepgemm")
+    print(
+        f"@@@ {q_input.shape=} {x_scale.shape=} {weight.shape=} {weight_scale.shape=}"
+    )
+    output = w8a8_block_fp8_matmul_deepgemm(
+        q_input,
+        weight,
+        x_scale,
+        weight_scale,
+        block_size,
+        output_dtype=output_dtype,
+        recipe=[1, 1, 32],
     )
     if bias is not None:
         output += bias
@@ -691,9 +768,9 @@ def quant_weight_ue8m0(
     weight_block_size: List[int],
 ):
     assert weight_block_size == [128, 128]
-    assert (
-        weight_dequant.dtype == torch.bfloat16
-    ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
+    assert weight_dequant.dtype == torch.bfloat16, (
+        f"{weight_dequant.dtype=} {weight_dequant.shape=}"
+    )
 
     *batch_dims, n, k = weight_dequant.shape
 
@@ -767,9 +844,9 @@ def inverse_transform_scale_ue8m0(sf_packed, mn):
     sf_fp32 = _inverse_transform_scale_ue8m0_impl(sf_packed)
     # Can call consistency check every time since this is only called on startup
     sf_packed_recreated = transform_scale_ue8m0(sf_fp32, mn=mn, use_torch_impl=True)
-    assert torch.all(
-        sf_packed == sf_packed_recreated
-    ), f"{sf_packed=} {sf_packed_recreated=} {sf_fp32=}"
+    assert torch.all(sf_packed == sf_packed_recreated), (
+        f"{sf_packed=} {sf_packed_recreated=} {sf_fp32=}"
+    )
     return sf_fp32
 
 

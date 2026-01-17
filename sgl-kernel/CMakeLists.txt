@@ -53,10 +53,13 @@ FetchContent_Declare(
 FetchContent_Populate(repo-cutlass)
 
 # DeepGEMM
+#    GIT_REPOSITORY https://github.com/deepseek-ai/DeepGEMM
+#    GIT_TAG        54f99a8af537b3c6eb4819b69907ccbe2b600792
+
+
 FetchContent_Declare(
     repo-deepgemm
-    GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
-    GIT_TAG        54f99a8af537b3c6eb4819b69907ccbe2b600792
+    SOURCE_DIR /sgl-workspace/DeepGEMM
     GIT_SHALLOW    OFF
 )
 FetchContent_Populate(repo-deepgemm)

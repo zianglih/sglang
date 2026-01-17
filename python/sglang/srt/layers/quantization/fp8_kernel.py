@@ -101,8 +101,20 @@ def deep_gemm_fp8_fp8_bf16_nt(
     B: torch.Tensor,
     Bs: torch.Tensor,
     C: torch.Tensor,
+    recipe: Optional[List[int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
 ) -> None:
-    deep_gemm_wrapper.gemm_nt_f8f8bf16((A, As), (B, Bs), C)
+    print(f"@@@ before deep_gemm_wrapper.gemm_nt_f8f8bf16")
+    print(f"@@@ {recipe=} {compiled_dims=} {disable_ue8m0_cast=}")
+    deep_gemm_wrapper.gemm_nt_f8f8bf16(
+        (A, As),
+        (B, Bs),
+        C,
+        recipe=tuple(recipe) if recipe is not None else None,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=disable_ue8m0_cast,
+    )
 
 
 @triton.jit
@@ -222,9 +234,9 @@ def _per_token_group_quant_8bit_raw(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the scaling factor for quantization.
     """
-    assert (
-        x.shape[-1] % group_size == 0
-    ), "the last dimension of `x` cannot be divisible by `group_size`"
+    assert x.shape[-1] % group_size == 0, (
+        "the last dimension of `x` cannot be divisible by `group_size`"
+    )
     assert x.is_contiguous(), "`x` is not contiguous"
 
     if _is_hip:
@@ -293,15 +305,27 @@ def _per_token_group_quant_8bit_raw(
     if scale_ue8m0:
         from deep_gemm import transform_sf_into_required_layout
 
-        assert group_size == 128
-        x_s = transform_sf_into_required_layout(
-            x_s,
-            num_groups=None,
-            mn=x_q.shape[0],
-            k=x_q.shape[1],
-            recipe=(1, group_size, group_size),
-            is_sfa=True,
-        )
+        if group_size == 32:
+            # MXFP8 activation scales: (gran_mn=1, gran_k=32)
+            print(f"@@@ MXFP8 activation scales: (gran_mn=1, gran_k=32)")
+            x_s = transform_sf_into_required_layout(
+                x_s,
+                num_groups=None,
+                mn=x_q.shape[0],
+                k=x_q.shape[1],
+                recipe=(1, 1, 32),
+                is_sfa=True,
+            )
+        else:
+            assert group_size == 128
+            x_s = transform_sf_into_required_layout(
+                x_s,
+                num_groups=None,
+                mn=x_q.shape[0],
+                k=x_q.shape[1],
+                recipe=(1, group_size, group_size),
+                is_sfa=True,
+            )
 
     return x_q, x_s
 
@@ -428,7 +452,7 @@ def create_per_token_group_quant_fp8_output_scale(
     if scale_ue8m0:
         assert column_major_scales and scale_tma_aligned
         *x_batch, x_q_mn, x_q_k = x_shape
-        x_s_mn, x_s_k = x_q_mn, x_q_k // 128
+        x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
         # TODO(FIXME): Fix cuda kernel and recover here to empty.
@@ -472,9 +496,9 @@ def sglang_per_token_group_quant_fp8(
     masked_m: Optional[torch.Tensor] = None,
     enable_v2: Optional[bool] = None,
 ):
-    assert (
-        x.shape[-1] % group_size == 0
-    ), "the last dimension of `x` cannot be divisible by `group_size`"
+    assert x.shape[-1] % group_size == 0, (
+        "the last dimension of `x` cannot be divisible by `group_size`"
+    )
     assert x.is_contiguous(), "`x` is not contiguous"
 
     out_shape = (*x.shape[:-1], x.shape[-1] // (2 if fuse_silu_and_mul else 1))
@@ -488,10 +512,15 @@ def sglang_per_token_group_quant_fp8(
         scale_tma_aligned=scale_tma_aligned,
         scale_ue8m0=scale_ue8m0,
     )
+    print(f"@@@ {group_size=}")
+    print(f"@@@ {x.shape=} {out_shape=}")
+    print(f"@@@ {x_s.shape=}")
+    print(f"@@@ {enable_sgl_per_token_group_quant_8bit=}")
 
     if x.shape[0] > 0:
         # Temporary
         if enable_sgl_per_token_group_quant_8bit:
+            print(f"@@@ if branch")
             sgl_per_token_group_quant_8bit(
                 x,
                 x_q,
@@ -506,11 +535,12 @@ def sglang_per_token_group_quant_fp8(
                 enable_v2=enable_v2,
             )
         else:
+            print(f"@@@ else branch")
             assert not enable_v2
             sgl_per_token_group_quant_fp8(
                 x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
             )
-
+    print(f"@@@ {x_q.shape=} {x_s.shape=}")
     return x_q, x_s
 
 
@@ -1025,9 +1055,14 @@ def prepare_block_fp8_matmul_inputs(
     if As.dtype == torch.float:
         assert triton.cdiv(A.shape[-1], block_k) == As.shape[-1]
     elif As.dtype == torch.int:
-        assert (
-            triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4) == As.shape[-1]
-        ), f"{A.shape=} {As.shape=} {block_size=}"
+        print(f"@@@ {block_k=}")
+        print(f"@@@ {A.shape=} {As.shape=} {block_size=}")
+        print(
+            f"@@@ lhs:{triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4)=} rhs:{As.shape[-1]=}"
+        )
+        assert triton.cdiv(triton.cdiv(A.shape[-1], block_k), 4) == As.shape[-1], (
+            f"{A.shape=} {As.shape=} {block_size=}"
+        )
     else:
         raise NotImplementedError
 
@@ -1043,9 +1078,9 @@ def prepare_block_fp8_matmul_inputs(
         assert triton.cdiv(K, block_k) == Bs.shape[1]
     elif Bs.dtype == torch.int:
         assert N == Bs.shape[0], f"{B.shape=} {Bs.shape=} {block_size=}"
-        assert (
-            triton.cdiv(triton.cdiv(K, block_k), 4) == Bs.shape[1]
-        ), f"{B.shape=} {Bs.shape=} {block_size=}"
+        assert triton.cdiv(triton.cdiv(K, block_k), 4) == Bs.shape[1], (
+            f"{B.shape=} {Bs.shape=} {block_size=}"
+        )
     else:
         raise NotImplementedError
 
@@ -1062,13 +1097,27 @@ def w8a8_block_fp8_matmul_deepgemm(
     Bs: torch.Tensor,
     block_size: List[int],
     output_dtype: torch.dtype,
+    recipe: Optional[List[int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
 ) -> torch.Tensor:
     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size, output_dtype)
 
     # Deepgemm only supports output tensor type as bfloat16
     assert C.dtype == torch.bfloat16 and deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
 
-    deep_gemm_fp8_fp8_bf16_nt(A, As, B, Bs, C)
+    print(f"@@@ before deep_gemm_fp8_fp8_bf16_nt")
+    print(f"@@@ {A.shape=} {As.shape=} {B.shape=} {Bs.shape=} {C.shape=}")
+    deep_gemm_fp8_fp8_bf16_nt(
+        A,
+        As,
+        B,
+        Bs,
+        C,
+        recipe=recipe,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=disable_ue8m0_cast,
+    )
 
     return C
 
@@ -1425,9 +1474,9 @@ if _is_hip:
                     torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
         else:
             # Static scaling
-            assert (
-                scale.numel() == 1
-            ), f"Expected scalar scale, got numel={scale.numel()}"
+            assert scale.numel() == 1, (
+                f"Expected scalar scale, got numel={scale.numel()}"
+            )
             if _use_aiter:
                 static_per_tensor_quant(output, input, scale)
             else:
@@ -1443,7 +1492,6 @@ else:
         num_token_padding: Optional[int] = None,
         use_per_token_if_dynamic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         assert input.ndim == 2, f"Expected 2D input tensor, got {input.ndim}D"
         shape = input.shape
         if num_token_padding:
@@ -1464,9 +1512,9 @@ else:
                 )  # False for dynamic
         else:
             # Static scaling
-            assert (
-                scale.numel() == 1
-            ), f"Expected scalar scale, got numel={scale.numel()}"
+            assert scale.numel() == 1, (
+                f"Expected scalar scale, got numel={scale.numel()}"
+            )
             sgl_per_tensor_quant_fp8(
                 input, output, scale, is_static=True
             )  # True for static
@@ -1544,9 +1592,9 @@ def per_token_group_quant_fp8_hopper_moe_mn_major(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     assert A.dim() == 2
     assert A.is_contiguous(), "`A` is not contiguous"
-    assert (
-        A.shape[-1] % group_size == 0
-    ), "the last dimension of `A` cannot be divisible by `group_size`"
+    assert A.shape[-1] % group_size == 0, (
+        "the last dimension of `A` cannot be divisible by `group_size`"
+    )
 
     a_q = torch.empty_like(A, device=A.device, dtype=fp8_dtype)
     M, K = A.shape[0], A.shape[1]

@@ -45,7 +45,6 @@ def grouped_gemm_nt_f8f8bf16_masked(
         with configure_deep_gemm_num_sms(
             overlap_args.num_sms if overlap_args is not None else None
         ):
-
             return deep_gemm.fp8_m_grouped_gemm_nt_masked(
                 lhs,
                 rhs,
@@ -85,6 +84,9 @@ def gemm_nt_f8f8bf16(
     lhs: Tuple[torch.Tensor, torch.Tensor],
     rhs: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
+    recipe: Optional[list[int]] = None,
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
 ):
     m, k = lhs[0].shape
     n, _ = rhs[0].shape
@@ -94,11 +96,16 @@ def gemm_nt_f8f8bf16(
     _sanity_check_input(lhs)
     _sanity_check_input(rhs)
 
+    print(f"@@@ before fp8_gemm_nt")
+    print(f"@@@ {recipe=} {compiled_dims=} {disable_ue8m0_cast=}")
     with compile_utils.deep_gemm_execution_hook(m, n, k, num_groups, kernel_type):
         deep_gemm.fp8_gemm_nt(
             lhs,
             rhs,
             out,
+            recipe=tuple(recipe) if recipe is not None else None,
+            compiled_dims=compiled_dims,
+            disable_ue8m0_cast=disable_ue8m0_cast,
         )
 
 
