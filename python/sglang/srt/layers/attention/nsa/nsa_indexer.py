@@ -956,6 +956,7 @@ class Indexer(MultiPlatformOp):
             with torch.cuda.stream(self.alt_stream):
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
             current_stream.wait_stream(self.alt_stream)
+            weights = self._get_logits_head_gate(x, q_scale)
         else:
             q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
             k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
