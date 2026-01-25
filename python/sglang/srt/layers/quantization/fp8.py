@@ -19,9 +19,9 @@ from sglang.srt.layers.amx_utils import _amx_process_weight_after_loading
 from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.deep_gemm import DeepGemmMoeQuantInfo
-from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
-    FlashInferTrtllmFp8MoeQuantInfo,
-)
+# from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+#     FlashInferTrtllmFp8MoeQuantInfo,
+# )
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.moe.utils import RoutingMethodType, get_moe_runner_backend
 from sglang.srt.layers.parameter import (
@@ -1204,13 +1204,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.process_weights_hip_scale_padding(layer)
 
             # Align FP8 weights to FlashInfer per-tensor kernel layout if enabled
-            if get_moe_runner_backend().is_flashinfer_trtllm():
-                from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
-                    align_fp8_moe_weights_for_flashinfer_trtllm,
-                )
+            # if get_moe_runner_backend().is_flashinfer_trtllm():
+            #     from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
+            #         align_fp8_moe_weights_for_flashinfer_trtllm,
+            #     )
 
-                align_fp8_moe_weights_for_flashinfer_trtllm(layer)
-            return
+            #     align_fp8_moe_weights_for_flashinfer_trtllm(layer)
+            # return
 
     def process_weights_hip_int4(self, layer: Module):
         # TODO: _use_aiter: add after triton kernel added
