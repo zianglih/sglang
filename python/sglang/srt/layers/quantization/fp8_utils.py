@@ -542,6 +542,7 @@ def triton_w8a8_block_fp8_linear(
         output += bias
     return output.to(dtype=input_2d.dtype).view(*output_shape)
 
+from functools import lru_cache
 
 @lru_cache(maxsize=1)
 def _get_triton_mxfp8_downcast():
