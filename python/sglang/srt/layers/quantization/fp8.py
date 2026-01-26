@@ -920,7 +920,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             ), "Fp8MoEMethod on CPU requires that CPU has AMX support"
             _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
         elif self.use_mxfp8:
-            print("@@@ process_weights_after_loading_block_quant use_mxfp8")
+            # print("@@@ process_weights_after_loading_block_quant use_mxfp8")
             self._process_mxfp8_moe_weights(
                 layer, quantize=not self.quant_config.is_checkpoint_fp8_serialized
             )
@@ -961,6 +961,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale_inv.format_ue8m0 = True
 
     def _process_mxfp8_moe_weights(self, layer: Module, quantize: bool = True) -> None:
+        print("@@@ _process_mxfp8_moe_weights, quantize={quantize}")
+        print(f"@@@ _process_mxfp8_moe_weights layer={layer}, quantize={quantize}")
+        if hasattr(layer, 'w13_weight_scale_inv'):
+            print(f"@@@ w13_weight_scale_inv shape={layer.w13_weight_scale_inv.shape}, dtype={layer.w13_weight_scale_inv.dtype}")
+        if hasattr(layer, 'w2_weight_scale_inv'):
+            print(f"@@@ w2_weight_scale_inv shape={layer.w2_weight_scale_inv.shape}, dtype={layer.w2_weight_scale_inv.dtype}")
+        
 
         if not (_is_cuda and is_sm100_supported()):
             raise RuntimeError("MXFP8 MoE quantization requires SM100.")
@@ -1083,7 +1090,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        print("@@@ process_weights_after_loading use_mxfp8")
+        # print("@@@ process_weights_after_loading use_mxfp8")
         if _is_hip and _use_hip_int4:
             self.process_weights_hip_int4(layer)
             return
