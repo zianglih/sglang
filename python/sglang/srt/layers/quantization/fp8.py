@@ -961,13 +961,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale_inv.format_ue8m0 = True
 
     def _process_mxfp8_moe_weights(self, layer: Module, quantize: bool = True) -> None:
-        print("@@@ _process_mxfp8_moe_weights, quantize={quantize}")
         print(f"@@@ _process_mxfp8_moe_weights layer={layer}, quantize={quantize}")
-        if hasattr(layer, 'w13_weight_scale_inv'):
-            print(f"@@@ w13_weight_scale_inv shape={layer.w13_weight_scale_inv.shape}, dtype={layer.w13_weight_scale_inv.dtype}")
-        if hasattr(layer, 'w2_weight_scale_inv'):
-            print(f"@@@ w2_weight_scale_inv shape={layer.w2_weight_scale_inv.shape}, dtype={layer.w2_weight_scale_inv.dtype}")
-        
 
         if not (_is_cuda and is_sm100_supported()):
             raise RuntimeError("MXFP8 MoE quantization requires SM100.")
@@ -1035,6 +1029,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         def _swizzle_with_triton_kernel(
             weight_shape: tuple[int, int, int], scale: torch.Tensor
         ):
+            print(f"@@@ _swizzle_with_triton_kernel weight_shape={weight_shape}, scale shape={scale.shape}")
             num_experts, m, k = weight_shape
             aligned_m = ((m + 127) // 128) * 128
             scale = scale.view(num_experts, aligned_m, k // 32)
