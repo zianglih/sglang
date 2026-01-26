@@ -1230,6 +1230,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 # )
 
                 # align_fp8_moe_weights_for_flashinfer_trtllm(layer)
+                pass
             return
 
     def process_weights_hip_int4(self, layer: Module):
