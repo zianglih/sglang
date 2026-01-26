@@ -2469,15 +2469,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             # Iterate through all modules to apply specific post-loading processing
             for _, module in self.model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
+                print(f"@@@ quant_method: {quant_method}")
+                use_mxfp8 = getattr(quant_method, "use_mxfp8", False)
+                print(f"@@@ use_mxfp8: {use_mxfp8}")
 
                 # Check if the module supports quantization post-processing
                 if quant_method is not None and hasattr(
                     quant_method, "process_weights_after_loading"
                 ):
-
+                    print("@@@ if")
                     # Apply the post-processing (e.g., repacking weights for Marlin kernel)
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+                else:
+                    print("@@@ else")
 
         return True, "Success"
 

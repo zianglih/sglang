@@ -19,6 +19,7 @@
 
 import logging
 import math
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 import torch
@@ -1157,6 +1158,126 @@ class Qwen3MoeForCausalLM(nn.Module):
                 for layer_id in range(self.start_layer, self.end_layer)
                 if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
             }
+
+    def get_weights_by_name(
+        self, name: str, truncate_size: int = 100, tp_size: int = 1
+    ) -> Optional[torch.Tensor]:
+        """Best-effort weight fetch for debugging (supports MoE expert weights)."""
+        try:
+            if name == "lm_head.weight" and self.config.tie_word_embeddings:
+                logger.info(
+                    "word embedding is tied for this model, return embed_tokens.weight as lm_head.weight."
+                )
+                return (
+                    self.model.embed_tokens.weight.cpu()
+                    .to(torch.float32)
+                    .numpy()
+                    .tolist()[:truncate_size]
+                )
+
+            stacked_params_mapping = [
+                ("qkv_proj", "q_proj", "q"),
+                ("qkv_proj", "k_proj", "k"),
+                ("qkv_proj", "v_proj", "v"),
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
+
+            params_dict = dict(self.named_parameters())
+            mapped_name = name
+            mapped_shard_id = None
+
+            if "mlp.experts" not in name:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name in name:
+                        mapped_name = name.replace(weight_name, param_name)
+                        mapped_shard_id = shard_id
+                        break
+
+            if "mlp.experts" in name:
+                layer_id = get_layer_id(name)
+                if layer_id is None:
+                    return None
+                match = re.search(r"mlp\.experts\.(\d+)\.", name)
+                if match is None:
+                    return None
+                expert_id = int(match.group(1))
+                experts_module = self.model.layers[layer_id].mlp.experts
+                local_expert_id = experts_module._map_global_expert_id_to_local_expert_id(
+                    expert_id
+                )
+                if local_expert_id == -1:
+                    return None
+
+                expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                    ckpt_gate_proj_name="gate_proj",
+                    ckpt_down_proj_name="down_proj",
+                    ckpt_up_proj_name="up_proj",
+                    num_experts=self.config.num_experts,
+                )
+                for param_name, weight_name, exp_id, shard_id in expert_params_mapping:
+                    if exp_id != expert_id:
+                        continue
+                    if weight_name not in name:
+                        continue
+                    mapped_name = name.replace(weight_name, param_name)
+                    if mapped_name not in params_dict:
+                        return None
+                    param = params_dict[mapped_name]
+                    expert_data = param.data[local_expert_id]
+                    if shard_id in ("w1", "w3") and experts_module.moe_runner_config.is_gated:
+                        shard_dim = 0 if not experts_module.use_triton_kernels else 1
+                        shard_size = expert_data.shape[shard_dim] // 2
+                        switch_w13 = getattr(
+                            experts_module.quant_method, "load_up_proj_weight_first", False
+                        )
+                        if (switch_w13 and shard_id == "w1") or (
+                            not switch_w13 and shard_id == "w3"
+                        ):
+                            start = shard_size
+                        else:
+                            start = 0
+                        expert_data = expert_data.narrow(shard_dim, start, shard_size)
+                    return (
+                        expert_data.cpu().to(torch.float32).numpy().tolist()[:truncate_size]
+                    )
+
+                return None
+
+            if mapped_name not in params_dict:
+                return None
+
+            weight = params_dict[mapped_name].data
+            if mapped_shard_id is not None:
+                if mapped_shard_id in ["q", "k", "v"]:
+                    num_heads = self.config.num_attention_heads // tp_size
+                    num_kv_heads = self.config.num_key_value_heads // tp_size
+                    head_dim = self.config.hidden_size // self.config.num_attention_heads
+                    if mapped_shard_id == "q":
+                        offset = 0
+                        size = num_heads * head_dim
+                    elif mapped_shard_id == "k":
+                        offset = num_heads * head_dim
+                        size = num_kv_heads * head_dim
+                    else:
+                        offset = (num_heads + num_kv_heads) * head_dim
+                        size = num_kv_heads * head_dim
+                    weight = weight.narrow(0, offset, size)
+                elif mapped_shard_id in [0, 1]:
+                    intermediate_size = self.config.intermediate_size
+                    slice_size = intermediate_size // tp_size
+                    offset = 0 if mapped_shard_id == 0 else slice_size
+                    weight = weight.narrow(0, offset, slice_size)
+
+            if tp_size > 1 and ("o_proj" in name or "down_proj" in name):
+                gathered_weights = [torch.zeros_like(weight) for _ in range(tp_size)]
+                torch.distributed.all_gather(gathered_weights, weight)
+                weight = torch.cat(gathered_weights, dim=1)
+
+            return weight.cpu().to(torch.float32).numpy().tolist()[:truncate_size]
+        except Exception as e:
+            logger.error(f"Error when getting parameter {name}: {e}")
+            return None
 
     @classmethod
     def get_model_config_for_expert_location(cls, config):

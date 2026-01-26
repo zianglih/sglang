@@ -920,6 +920,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             ), "Fp8MoEMethod on CPU requires that CPU has AMX support"
             _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
         elif self.use_mxfp8:
+            print("@@@ process_weights_after_loading_block_quant use_mxfp8")
             self._process_mxfp8_moe_weights(
                 layer, quantize=not self.quant_config.is_checkpoint_fp8_serialized
             )
@@ -1082,6 +1083,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        print("@@@ process_weights_after_loading use_mxfp8")
         if _is_hip and _use_hip_int4:
             self.process_weights_hip_int4(layer)
             return
