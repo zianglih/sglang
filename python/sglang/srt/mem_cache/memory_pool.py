@@ -1730,9 +1730,12 @@ class NSATokenToKVPool(MLATokenToKVPool):
         else:
             assert self.page_size == 64
         with (
-            torch.cuda.use_mem_pool(self.custom_mem_pool)
-            if self.custom_mem_pool
-            else nullcontext()
+            (
+                torch.cuda.use_mem_pool(self.custom_mem_pool)
+                if self.custom_mem_pool
+                else nullcontext()
+            ),
+            self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE),
         ):
             self.index_k_with_scale_buffer = [
                 torch.zeros(

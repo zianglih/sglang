@@ -469,7 +469,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         is_static = not weight_quant.dynamic
 
-        return is_channel_group and input_quant_none and is_symmetric and is_static
+        return is_channel_group and input_quant_none and is_static
 
     def _is_dynamic_token_w4(
         self, weight_quant: BaseModel, input_quant: BaseModel
