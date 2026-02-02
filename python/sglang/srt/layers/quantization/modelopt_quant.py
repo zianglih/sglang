@@ -30,7 +30,11 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from sglang.srt.layers.quantization.fp4_utils import get_fp4_gemm_runner_backend
+from sglang.srt.layers.quantization.fp4_utils import (
+    get_fp4_gemm_runner_backend,
+    nvfp4_compute_input_scale_and_inv,
+    nvfp4_online_scale_enabled,
+)
 from sglang.srt.layers.quantization.fp8_kernel import scaled_fp8_quant
 from sglang.srt.layers.quantization.fp8_utils import (
     apply_fp8_linear,
@@ -38,7 +42,10 @@ from sglang.srt.layers.quantization.fp8_utils import (
     is_blackwell_supported,
 )
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
-from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+from sglang.srt.layers.quantization.unquant import (
+    UnquantizedFusedMoEMethod,
+    UnquantizedLinearMethod,
+)
 from sglang.srt.layers.quantization.utils import (
     convert_to_channelwise,
     is_layer_skipped,
@@ -101,6 +108,22 @@ except ImportError:
 
 # Initialize logger for the module
 logger = logging.getLogger(__name__)
+
+
+def _copy_or_rebind_param(
+    module: torch.nn.Module, name: str, new_value: torch.Tensor
+) -> None:
+    """Keep parameter identities stable for CUDA graph reuse and hot reload."""
+    new_value = new_value.detach()
+    param = getattr(module, name, None)
+    if isinstance(param, Parameter):
+        if param.data.shape == new_value.shape and param.data.dtype == new_value.dtype:
+            param.data.copy_(new_value)
+        else:
+            param.data = new_value
+        param.requires_grad_(False)
+    else:
+        setattr(module, name, Parameter(new_value, requires_grad=False))
 
 
 def _sglang_fp4_gemm_fake(
@@ -194,6 +217,12 @@ class ModelOptQuantConfig(QuantizationConfig):
         elif self.kv_cache_quant_algo and isinstance(layer, RadixAttention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(
+                prefix, self.exclude_modules, self.packed_modules_mapping
+            ) or self.is_layer_excluded(prefix):
+                return UnquantizedFusedMoEMethod(
+                    layer.use_triton_kernels, layer.use_flashinfer_trtllm_moe
+                )
             return Moe(self)
         return None
 
@@ -1146,13 +1175,13 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_scale_2 = layer.input_scale.max().to(torch.float32)
         weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
-        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
-        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
-        layer.alpha = Parameter(
-            layer.input_scale * layer.weight_scale_2, requires_grad=False
+
+        # Keep per-shard scales intact for hot reload; derive scalar params below.
+        _copy_or_rebind_param(
+            layer, "alpha", (input_scale_2 * weight_scale_2).to(torch.float32)
         )
-        layer.input_scale_inv = Parameter(
-            (1 / input_scale_2).to(torch.float32), requires_grad=False
+        _copy_or_rebind_param(
+            layer, "input_scale_inv", (1 / input_scale_2).to(torch.float32)
         )
         if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
@@ -1171,8 +1200,8 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
                 .view(torch.float8_e4m3fn)
             )
 
-            layer.weight_scale_interleaved = Parameter(scale, requires_grad=False)
-            layer.weight = Parameter(weight, requires_grad=False)
+            _copy_or_rebind_param(layer, "weight_scale_interleaved", scale)
+            _copy_or_rebind_param(layer, "weight", weight)
             return
         # Pad and blockwise interleave weight_scale
         scales = layer.weight_scale
@@ -1197,7 +1226,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             if scale_ndim == 2
             else padded_scales.reshape(B, M_padded, K_padded)
         )
-        layer.weight_scale_interleaved = Parameter(padded_scales, requires_grad=False)
+        _copy_or_rebind_param(layer, "weight_scale_interleaved", padded_scales)
 
     def apply(
         self,
@@ -1211,7 +1240,13 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         output_shape = [x_m, w_n]
 
         # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_scale_interleaved = fp4_quantize(x, layer.input_scale_inv)
+        input_scale_inv = layer.input_scale_inv
+        alpha = layer.alpha
+        if nvfp4_online_scale_enabled():
+            input_scale, input_scale_inv = nvfp4_compute_input_scale_and_inv(x)
+            alpha = input_scale * layer.weight_scale_2
+
+        x_fp4, x_scale_interleaved = fp4_quantize(x, input_scale_inv)
 
         assert x_fp4.dtype == torch.uint8
         assert layer.weight.dtype == torch.uint8
@@ -1228,7 +1263,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             w,
             x_scale_interleaved,
             w_scale_interleaved,
-            layer.alpha,
+            alpha,
             output_dtype,
             w_n,
         )
@@ -1411,19 +1446,22 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         # GEMM 1 scale processing
         if layer.moe_runner_config.is_gated:
-            if not torch.allclose(
-                layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-            ):
-                logger.warning_once(
-                    "w1_weight_scale_2 must match w3_weight_scale_2. "
-                    "Accuracy may be affected."
-                )
+            if layer.w13_weight_scale_2.dim() == 1:
+                # Some checkpoints store a shared scale for w1/w3.
+                w13_weight_scale_2 = layer.w13_weight_scale_2
+            else:
+                if layer.w13_weight_scale_2.shape[1] >= 2 and not torch.allclose(
+                    layer.w13_weight_scale_2[:, 0],
+                    layer.w13_weight_scale_2[:, 1],
+                ):
+                    logger.warning_once(
+                        "w1_weight_scale_2 must match w3_weight_scale_2. "
+                        "Accuracy may be affected."
+                    )
 
-            w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+                w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         else:
             w13_weight_scale_2 = layer.w13_weight_scale_2[:]
-        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
-
         # Calculate input scales based on strategy
         if self.enable_flashinfer_cutlass_moe or self.enable_flashinfer_trtllm_moe:
             w13_input_scale = layer.w13_input_scale.max().to(torch.float32)
@@ -1464,19 +1502,25 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             w2_input_scale = layer.w2_input_scale
 
         # Create shared parameters
-        layer.g1_alphas = Parameter(
+        _copy_or_rebind_param(
+            layer,
+            "g1_alphas",
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
-            requires_grad=False,
         )
-        layer.g2_alphas = Parameter(
+        _copy_or_rebind_param(
+            layer,
+            "g2_alphas",
             (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
-            requires_grad=False,
         )
-        layer.w13_input_scale_quant = Parameter(
-            (1 / w13_input_scale).to(torch.float32), requires_grad=False
+        _copy_or_rebind_param(
+            layer,
+            "w13_input_scale_quant",
+            (1 / w13_input_scale).to(torch.float32),
         )
-        layer.w2_input_scale_quant = Parameter(
-            (1 / w2_input_scale).to(torch.float32), requires_grad=False
+        _copy_or_rebind_param(
+            layer,
+            "w2_input_scale_quant",
+            (1 / w2_input_scale).to(torch.float32),
         )
 
         layer.dispatcher.set_quant_config(
@@ -1540,40 +1584,36 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             )
 
             # Set flashinfer parameters
-            layer.gemm1_weights_fp4_shuffled = Parameter(
-                gemm1_weights_fp4_shuffled, requires_grad=False
+            _copy_or_rebind_param(
+                layer, "gemm1_weights_fp4_shuffled", gemm1_weights_fp4_shuffled
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
+            _copy_or_rebind_param(
+                layer, "gemm2_weights_fp4_shuffled", gemm2_weights_fp4_shuffled
             )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
-                gemm1_scales_fp4_shuffled, requires_grad=False
+            _copy_or_rebind_param(
+                layer, "gemm1_scales_fp4_shuffled", gemm1_scales_fp4_shuffled
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
-                gemm2_scales_fp4_shuffled, requires_grad=False
+            _copy_or_rebind_param(
+                layer, "gemm2_scales_fp4_shuffled", gemm2_scales_fp4_shuffled
             )
 
             # Additional parameter needed for TRT-LLM
-            layer.g1_scale_c = Parameter(
+            _copy_or_rebind_param(
+                layer,
+                "g1_scale_c",
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
-                requires_grad=False,
             )
 
-            # Clean up weights that won't be used by TRT-LLM
-            del (
-                layer.w2_weight,
-                layer.w2_weight_scale,
-                layer.w13_weight,
-                layer.w13_weight_scale,
-            )
+            # Keep original weights/scales to support update_weights_from_disk.
 
         else:
             # CUTLASS processing - handle w13 and w2 separately
 
             # Process w13 weights
             w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
-            del layer.w13_weight_scale
-            layer.w13_blockscale_swizzled.data.copy_(w13_blockscale_swizzled)
+            _copy_or_rebind_param(
+                layer, "w13_blockscale_swizzled", w13_blockscale_swizzled
+            )
 
             w13_weight = layer.w13_weight
             intermediate_size_pad = w13_blockscale_swizzled.size(1) - w13_weight.size(1)
@@ -1585,46 +1625,62 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                     "but padding is also implemented for gated activations"
                 )
 
-                layer.w13_weight = Parameter(
+                _copy_or_rebind_param(
+                    layer,
+                    "w13_weight",
                     torch.nn.functional.pad(
                         w13_weight, (0, 0, 0, intermediate_size_pad)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_weight = Parameter(
+                _copy_or_rebind_param(
+                    layer,
+                    "w2_weight",
                     torch.nn.functional.pad(
                         layer.w2_weight, (0, intermediate_size_pad // 2, 0, 0)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_weight_scale = Parameter(
+                _copy_or_rebind_param(
+                    layer,
+                    "w2_weight_scale",
                     torch.nn.functional.pad(
                         layer.w2_weight_scale, (0, intermediate_size_pad // 16)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_blockscale_swizzled = Parameter(
-                    swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
-                )
-
-            layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
 
             # Process w2 weights
             w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
-            del layer.w2_weight_scale
-            layer.w2_blockscale_swizzled.data.copy_(w2_blockscale_swizzled)
+            _copy_or_rebind_param(
+                layer, "w2_blockscale_swizzled", w2_blockscale_swizzled
+            )
 
             # Both flashinfer cutlass and regular cutlass use same processing for w2
 
-            # Set up CUTLASS MoE parameters
+            # Set up CUTLASS MoE parameters (reuse to keep CUDA graph stable)
             device = layer.w13_weight.device
-            layer.cutlass_moe_params = CutlassMoEParams(
-                CutlassMoEType.BlockscaledFP4,
-                device,
-                num_experts=layer.num_experts,  # global num experts
-                intermediate_size_per_partition=layer.w2_weight.shape[2] * 2,  # n
-                hidden_size=layer.w13_weight.shape[2] * 2,
-            )  # k
+            inter_size = layer.w2_weight.shape[2] * 2
+            hidden_size = layer.w13_weight.shape[2] * 2
+            existing_params = getattr(layer, "cutlass_moe_params", None)
+            if (
+                existing_params is None
+                or existing_params.cutlass_moe_type != CutlassMoEType.BlockscaledFP4
+                or existing_params.num_experts != layer.num_experts
+                or existing_params.intermediate_size_per_partition != inter_size
+                or existing_params.hidden_size != hidden_size
+                or existing_params.device != device
+            ):
+                layer.cutlass_moe_params = CutlassMoEParams(
+                    CutlassMoEType.BlockscaledFP4,
+                    device,
+                    num_experts=layer.num_experts,  # global num experts
+                    intermediate_size_per_partition=inter_size,  # n
+                    hidden_size=hidden_size,
+                )  # k
+
+        # Preallocate online-scale buffers to avoid cuda graph capture allocations.
+        layer.nvfp4_online_w13_input_scale_quant = torch.empty_like(
+            layer.w13_input_scale_quant
+        )
+        layer.nvfp4_online_g1_alphas = torch.empty_like(layer.g1_alphas)
 
     @property
     def load_up_proj_weight_first(self) -> bool:
@@ -1667,6 +1723,37 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             # TRTLLM Cutlass moe takes in activations in BF16/Half/nvfp4 precision
             # and fp4 quantized weights loaded from the checkpoint
             topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
+            w13_input_scale_quant = layer.w13_input_scale_quant
+            g1_alphas = layer.g1_alphas
+            if nvfp4_online_scale_enabled():
+                input_scale_inv = getattr(
+                    layer.dispatcher, "last_input_scale_inv", None
+                )
+                if input_scale_inv is None:
+                    _, input_scale_inv = nvfp4_compute_input_scale_and_inv(x)
+                if hasattr(layer, "nvfp4_online_w13_input_scale_quant"):
+                    w13_input_scale_quant = layer.nvfp4_online_w13_input_scale_quant
+                    w13_input_scale_quant.copy_(
+                        input_scale_inv.expand_as(w13_input_scale_quant)
+                    )
+                else:
+                    w13_input_scale_quant = torch.full_like(
+                        layer.w13_input_scale_quant, input_scale_inv
+                    )
+                input_scale = torch.where(
+                    input_scale_inv > 0,
+                    1.0 / input_scale_inv,
+                    input_scale_inv,
+                )
+                if hasattr(layer, "nvfp4_online_g1_alphas"):
+                    g1_alphas = layer.nvfp4_online_g1_alphas
+                    g1_alphas.copy_(layer.g1_alphas)
+                    g1_alphas.mul_(layer.w13_input_scale_quant)
+                    g1_alphas.mul_(input_scale)
+                else:
+                    g1_alphas = input_scale * (
+                        layer.g1_alphas * layer.w13_input_scale_quant
+                    )
 
             output_dtype = torch.bfloat16
 
@@ -1695,9 +1782,9 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                 output_dtype=output_dtype,
                 input_sf=x_sf,
                 quant_scales=[
-                    layer.w13_input_scale_quant,
+                    w13_input_scale_quant,
                     layer.w13_blockscale_swizzled.view(torch.int32),
-                    layer.g1_alphas,
+                    g1_alphas,
                     layer.w2_input_scale_quant,
                     layer.w2_blockscale_swizzled.view(torch.int32),
                     layer.g2_alphas,
