@@ -278,6 +278,7 @@ set(SOURCES
     "csrc/expert_specialization/es_sm100_mxfp8_blockscaled_group_quant.cu"
 
     "csrc/gemm/awq_kernel.cu"
+    "csrc/gemm/bf16_bf16_fp32_nosplitk_cublaslt_gemm.cu"
     "csrc/gemm/bmm_fp8.cu"
     "csrc/gemm/dsv3_fused_a_gemm.cu"
     "csrc/gemm/dsv3_router_gemm_bf16_out.cu"

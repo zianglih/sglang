@@ -171,6 +171,9 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.def("dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   m.impl("dsv3_fused_a_gemm", torch::kCUDA, &dsv3_fused_a_gemm);
 
+  m.def("bf16_bf16_fp32_nosplitk_cublaslt_gemm(Tensor! output, Tensor mat_a, Tensor mat_b, int cublas_handle) -> ()");
+  m.impl("bf16_bf16_fp32_nosplitk_cublaslt_gemm", torch::kCUDA, &bf16_bf16_fp32_nosplitk_cublaslt_gemm);
+
   // Compute NVFP4 experts quantization.
   m.def(
       "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"

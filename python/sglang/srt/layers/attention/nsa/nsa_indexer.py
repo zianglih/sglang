@@ -18,7 +18,14 @@ _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
 _is_fp8_fnuz = is_fp8_fnuz()
+sgl_bf16_weights_proj_nosplitk_gemm = None
 if _is_cuda:
+    try:
+        from sgl_kernel import (
+            bf16_bf16_fp32_nosplitk_cublaslt_gemm as sgl_bf16_weights_proj_nosplitk_gemm,
+        )
+    except ImportError:
+        sgl_bf16_weights_proj_nosplitk_gemm = None
     try:
         import deep_gemm
     except ImportError as e:
@@ -233,8 +240,17 @@ class Indexer(MultiPlatformOp):
     def _project_and_scale_head_gates(self, x: torch.Tensor):
         if _is_hip:
             x = x.to(self.weights_proj.weight.dtype)
-        weights, _ = self.weights_proj(x)
-        weights = weights.float()
+        use_bf16_weights_proj_nosplitk_gemm = (
+            sgl_bf16_weights_proj_nosplitk_gemm is not None
+            and x.dtype == torch.bfloat16
+            and self.weights_proj.weight.dtype == torch.bfloat16
+        )
+        if use_bf16_weights_proj_nosplitk_gemm:
+            x = x if x.is_contiguous() else x.contiguous()
+            weights = sgl_bf16_weights_proj_nosplitk_gemm(x, self.weights_proj.weight)
+        else:
+            weights, _ = self.weights_proj(x)
+            weights = weights.float()
         weights = weights * self.n_heads**-0.5
         return weights
 
@@ -242,8 +258,17 @@ class Indexer(MultiPlatformOp):
     def _get_logits_head_gate(self, x: torch.Tensor, q_scale: torch.Tensor):
         if _is_hip:
             x = x.to(self.weights_proj.weight.dtype)
-        weights, _ = self.weights_proj(x)
-        weights = weights.float()
+        use_bf16_weights_proj_nosplitk_gemm = (
+            sgl_bf16_weights_proj_nosplitk_gemm is not None
+            and x.dtype == torch.bfloat16
+            and self.weights_proj.weight.dtype == torch.bfloat16
+        )
+        if use_bf16_weights_proj_nosplitk_gemm:
+            x = x if x.is_contiguous() else x.contiguous()
+            weights = sgl_bf16_weights_proj_nosplitk_gemm(x, self.weights_proj.weight)
+        else:
+            weights, _ = self.weights_proj(x)
+            weights = weights.float()
         weights = weights * self.n_heads**-0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         return weights

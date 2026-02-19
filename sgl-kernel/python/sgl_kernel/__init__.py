@@ -41,6 +41,8 @@ from sgl_kernel.expert_specialization import (
 from sgl_kernel.fused_moe import moe_wna16_marlin_gemm
 from sgl_kernel.gemm import (
     awq_dequantize,
+    bf16_bf16_fp32_nosplitk_cublaslt_gemm,
+    bf16_gemm_fp32,
     bmm_fp8,
     cutlass_scaled_fp4_mm,
     dsv3_fused_a_gemm,

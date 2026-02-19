@@ -82,6 +82,28 @@ def bmm_fp8(
     return out
 
 
+def bf16_bf16_fp32_nosplitk_cublaslt_gemm(
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty(
+            (mat_a.shape[0], mat_b.shape[0]),
+            device=mat_a.device,
+            dtype=torch.float32,
+        )
+    cublas_handle = torch.cuda.current_blas_handle()
+    torch.ops.sgl_kernel.bf16_bf16_fp32_nosplitk_cublaslt_gemm.default(
+        out, mat_a, mat_b, cublas_handle
+    )
+    return out
+
+
+# Backward-compatible alias.
+bf16_gemm_fp32 = bf16_bf16_fp32_nosplitk_cublaslt_gemm
+
+
 def dsv3_fused_a_gemm(
     mat_a: torch.Tensor,
     mat_b: torch.Tensor,
