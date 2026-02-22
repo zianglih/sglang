@@ -156,13 +156,21 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
     """MoE method without quantization."""
 
     def __init__(
-        self, use_triton_kernels: bool = False, use_flashinfer_trtllm_moe: bool = False
+        self,
+        use_triton_kernels: bool = False,
+        use_flashinfer_trtllm_moe: bool = False,
+        runner_backend: Optional[MoeRunnerBackend] = None,
     ):
         super().__init__()
-        self.use_flashinfer_cutlass = get_moe_runner_backend().is_flashinfer_cutlass()
-        self.use_triton_kernels = use_triton_kernels
+        self.runner_backend = runner_backend or get_moe_runner_backend()
+        self.use_flashinfer_cutlass = self.runner_backend.is_flashinfer_cutlass()
+        if runner_backend is None:
+            self.use_triton_kernels = use_triton_kernels
+            self.use_flashinfer_trtllm_moe = use_flashinfer_trtllm_moe
+        else:
+            self.use_triton_kernels = self.runner_backend.is_triton_kernels()
+            self.use_flashinfer_trtllm_moe = self.runner_backend.is_flashinfer_trtllm()
         self.with_bias = False
-        self.use_flashinfer_trtllm_moe = use_flashinfer_trtllm_moe
         self._cache_permute_indices = dict({})
 
     def create_weights(
@@ -226,7 +234,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Skip aiter weight shuffle when using non-auto MoE backend (e.g., triton, triton_kernels)
         # because aiter CK kernels don't support all GEMM dimensions
-        _should_use_aiter_moe = _use_aiter and get_moe_runner_backend().is_auto()
+        _should_use_aiter_moe = _use_aiter and self.runner_backend.is_auto()
         if _should_use_aiter_moe:
             layer.w13_weight = torch.nn.Parameter(
                 shuffle_weight(layer.w13_weight.data, (16, 16)),
@@ -388,7 +396,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         else:
             # Skip aiter fused_moe when using non-auto MoE backend (e.g., triton, triton_kernels)
             # because aiter CK kernels don't support all GEMM dimensions
-            _should_use_aiter_moe = _use_aiter and get_moe_runner_backend().is_auto()
+            _should_use_aiter_moe = _use_aiter and self.runner_backend.is_auto()
             if _should_use_aiter_moe:
                 assert not moe_runner_config.no_combine, "unsupported"
                 topk_weights, topk_ids, _ = topk_output

@@ -79,6 +79,7 @@ class FlashinferDispatcher(BaseDispatcher):
         num_local_experts: int = None,  # Unused
         hidden_size: int = None,
         params_dtype: torch.dtype = None,  # Unused
+        layer_id: Optional[int] = None,
     ):
         super().__init__()
         if not use_flashinfer:
@@ -93,9 +94,12 @@ class FlashinferDispatcher(BaseDispatcher):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
+        self.layer_id = layer_id
 
         # TODO: Can other moe runners use payload_in_workspace too?
-        self.payload_in_workspace = get_moe_runner_backend().is_flashinfer_cutlass()
+        self.payload_in_workspace = get_moe_runner_backend(
+            layer_id=self.layer_id
+        ).is_flashinfer_cutlass()
 
         # TODO: Can this be a server arg and shared with deepep/mooncakeep?
         self.max_num_tokens = (

@@ -490,6 +490,7 @@ class ServerArgs:
         "none", "deepep", "mooncake", "mori", "ascend_fuseep", "flashinfer"
     ] = "none"
     moe_runner_backend: str = "auto"
+    bf16_moe_runner_backend: Optional[str] = None
     flashinfer_mxfp4_moe_precision: Literal["default", "bf16"] = "default"
     enable_flashinfer_allreduce_fusion: bool = False
     deepep_mode: Literal["auto", "normal", "low_latency"] = "auto"
@@ -4017,6 +4018,13 @@ class ServerArgs:
             choices=MOE_RUNNER_BACKEND_CHOICES,
             default=ServerArgs.moe_runner_backend,
             help="Choose the runner backend for MoE.",
+        )
+        parser.add_argument(
+            "--bf16-moe-runner-backend",
+            type=str,
+            choices=MOE_RUNNER_BACKEND_CHOICES,
+            default=ServerArgs.bf16_moe_runner_backend,
+            help="Override MoE runner backend for BF16 MoE layers.",
         )
         parser.add_argument(
             "--flashinfer-mxfp4-moe-precision",

@@ -131,6 +131,7 @@ class DeepEPMode(Enum):
 
 MOE_A2A_BACKEND: Optional[MoeA2ABackend] = None
 MOE_RUNNER_BACKEND: Optional[MoeRunnerBackend] = None
+MOE_RUNNER_BACKEND_BY_LAYER: dict[int, MoeRunnerBackend] = {}
 SPECULATIVE_MOE_RUNNER_BACKEND: Optional[MoeRunnerBackend] = None
 SPECULATIVE_MOE_A2A_BACKEND: Optional[MoeA2ABackend] = None
 DEEPEP_MODE: Optional[DeepEPMode] = None
@@ -154,6 +155,7 @@ def initialize_moe_config(server_args: ServerArgs):
     global TBO_TOKEN_DISTRIBUTION_THRESHOLD
     global DISABLE_FLASHINFER_CUTLASS_MOE_FP4_ALLGATHER
     global MOE_QUANTIZATION
+    global MOE_RUNNER_BACKEND_BY_LAYER
 
     MOE_A2A_BACKEND = MoeA2ABackend(server_args.moe_a2a_backend)
     MOE_RUNNER_BACKEND = MoeRunnerBackend(server_args.moe_runner_backend)
@@ -176,6 +178,7 @@ def initialize_moe_config(server_args: ServerArgs):
         server_args.disable_flashinfer_cutlass_moe_fp4_allgather
     )
     MOE_QUANTIZATION = server_args.quantization
+    MOE_RUNNER_BACKEND_BY_LAYER = {}
 
 
 def get_moe_a2a_backend() -> MoeA2ABackend:
@@ -185,8 +188,29 @@ def get_moe_a2a_backend() -> MoeA2ABackend:
     return MOE_A2A_BACKEND
 
 
-def get_moe_runner_backend() -> MoeRunnerBackend:
+def register_moe_runner_backend_for_layer(
+    layer_id: Optional[int], backend: MoeRunnerBackend
+) -> None:
+    if layer_id is None:
+        return
+    existing = MOE_RUNNER_BACKEND_BY_LAYER.get(layer_id)
+    if existing is not None and existing != backend:
+        logger.warning(
+            "MoE runner backend mismatch for layer_id=%s: %s -> %s. Using %s.",
+            layer_id,
+            existing.value,
+            backend.value,
+            backend.value,
+        )
+    MOE_RUNNER_BACKEND_BY_LAYER[layer_id] = backend
+
+
+def get_moe_runner_backend(layer_id: Optional[int] = None) -> MoeRunnerBackend:
     global MOE_RUNNER_BACKEND
+    if layer_id is not None:
+        backend = MOE_RUNNER_BACKEND_BY_LAYER.get(layer_id)
+        if backend is not None:
+            return backend
     if MOE_RUNNER_BACKEND is None:
         MOE_RUNNER_BACKEND = MoeRunnerBackend.AUTO
     return MOE_RUNNER_BACKEND
@@ -263,14 +287,16 @@ def filter_moe_weight_param_global_expert(name, x, num_local_experts):
     )
 
 
-def should_use_flashinfer_cutlass_moe_fp4_allgather():
+def should_use_flashinfer_cutlass_moe_fp4_allgather(
+    layer_id: Optional[int] = None,
+):
     """
     Perform FP4 quantize before all-gather for flashinfer cutlass moe to reduce communication cost for high-throughput serving.
     """
     return (
         not DISABLE_FLASHINFER_CUTLASS_MOE_FP4_ALLGATHER
         and get_moe_a2a_backend().is_none()
-        and get_moe_runner_backend().is_flashinfer_cutlass()
+        and get_moe_runner_backend(layer_id=layer_id).is_flashinfer_cutlass()
         and is_dp_attention_enabled()
         and MOE_QUANTIZATION == "modelopt_fp4"
         and get_moe_expert_parallel_world_size() == get_attention_dp_size()

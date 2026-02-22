@@ -26,10 +26,12 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
 from sglang.srt.eplb.expert_location import get_global_expert_location_metadata
 from sglang.srt.layers.dp_attention import is_allocation_symmetric
 from sglang.srt.layers.moe import (
+    MoeRunnerBackend,
     MoeRunnerConfig,
     get_deepep_mode,
     get_moe_a2a_backend,
     get_moe_runner_backend,
+    register_moe_runner_backend_for_layer,
 )
 from sglang.srt.layers.moe.kt_ep_wrapper import (
     KTEPWrapperMethod,
@@ -141,6 +143,7 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
             num_experts=moe_runner_config.num_experts,
             num_local_experts=moe_runner_config.num_local_experts,
             hidden_size=moe_runner_config.hidden_size,
+            layer_id=moe_runner_config.layer_id,
         )
     else:
         raise NotImplementedError(f"Unsupported a2a backend: {a2a_backend}")
@@ -205,13 +208,10 @@ class FusedMoE(torch.nn.Module):
 
         self.layer_id = layer_id
         self.top_k = top_k
-        self.hidden_size = hidden_size
         self.num_experts = num_experts
         self.num_fused_shared_experts = num_fused_shared_experts
-
-        self.enable_flashinfer_cutlass_moe = (
-            get_moe_runner_backend().is_flashinfer_cutlass()
-        )
+        self.quant_config = quant_config
+        self._hidden_size_raw = hidden_size
         self.moe_ep_size = get_moe_expert_parallel_world_size()
         self.moe_ep_rank = get_moe_expert_parallel_rank()
         self.moe_tp_size = get_moe_tensor_parallel_world_size()
@@ -224,38 +224,65 @@ class FusedMoE(torch.nn.Module):
         self.expert_mask_gpu = None
 
         assert intermediate_size % self.moe_tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.moe_tp_size
+        self._intermediate_size_per_partition_raw = (
+            intermediate_size // self.moe_tp_size
+        )
         self.reduce_results = reduce_results
         self.use_presharded_weights = use_presharded_weights
+        self._apply_moe_runner_backend_config(get_moe_runner_backend())
 
-        self.use_triton_kernels = get_moe_runner_backend().is_triton_kernels()
-        self.use_flashinfer_trtllm_moe = get_moe_runner_backend().is_flashinfer_trtllm()
+        self.quant_method: Optional[FusedMoEMethodBase] = None
+        server_args = get_global_server_args()
+        kt_config = create_kt_config_from_server_args(server_args, layer_id)
+        if kt_config is not None:
+            if quant_config is not None:
+                gpu_method = quant_config.get_quant_method(self, prefix)
+            else:
+                gpu_method = UnquantizedFusedMoEMethod(
+                    self.use_triton_kernels,
+                    self.use_flashinfer_trtllm_moe,
+                    runner_backend=self.moe_runner_backend,
+                )
+            self.quant_method = KTEPWrapperMethod(gpu_method, kt_config)
+        else:
+            if quant_config is not None:
+                self.quant_method = quant_config.get_quant_method(self, prefix)
+            if self.quant_method is None:
+                self.quant_method = UnquantizedFusedMoEMethod(
+                    self.use_triton_kernels,
+                    self.use_flashinfer_trtllm_moe,
+                    runner_backend=self.moe_runner_backend,
+                )
 
-        # flashinfer_trtllm kernel requires intermediate_size to be a multiple of 128
-        # Pad the intermediate_size_per_partition if necessary
-        if (
-            self.use_flashinfer_trtllm_moe
-            and self.intermediate_size_per_partition % 128 != 0
-        ):
-            self.intermediate_size_per_partition = round_up(
-                self.intermediate_size_per_partition, 128
-            )
-
-        self.quant_config = quant_config
-        self.use_flashinfer_mxfp4_moe = get_moe_runner_backend().is_flashinfer_mxfp4()
-        # TODO maybe we should remove this `if`, since `Mxfp4MoEMethod` does another round-up logic
-        if (
-            self.quant_config is not None
-            and self.quant_config.get_name() == "mxfp4"
-            and self.use_flashinfer_mxfp4_moe
-        ):
-            hidden_size = round_up(hidden_size, 256)
-        self.hidden_size = hidden_size
+        bf16_backend = server_args.bf16_moe_runner_backend
+        is_unquantized = isinstance(self.quant_method, UnquantizedFusedMoEMethod) or (
+            isinstance(self.quant_method, KTEPWrapperMethod)
+            and isinstance(self.quant_method.gpu_method, UnquantizedFusedMoEMethod)
+        )
+        if bf16_backend is not None and is_unquantized:
+            override_backend = MoeRunnerBackend(bf16_backend)
+            if override_backend != self.moe_runner_backend:
+                self._apply_moe_runner_backend_config(override_backend)
+                if kt_config is not None:
+                    self.quant_method = KTEPWrapperMethod(
+                        UnquantizedFusedMoEMethod(
+                            self.use_triton_kernels,
+                            self.use_flashinfer_trtllm_moe,
+                            runner_backend=self.moe_runner_backend,
+                        ),
+                        kt_config,
+                    )
+                else:
+                    self.quant_method = UnquantizedFusedMoEMethod(
+                        self.use_triton_kernels,
+                        self.use_flashinfer_trtllm_moe,
+                        runner_backend=self.moe_runner_backend,
+                    )
 
         self.moe_runner_config = MoeRunnerConfig(
             num_experts=num_experts,
             num_local_experts=self.num_local_experts,
-            hidden_size=hidden_size,
+            hidden_size=self.hidden_size,
             intermediate_size_per_partition=self.intermediate_size_per_partition,
             layer_id=layer_id,
             top_k=top_k,
@@ -271,28 +298,12 @@ class FusedMoE(torch.nn.Module):
             is_gated=is_gated,
             routing_method_type=routing_method_type,
         )
-
-        self.quant_method: Optional[FusedMoEMethodBase] = None
-        server_args = get_global_server_args()
-        kt_config = create_kt_config_from_server_args(server_args, layer_id)
-        if kt_config is not None:
-            if quant_config is not None:
-                gpu_method = quant_config.get_quant_method(self, prefix)
-            else:
-                gpu_method = UnquantizedFusedMoEMethod(self.use_triton_kernels)
-            self.quant_method = KTEPWrapperMethod(gpu_method, kt_config)
-        else:
-            if quant_config is not None:
-                self.quant_method = quant_config.get_quant_method(self, prefix)
-            if self.quant_method is None:
-                self.quant_method = UnquantizedFusedMoEMethod(
-                    self.use_triton_kernels, self.use_flashinfer_trtllm_moe
-                )
+        register_moe_runner_backend_for_layer(self.layer_id, self.moe_runner_backend)
 
         self.quant_method.create_weights(
             layer=self,
             num_experts=self.num_local_experts,
-            hidden_size=hidden_size,
+            hidden_size=self.hidden_size,
             intermediate_size_per_partition=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
             weight_loader=(
@@ -310,7 +321,7 @@ class FusedMoE(torch.nn.Module):
             self.quant_method, ModelOptNvFp4FusedMoEMethod
         ) or (
             isinstance(self.quant_method, Fp8MoEMethod)
-            and get_moe_runner_backend().is_cutlass()
+            and self.moe_runner_backend.is_cutlass()
         )
 
         self.routing_method_type = routing_method_type
@@ -321,6 +332,30 @@ class FusedMoE(torch.nn.Module):
 
         if self.quant_method is not None and hasattr(self.quant_method, "runner"):
             self.runner = self.quant_method.runner
+
+    def _apply_moe_runner_backend_config(self, backend: MoeRunnerBackend) -> None:
+        self.moe_runner_backend = backend
+        self.enable_flashinfer_cutlass_moe = backend.is_flashinfer_cutlass()
+        self.use_triton_kernels = backend.is_triton_kernels()
+        self.use_flashinfer_trtllm_moe = backend.is_flashinfer_trtllm()
+        self.use_flashinfer_mxfp4_moe = backend.is_flashinfer_mxfp4()
+
+        self.intermediate_size_per_partition = self._intermediate_size_per_partition_raw
+        if (
+            self.use_flashinfer_trtllm_moe
+            and self.intermediate_size_per_partition % 128 != 0
+        ):
+            self.intermediate_size_per_partition = round_up(
+                self.intermediate_size_per_partition, 128
+            )
+
+        self.hidden_size = self._hidden_size_raw
+        if (
+            self.quant_config is not None
+            and self.quant_config.get_name() == "mxfp4"
+            and self.use_flashinfer_mxfp4_moe
+        ):
+            self.hidden_size = round_up(self.hidden_size, 256)
 
     def _load_per_tensor_weight_scale(
         self,

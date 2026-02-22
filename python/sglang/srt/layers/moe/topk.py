@@ -279,11 +279,11 @@ class TopK(MultiPlatformOp):
     ) -> TopKOutput:
         if self.topk_config.output_format is not None:
             output_format = self.topk_config.output_format
-        elif get_moe_runner_backend().is_triton_kernels():
+        elif get_moe_runner_backend(layer_id=self.layer_id).is_triton_kernels():
             output_format = TopKOutputFormat.TRITON_KERNEL
         elif (
-            get_moe_runner_backend().is_flashinfer_trtllm()
-            or get_moe_runner_backend().is_flashinfer_mxfp4()
+            get_moe_runner_backend(layer_id=self.layer_id).is_flashinfer_trtllm()
+            or get_moe_runner_backend(layer_id=self.layer_id).is_flashinfer_mxfp4()
         ):
             output_format = TopKOutputFormat.BYPASSED
         else:
