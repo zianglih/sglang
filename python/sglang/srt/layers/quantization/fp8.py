@@ -49,11 +49,12 @@ from sglang.srt.layers.quantization.fp8_utils import (
     can_auto_enable_marlin_fp8,
     cutlass_fp8_supported,
     dispatch_w8a8_block_fp8_linear,
+    dispatch_w8a8_mxfp8_linear,
+    get_fp8_gemm_runner_backend,
     input_to_float8,
     mxfp8_group_quantize,
     normalize_e4m3fn_to_e4m3fnuz,
     requant_weight_ue8m0_inplace,
-    triton_mxfp8_blockscaled_linear,
 )
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
 from sglang.srt.layers.quantization.marlin_utils_fp8 import (
@@ -73,6 +74,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     is_cpu,
     is_cuda,
+    is_flashinfer_available,
     is_hip,
     is_npu,
     is_sm90_supported,
@@ -101,6 +103,9 @@ if _use_aiter or _use_hip_int4:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
+
+if is_flashinfer_available():
+    from flashinfer import block_scale_interleave as flashinfer_block_scale_interleave
 
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -247,7 +252,12 @@ class Fp8LinearMethod(LinearMethodBase):
         self.block_quant = (
             self.use_mxfp8 or self.quant_config.weight_block_size is not None
         )
-        self.w8a8_block_fp8_linear = dispatch_w8a8_block_fp8_linear()
+        self.w8a8_block_fp8_linear = None
+        self.w8a8_mxfp8_linear = None
+        if self.use_mxfp8:
+            self.w8a8_mxfp8_linear = dispatch_w8a8_mxfp8_linear()
+        else:
+            self.w8a8_block_fp8_linear = dispatch_w8a8_block_fp8_linear()
         self.is_checkpoint_fp8_serialized = (
             self.quant_config.is_checkpoint_fp8_serialized
         )
@@ -420,6 +430,7 @@ class Fp8LinearMethod(LinearMethodBase):
             # Keep parameter object to preserve weight_loader attrs for hot reload.
             layer.weight_scale_inv.requires_grad_(False)
             layer.weight_scale_inv.format_ue8m0 = True
+            self._process_mxfp8_linear_weight_scale(layer)
             return
         else:
             # For fp8 linear weights run with deepgemm, the weights and scales need be requantized to ue8m0
@@ -453,6 +464,34 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.weight.data = weight.data
         layer.weight_scale_inv.data = weight_scale.data
 
+    def _process_mxfp8_linear_weight_scale(self, layer: Module) -> None:
+        if not self.use_mxfp8:
+            return
+        if get_fp8_gemm_runner_backend().is_flashinfer_trtllm():
+            scale_u8 = layer.weight_scale_inv.data
+            new_swizzled = flashinfer_block_scale_interleave(
+                scale_u8.contiguous()
+            ).contiguous()
+        else:
+            # Triton path consumes canonical 2D UE8M0 scales directly.
+            return
+
+        cached_swizzled = getattr(layer, "weight_scale_inv_swizzled", None)
+        # Keep storage address stable when possible so CUDA graph captures remain valid.
+        if (
+            cached_swizzled is not None
+            and cached_swizzled.shape == new_swizzled.shape
+            and cached_swizzled.device == new_swizzled.device
+            and cached_swizzled.dtype == new_swizzled.dtype
+        ):
+            cached_swizzled.copy_(new_swizzled)
+        else:
+            layer.weight_scale_inv_swizzled = new_swizzled
+        layer._weight_scale_inv_swizzled_src_version = layer.weight_scale_inv._version
+        layer._weight_scale_inv_swizzled_src_data_ptr = (
+            layer.weight_scale_inv.data_ptr()
+        )
+
     def _quantize_mxfp8_weights(self, layer: Module) -> None:
         weight = layer.weight.data
         qweight, weight_scale = mxfp8_group_quantize(weight)
@@ -468,6 +507,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 "weight_scale_inv", Parameter(weight_scale, requires_grad=False)
             )
         layer.weight_scale_inv.format_ue8m0 = True
+        self._process_mxfp8_linear_weight_scale(layer)
         layer.input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -600,18 +640,22 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.use_mxfp8:
+            if get_fp8_gemm_runner_backend().is_flashinfer_trtllm():
+                weight_scale = layer.weight_scale_inv_swizzled
+            else:
+                weight_scale = layer.weight_scale_inv
             if isinstance(x, tuple):
-                return triton_mxfp8_blockscaled_linear(
+                return self.w8a8_mxfp8_linear(
                     input=x[0],
                     weight=layer.weight,
-                    weight_scale=layer.weight_scale_inv,
+                    weight_scale=weight_scale,
                     input_scale=x[1],
                     bias=bias,
                 )
-            return triton_mxfp8_blockscaled_linear(
+            return self.w8a8_mxfp8_linear(
                 input=x,
                 weight=layer.weight,
-                weight_scale=layer.weight_scale_inv,
+                weight_scale=weight_scale,
                 input_scale=None,
                 bias=bias,
             )
