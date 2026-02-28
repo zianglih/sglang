@@ -5,6 +5,7 @@ import logging
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+import regex as re
 import torch
 from torch.nn.parameter import Parameter
 
@@ -296,6 +297,11 @@ class ModelOptQuantConfig(QuantizationConfig):
         elif self.kv_cache_quant_algo and isinstance(layer, RadixAttention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
+            # Check if MoE layer should be excluded from quantization
+            # (e.g., MTP layers that have no quantization scales in checkpoint)
+            if self.is_layer_excluded(prefix):
+                # Falls back to default unquantized MoE
+                return None
             return Moe(self)
         return None
 
@@ -321,6 +327,54 @@ class ModelOptQuantConfig(QuantizationConfig):
                     expanded.append(name.removeprefix("language_model."))
             # Preserve order, drop duplicates.
             self.exclude_modules = list(dict.fromkeys(expanded))
+
+    def is_layer_excluded(self, prefix: str) -> bool:
+        """Check if a layer should be excluded from quantization.
+
+        Handles:
+        - Exact matches (e.g., "lm_head" matching prefix "lm_head")
+        - Glob-style wildcards (e.g., "mtp*" matching "mtp_layers")
+        - Part-by-part matching (split prefix on "." and check each part)
+        - language_model. prefix stripping for vision-language models
+        - Fused module patterns (e.g., "q_a_proj" in "fused_qkv_a_proj_with_mqa")
+        """
+        if not self.exclude_modules:
+            return False
+
+        # Build prefix variants: some models wrap layers under "language_model."
+        prefixes_to_check = [prefix]
+        if prefix.startswith("language_model."):
+            prefixes_to_check.append(prefix.removeprefix("language_model."))
+
+        # Fused module patterns: the exclude list may reference a sub-component
+        # (e.g., "q_a_proj") that is fused into a combined parameter name
+        # (e.g., "fused_qkv_a_proj_with_mqa"). We check if the last segment of
+        # the exclude pattern is a substring of the last segment of the prefix.
+        fused_patterns = {"q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj"}
+
+        for pattern in self.exclude_modules:
+            # Convert glob-style wildcard to regex (e.g., "mtp*" -> "mtp.*")
+            regex_str = pattern.replace(".", r"\.").replace("*", r".*")
+
+            for pfx in prefixes_to_check:
+                if re.fullmatch(regex_str, pfx):
+                    return True
+                # Part-by-part check: handles wildcards like "mtp*" matching
+                pfx_parts = pfx.split(".")
+                for part in pfx_parts:
+                    if re.fullmatch(regex_str, part):
+                        return True
+
+            # Check fused patterns: if the last segment of the exclude pattern
+            # is a known fused component, check if it appears in the prefix's
+            # last segment (handles fused_qkv_a_proj_with_mqa containing q_a_proj)
+            pattern_tail = pattern.rsplit(".", maxsplit=1)[-1]
+            if pattern_tail in fused_patterns:
+                for pfx in prefixes_to_check:
+                    if pattern_tail in pfx.rsplit(".", maxsplit=1)[-1]:
+                        return True
+
+        return False
 
 
 class ModelOptFp8Config(ModelOptQuantConfig):
@@ -377,19 +431,19 @@ class ModelOptFp8Config(ModelOptQuantConfig):
         quant_method = config.get("quant_algo")
         if quant_method is not None:
             # Flat format (config.json quantization_config)
-            # For kv_cache, check if kv_cache_scheme exists and extract algo
+            # Derive kv_cache quant from kv_cache_scheme dict
             kv_cache_scheme = config.get("kv_cache_scheme")
-            if (
-                kv_cache_scheme
-                and kv_cache_scheme.get("type") == "float"
-                and kv_cache_scheme.get("num_bits") == 8
-            ):
-                kv_cache_quant_method = "FP8"
+            if isinstance(kv_cache_scheme, dict):
+                if (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 8
+                ):
+                    kv_cache_quant_method = "FP8"
 
             # Map 'ignore' field to 'exclude_modules'
             exclude_modules = config.get("ignore")
         else:
-            # Fall back to nested format (hf_quant_config.json - legacy format)
+            # Fall back to nested format (hf_quant_config.json - will be deprecated)
             try:
                 quantization_section = cls.get_from_keys(config, ["quantization"])
                 quant_method = quantization_section.get("quant_algo")
@@ -416,18 +470,6 @@ class ModelOptFp8Config(ModelOptQuantConfig):
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
             packed_modules_mapping=config.get("packed_modules_mapping"),
-        )
-
-    def is_layer_excluded(self, prefix: str) -> bool:
-        if len(self.exclude_modules) == 0:
-            return False
-        return any(
-            module in prefix
-            or (
-                prefix.startswith("language_model.")
-                and module in prefix.removeprefix("language_model.")
-            )
-            for module in self.exclude_modules
         )
 
     def get_quant_method(
@@ -462,6 +504,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer: torch.nn.Module,
         input_size_per_partition: int,
         output_partition_sizes: List[int],
+        input_size: Optional[int],
+        output_size: Optional[int],
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
@@ -959,30 +1003,26 @@ class ModelOptFp4Config(ModelOptQuantConfig):
         quant_method = config.get("quant_algo")
         if quant_method is not None:
             # Flat format (config.json quantization_config)
-            # Note: FP4 models in config.json format may not have all the detailed fields
-            # that are present in hf_quant_config.json, so we need to handle defaults
-            kv_cache_quant_algo = config.get("kv_cache_quant_algo")
-            if not kv_cache_quant_algo:
-                # For config.json format, derive from kv_cache_scheme if available
-                kv_cache_scheme = config.get("kv_cache_scheme")
-                if isinstance(kv_cache_scheme, dict):
-                    if (
-                        kv_cache_scheme.get("type") == "float"
-                        and kv_cache_scheme.get("num_bits") == 8
-                    ):
-                        kv_cache_quant_algo = "FP8"
-                    else:
-                        kv_cache_quant_algo = "auto"
-                elif isinstance(kv_cache_scheme, str):
-                    scheme_name = kv_cache_scheme.strip().upper()
-                    if scheme_name in ("FP8", "FLOAT8"):
-                        kv_cache_quant_algo = "FP8"
-                    elif scheme_name in ("FP4", "FLOAT4", "NVFP4"):
-                        kv_cache_quant_algo = "NVFP4"
-                    else:
-                        kv_cache_quant_algo = "auto"
+            # Derive kv_cache_quant_algo from kv_cache_scheme dict
+            kv_cache_scheme = config.get("kv_cache_scheme")
+            if isinstance(kv_cache_scheme, dict):
+                if (
+                    kv_cache_scheme.get("type") == "float"
+                    and kv_cache_scheme.get("num_bits") == 8
+                ):
+                    kv_cache_quant_algo = "FP8"
                 else:
                     kv_cache_quant_algo = "auto"
+            elif isinstance(kv_cache_scheme, str):
+                scheme_name = kv_cache_scheme.strip().upper()
+                if scheme_name in ("FP8", "FLOAT8"):
+                    kv_cache_quant_algo = "FP8"
+                elif scheme_name in ("FP4", "FLOAT4", "NVFP4"):
+                    kv_cache_quant_algo = "NVFP4"
+                else:
+                    kv_cache_quant_algo = "auto"
+            else:
+                kv_cache_quant_algo = "auto"
 
             group_size = config.get("group_size")
             # If group_size is not at top level, try to extract from config_groups
@@ -1036,27 +1076,6 @@ class ModelOptFp4Config(ModelOptQuantConfig):
             exclude_modules,
             config.get("packed_modules_mapping"),
         )
-
-    def is_layer_excluded(self, prefix: str):
-        import regex as re
-
-        fused_patterns = ["q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj"]
-        prefix_split = prefix.split(".")
-        for pattern in self.exclude_modules:
-            regex_str = pattern.replace(".", r"\.").replace("*", r".*")
-            pattern_split = pattern.split(".")
-            if re.fullmatch(regex_str, prefix):
-                return True
-            elif (
-                pattern_split[-1] in fused_patterns
-                and pattern_split[-1] in prefix_split[-1]
-            ):
-                # Check if the last part of the excluded pattern is contained in the last part of the prefix
-                # This handles fused modules like fused_qkv_a_proj_with_mqa that contain q_a_proj and kv_a_proj_with_mqa
-                # e.g., model.layers.{i}.self_attn.{fused_weight_name}
-                assert len(prefix_split) == 5 and len(pattern_split) == 5
-                return True
-        return False
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         return self._get_quant_method(
@@ -1162,20 +1181,6 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_scale_2 = layer.input_scale.max().to(torch.float32)
         weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
-<<<<<<< HEAD
-        layer.input_scale = Parameter(input_scale_2, requires_grad=False)
-        layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
-        layer.alpha = Parameter(
-            layer.input_scale * layer.weight_scale_2, requires_grad=False
-        )
-        layer.input_scale_inv = Parameter(
-            (1 / input_scale_2).to(torch.float32), requires_grad=False
-        )
-
-        # Store original output size before any padding
-        layer.output_size_per_partition = layer.weight.shape[0]
-
-=======
 
         # Keep per-shard scales intact for hot reload; derive scalar params below.
         copy_or_rebind_param(
@@ -1184,11 +1189,10 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         copy_or_rebind_param(
             layer, "input_scale_inv", (1 / input_scale_2).to(torch.float32)
         )
-<<<<<<< HEAD
-        _copy_or_rebind_param("input_scale_inv", (1 / input_scale_2).to(torch.float32))
->>>>>>> 5de29a224 (Try fix CUDA graph.)
-=======
->>>>>>> 0b1369f57 (Refactor and clean up.)
+
+        # Store original output size before any padding
+        layer.output_size_per_partition = layer.weight.shape[0]
+
         if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
@@ -1235,35 +1239,15 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
                 .view(torch.float8_e4m3fn)
             )
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-            layer.weight_scale_interleaved = Parameter(scale, requires_grad=False)
-            layer.weight = Parameter(weight, requires_grad=False)
-            layer.weights_padding_cols = weights_padding_cols
-=======
-            _copy_or_rebind_param("weight_scale_interleaved", scale)
-            _copy_or_rebind_param("weight", weight)
->>>>>>> 5de29a224 (Try fix CUDA graph.)
-=======
-            _copy_or_rebind_param(layer, "weight_scale_interleaved", scale)
-            _copy_or_rebind_param(layer, "weight", weight)
->>>>>>> 0b1369f57 (Refactor and clean up.)
-=======
             copy_or_rebind_param(layer, "weight_scale_interleaved", scale)
             copy_or_rebind_param(layer, "weight", weight)
             layer.weights_padding_cols = weights_padding_cols
->>>>>>> 865254426 (Move `copy_or_rebind_param` to layers util)
             return
 
         # Pad weights for CUTLASS/FlashInfer kernel alignment (K and N divisible by 32)
         weight, weights_padding_cols = pad_nvfp4_weight(layer.weight.data)
         layer.weights_padding_cols = weights_padding_cols
-<<<<<<< HEAD
-        layer.weight = Parameter(weight, requires_grad=False)
-=======
         copy_or_rebind_param(layer, "weight", weight)
->>>>>>> 865254426 (Move `copy_or_rebind_param` to layers util)
 
         # Pad and blockwise interleave weight_scale
         scales = layer.weight_scale
@@ -1529,6 +1513,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                 w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         else:
             w13_weight_scale_2 = layer.w13_weight_scale_2[:]
+
         # Calculate input scales based on strategy
         if self.enable_flashinfer_cutlass_moe or self.enable_flashinfer_trtllm_moe:
             w13_input_scale = layer.w13_input_scale.max().to(torch.float32)
@@ -1640,43 +1625,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             )
 
             # FlashInfer TRTLLM processing - handles both w13 and w2
-            (
-                gemm1_weights_fp4_shuffled,
-                gemm1_scales_fp4_shuffled,
-                gemm2_weights_fp4_shuffled,
-                gemm2_scales_fp4_shuffled,
-            ) = prepare_static_weights_for_trtllm_fp4_moe(
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                layer.w2_weight.size(-2),  # hidden_size
-                layer.w13_weight.size(-2) // 2,  # intermediate_size
-                layer.w13_weight.size(0),  # num_experts
-            )
-
-            # Set flashinfer parameters
-            _copy_or_rebind_param(
-                layer, "gemm1_weights_fp4_shuffled", gemm1_weights_fp4_shuffled
-            )
-            _copy_or_rebind_param(
-                layer, "gemm2_weights_fp4_shuffled", gemm2_weights_fp4_shuffled
-            )
-            _copy_or_rebind_param(
-                layer, "gemm1_scales_fp4_shuffled", gemm1_scales_fp4_shuffled
-            )
-            _copy_or_rebind_param(
-                layer, "gemm2_scales_fp4_shuffled", gemm2_scales_fp4_shuffled
-            )
-
-            # Additional parameter needed for TRT-LLM
-            _copy_or_rebind_param(
-                layer,
-                "g1_scale_c",
-                (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
-            )
-
-            # Keep original weights/scales to support update_weights_from_disk.
+            align_fp4_moe_weights_for_flashinfer_trtllm(layer)
 
         else:
             # CUTLASS processing - handle w13 and w2 separately
