@@ -48,6 +48,7 @@ from sglang.srt.layers.quantization.utils import (
     swizzle_blockscale,
 )
 from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.utils import copy_or_rebind_param
 from sglang.srt.utils.common import (
     get_bool_env_var,
     is_cuda,
@@ -1161,6 +1162,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_scale_2 = layer.input_scale.max().to(torch.float32)
         weight_scale_2 = layer.weight_scale_2.max().to(torch.float32)
+<<<<<<< HEAD
         layer.input_scale = Parameter(input_scale_2, requires_grad=False)
         layer.weight_scale_2 = Parameter(weight_scale_2, requires_grad=False)
         layer.alpha = Parameter(
@@ -1173,6 +1175,20 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
         # Store original output size before any padding
         layer.output_size_per_partition = layer.weight.shape[0]
 
+=======
+
+        # Keep per-shard scales intact for hot reload; derive scalar params below.
+        copy_or_rebind_param(
+            layer, "alpha", (input_scale_2 * weight_scale_2).to(torch.float32)
+        )
+        copy_or_rebind_param(
+            layer, "input_scale_inv", (1 / input_scale_2).to(torch.float32)
+        )
+<<<<<<< HEAD
+        _copy_or_rebind_param("input_scale_inv", (1 / input_scale_2).to(torch.float32))
+>>>>>>> 5de29a224 (Try fix CUDA graph.)
+=======
+>>>>>>> 0b1369f57 (Refactor and clean up.)
         if get_fp4_gemm_runner_backend().is_flashinfer_trtllm():
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
@@ -1219,15 +1235,35 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
                 .view(torch.float8_e4m3fn)
             )
 
+<<<<<<< HEAD
+<<<<<<< HEAD
+<<<<<<< HEAD
             layer.weight_scale_interleaved = Parameter(scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
             layer.weights_padding_cols = weights_padding_cols
+=======
+            _copy_or_rebind_param("weight_scale_interleaved", scale)
+            _copy_or_rebind_param("weight", weight)
+>>>>>>> 5de29a224 (Try fix CUDA graph.)
+=======
+            _copy_or_rebind_param(layer, "weight_scale_interleaved", scale)
+            _copy_or_rebind_param(layer, "weight", weight)
+>>>>>>> 0b1369f57 (Refactor and clean up.)
+=======
+            copy_or_rebind_param(layer, "weight_scale_interleaved", scale)
+            copy_or_rebind_param(layer, "weight", weight)
+            layer.weights_padding_cols = weights_padding_cols
+>>>>>>> 865254426 (Move `copy_or_rebind_param` to layers util)
             return
 
         # Pad weights for CUTLASS/FlashInfer kernel alignment (K and N divisible by 32)
         weight, weights_padding_cols = pad_nvfp4_weight(layer.weight.data)
         layer.weights_padding_cols = weights_padding_cols
+<<<<<<< HEAD
         layer.weight = Parameter(weight, requires_grad=False)
+=======
+        copy_or_rebind_param(layer, "weight", weight)
+>>>>>>> 865254426 (Move `copy_or_rebind_param` to layers util)
 
         # Pad and blockwise interleave weight_scale
         scales = layer.weight_scale
@@ -1251,7 +1287,7 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             if scale_ndim == 2
             else padded_scales.reshape(B, M_padded, K_padded)
         )
-        layer.weight_scale_interleaved = Parameter(padded_scales, requires_grad=False)
+        copy_or_rebind_param(layer, "weight_scale_interleaved", padded_scales)
 
     def apply(
         self,
@@ -1477,19 +1513,22 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
 
         # GEMM 1 scale processing
         if layer.moe_runner_config.is_gated:
-            if not torch.allclose(
-                layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-            ):
-                logger.warning_once(
-                    "w1_weight_scale_2 must match w3_weight_scale_2. "
-                    "Accuracy may be affected."
-                )
+            if layer.w13_weight_scale_2.dim() == 1:
+                # Some checkpoints store a shared scale for w1/w3.
+                w13_weight_scale_2 = layer.w13_weight_scale_2
+            else:
+                if layer.w13_weight_scale_2.shape[1] >= 2 and not torch.allclose(
+                    layer.w13_weight_scale_2[:, 0],
+                    layer.w13_weight_scale_2[:, 1],
+                ):
+                    logger.warning_once(
+                        "w1_weight_scale_2 must match w3_weight_scale_2. "
+                        "Accuracy may be affected."
+                    )
 
-            w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+                w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
         else:
             w13_weight_scale_2 = layer.w13_weight_scale_2[:]
-        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
-
         # Calculate input scales based on strategy
         if self.enable_flashinfer_cutlass_moe or self.enable_flashinfer_trtllm_moe:
             w13_input_scale = layer.w13_input_scale.max().to(torch.float32)
@@ -1530,19 +1569,25 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             w2_input_scale = layer.w2_input_scale
 
         # Create shared parameters
-        layer.g1_alphas = Parameter(
+        copy_or_rebind_param(
+            layer,
+            "g1_alphas",
             (w13_input_scale * w13_weight_scale_2).to(torch.float32),
-            requires_grad=False,
         )
-        layer.g2_alphas = Parameter(
+        copy_or_rebind_param(
+            layer,
+            "g2_alphas",
             (w2_input_scale * layer.w2_weight_scale_2).to(torch.float32),
-            requires_grad=False,
         )
-        layer.w13_input_scale_quant = Parameter(
-            (1 / w13_input_scale).to(torch.float32), requires_grad=False
+        copy_or_rebind_param(
+            layer,
+            "w13_input_scale_quant",
+            (1 / w13_input_scale).to(torch.float32),
         )
-        layer.w2_input_scale_quant = Parameter(
-            (1 / w2_input_scale).to(torch.float32), requires_grad=False
+        copy_or_rebind_param(
+            layer,
+            "w2_input_scale_quant",
+            (1 / w2_input_scale).to(torch.float32),
         )
 
         # TODO: for flashinfer always do MOE_NVFP4_DISPATCH
@@ -1595,15 +1640,52 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
             )
 
             # FlashInfer TRTLLM processing - handles both w13 and w2
-            align_fp4_moe_weights_for_flashinfer_trtllm(layer)
+            (
+                gemm1_weights_fp4_shuffled,
+                gemm1_scales_fp4_shuffled,
+                gemm2_weights_fp4_shuffled,
+                gemm2_scales_fp4_shuffled,
+            ) = prepare_static_weights_for_trtllm_fp4_moe(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                layer.w2_weight.size(-2),  # hidden_size
+                layer.w13_weight.size(-2) // 2,  # intermediate_size
+                layer.w13_weight.size(0),  # num_experts
+            )
+
+            # Set flashinfer parameters
+            _copy_or_rebind_param(
+                layer, "gemm1_weights_fp4_shuffled", gemm1_weights_fp4_shuffled
+            )
+            _copy_or_rebind_param(
+                layer, "gemm2_weights_fp4_shuffled", gemm2_weights_fp4_shuffled
+            )
+            _copy_or_rebind_param(
+                layer, "gemm1_scales_fp4_shuffled", gemm1_scales_fp4_shuffled
+            )
+            _copy_or_rebind_param(
+                layer, "gemm2_scales_fp4_shuffled", gemm2_scales_fp4_shuffled
+            )
+
+            # Additional parameter needed for TRT-LLM
+            _copy_or_rebind_param(
+                layer,
+                "g1_scale_c",
+                (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
+            )
+
+            # Keep original weights/scales to support update_weights_from_disk.
 
         else:
             # CUTLASS processing - handle w13 and w2 separately
 
             # Process w13 weights
             w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
-            del layer.w13_weight_scale
-            layer.w13_blockscale_swizzled.data.copy_(w13_blockscale_swizzled)
+            copy_or_rebind_param(
+                layer, "w13_blockscale_swizzled", w13_blockscale_swizzled
+            )
 
             w13_weight = layer.w13_weight
             intermediate_size_pad = w13_blockscale_swizzled.size(1) - w13_weight.size(1)
@@ -1615,46 +1697,56 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                     "but padding is also implemented for gated activations"
                 )
 
-                layer.w13_weight = Parameter(
+                copy_or_rebind_param(
+                    layer,
+                    "w13_weight",
                     torch.nn.functional.pad(
                         w13_weight, (0, 0, 0, intermediate_size_pad)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_weight = Parameter(
+                copy_or_rebind_param(
+                    layer,
+                    "w2_weight",
                     torch.nn.functional.pad(
                         layer.w2_weight, (0, intermediate_size_pad // 2, 0, 0)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_weight_scale = Parameter(
+                copy_or_rebind_param(
+                    layer,
+                    "w2_weight_scale",
                     torch.nn.functional.pad(
                         layer.w2_weight_scale, (0, intermediate_size_pad // 16)
                     ),
-                    requires_grad=False,
                 )
-                layer.w2_blockscale_swizzled = Parameter(
-                    swizzle_blockscale(layer.w2_weight_scale), requires_grad=False
-                )
-
-            layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
 
             # Process w2 weights
             w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
-            del layer.w2_weight_scale
-            layer.w2_blockscale_swizzled.data.copy_(w2_blockscale_swizzled)
+            copy_or_rebind_param(
+                layer, "w2_blockscale_swizzled", w2_blockscale_swizzled
+            )
 
             # Both flashinfer cutlass and regular cutlass use same processing for w2
 
-            # Set up CUTLASS MoE parameters
+            # Set up CUTLASS MoE parameters (reuse to keep CUDA graph stable)
             device = layer.w13_weight.device
-            layer.cutlass_moe_params = CutlassMoEParams(
-                CutlassMoEType.BlockscaledFP4,
-                device,
-                num_experts=layer.num_experts,  # global num experts
-                intermediate_size_per_partition=layer.w2_weight.shape[2] * 2,  # n
-                hidden_size=layer.w13_weight.shape[2] * 2,
-            )  # k
+            inter_size = layer.w2_weight.shape[2] * 2
+            hidden_size = layer.w13_weight.shape[2] * 2
+            existing_params = getattr(layer, "cutlass_moe_params", None)
+            if (
+                existing_params is None
+                or existing_params.cutlass_moe_type != CutlassMoEType.BlockscaledFP4
+                or existing_params.num_experts != layer.num_experts
+                or existing_params.intermediate_size_per_partition != inter_size
+                or existing_params.hidden_size != hidden_size
+                or existing_params.device != device
+            ):
+                layer.cutlass_moe_params = CutlassMoEParams(
+                    CutlassMoEType.BlockscaledFP4,
+                    device,
+                    num_experts=layer.num_experts,  # global num experts
+                    intermediate_size_per_partition=inter_size,  # n
+                    hidden_size=hidden_size,
+                )  # k
 
     @property
     def load_up_proj_weight_first(self) -> bool:
