@@ -75,6 +75,43 @@ global_workspace_buffer = None
 _USE_FUSED_METADATA_COPY = envs.SGLANG_USE_FUSED_METADATA_COPY.get() and not _is_hip
 
 
+def _torch_nsa_topk(
+    score: torch.Tensor,
+    lengths: torch.Tensor,
+    topk: int,
+    row_starts: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    batch_size, max_score_len = score.shape
+    topk_indices = score.new_full((batch_size, topk), -1, dtype=torch.int32)
+    if batch_size == 0 or topk == 0 or max_score_len == 0:
+        return topk_indices
+
+    if row_starts is None:
+        row_starts = torch.zeros_like(lengths, dtype=torch.int32, device=score.device)
+    else:
+        row_starts = row_starts.to(dtype=torch.int32, device=score.device)
+    lengths = lengths.to(dtype=torch.int32, device=score.device)
+
+    col_indices = torch.arange(max_score_len, dtype=torch.int32, device=score.device)
+    col_indices = col_indices.unsqueeze(0)
+    row_starts_unsqueezed = row_starts.unsqueeze(1)
+    row_ends_unsqueezed = (row_starts + lengths).unsqueeze(1)
+    valid_mask = (col_indices >= row_starts_unsqueezed) & (
+        col_indices < row_ends_unsqueezed
+    )
+
+    masked_logits = score.masked_fill(~valid_mask, float("-inf"))
+    valid_topk = min(topk, max_score_len)
+    topk_scores, topk_col_indices = torch.topk(masked_logits, valid_topk, dim=-1)
+    topk_local_indices = topk_col_indices.to(torch.int32) - row_starts_unsqueezed
+    topk_local_indices = topk_local_indices.masked_fill(
+        topk_scores == float("-inf"), -1
+    )
+    topk_indices[:, :valid_topk] = topk_local_indices
+
+    return topk_indices
+
+
 @dataclass(frozen=True)
 class NSAFlashMLAMetadata:
     """Metadata only needed by FlashMLA"""
@@ -250,7 +287,9 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
         else:
             page_table_size_1 = self.attn_metadata.page_table_1
 
-        if not envs.SGLANG_NSA_FUSE_TOPK.get() or self.force_unfused_topk:
+        if envs.SGLANG_NSA_TORCH_TOPK.get():
+            return _torch_nsa_topk(logits, seq_lens_topk, topk, row_starts=ks)
+        elif not envs.SGLANG_NSA_FUSE_TOPK.get() or self.force_unfused_topk:
             return fast_topk_v2(logits, seq_lens_topk, topk, row_starts=ks)
         elif self.topk_transform_method == TopkTransformMethod.PAGED:
             # NOTE(dark): if fused, we return a transformed page table directly
@@ -1380,7 +1419,7 @@ class NativeSparseAttnBackend(
         topk_transform_method = self.get_topk_transform_method(
             forward_batch.forward_mode
         )
-        if envs.SGLANG_NSA_FUSE_TOPK.get():
+        if envs.SGLANG_NSA_FUSE_TOPK.get() and not envs.SGLANG_NSA_TORCH_TOPK.get():
             page_table_1 = topk_indices
         else:
             if topk_transform_method == TopkTransformMethod.RAGGED:
@@ -1564,7 +1603,7 @@ class NativeSparseAttnBackend(
                 topk_indices,
                 layer.layer_id,
             )
-        elif envs.SGLANG_NSA_FUSE_TOPK.get():
+        elif envs.SGLANG_NSA_FUSE_TOPK.get() and not envs.SGLANG_NSA_TORCH_TOPK.get():
             page_table_1 = topk_indices
         else:
             page_table_1 = transform_index_page_table_decode(
@@ -2069,7 +2108,7 @@ class NativeSparseAttnBackend(
         if topk_indices is not None:
             topk_indices = self._pad_topk_indices(topk_indices, q.shape[0])
 
-        if envs.SGLANG_NSA_FUSE_TOPK.get():
+        if envs.SGLANG_NSA_FUSE_TOPK.get() and not envs.SGLANG_NSA_TORCH_TOPK.get():
             page_table_1 = topk_indices
         elif is_prefill:
             page_table_1 = transform_index_page_table_prefill(
@@ -2199,6 +2238,7 @@ class NativeSparseAttnBackend(
     ) -> TopkTransformMethod:
         """
         SGLANG_NSA_FUSE_TOPK controls whether to fuse the topk transform into the topk kernel.
+        SGLANG_NSA_TORCH_TOPK disables fusion and uses torch.topk for index selection.
         This method is used to select the topk transform method which can be fused or unfused.
         """
         if (
