@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.layers import dp_attention as _dp_attn
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -16,7 +17,13 @@ from sglang.srt.layers.attention.nsa.nsa_indexer import (
     Indexer,
     rotate_activation,
 )
-from sglang.srt.layers.attention.nsa_backend import NativeSparseAttnBackend
+from sglang.srt.layers.attention.nsa_backend import (
+    NativeSparseAttnBackend,
+    NSAIndexerMetadata,
+    NSAMetadata,
+    NSATopKBackend,
+    TopkTransformMethod,
+)
 from sglang.srt.layers.layernorm import LayerNorm
 from sglang.srt.layers.linear import LinearBase
 from sglang.srt.mem_cache.memory_pool import NSATokenToKVPool
@@ -250,6 +257,7 @@ class MockModelRunner:
                 "enable_deterministic_inference": False,
                 "nsa_prefill_backend": "flashmla_sparse",
                 "nsa_decode_backend": "fa3",
+                "nsa_topk_backend": "sgl-kernel",
             },
         )()
 
@@ -416,6 +424,122 @@ class TestNSAIndexer(CustomTestCase):
             has_padding or topk_indices.shape[1] == topk,
             "Output should have padding or exact topk size",
         )
+
+    def _run_unfused_topk_backend_validity_test(
+        self,
+        batch_size: int,
+        max_score_len: int,
+        topk: int,
+        topk_backend: NSATopKBackend,
+        with_row_starts: bool,
+    ):
+        logits = torch.randn(
+            batch_size, max_score_len, dtype=torch.float32, device=self.device
+        )
+
+        if with_row_starts:
+            row_starts = torch.randint(
+                0,
+                max_score_len - 1,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            max_lengths = max_score_len - row_starts
+            random_lengths = torch.randint(
+                0,
+                max_score_len - 1,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            seq_lens_expanded = torch.minimum(max_lengths, random_lengths)
+        else:
+            row_starts = None
+            seq_lens_expanded = torch.randint(
+                0,
+                max_score_len - 1,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+
+        seq_lens_expanded = seq_lens_expanded.to(dtype=torch.int32, device=self.device)
+        max_seq_len_k = int(seq_lens_expanded.max().item())
+        cu_seqlens_q = torch.arange(
+            batch_size + 1, dtype=torch.int32, device=self.device
+        )
+        nsa_cu_seqlens_k = torch.zeros(
+            batch_size + 1, dtype=torch.int32, device=self.device
+        )
+        nsa_cu_seqlens_k[1:] = torch.cumsum(seq_lens_expanded, dim=0)
+        page_table_1 = (
+            torch.arange(max_seq_len_k, dtype=torch.int32, device=self.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+            .contiguous()
+        )
+        metadata = NSAIndexerMetadata(
+            attn_metadata=NSAMetadata(
+                page_size=1,
+                cache_seqlens_int32=seq_lens_expanded.clone(),
+                max_seq_len_q=1,
+                max_seq_len_k=max_seq_len_k,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_q.clone(),
+                page_table_1=page_table_1,
+                real_page_table=page_table_1,
+                nsa_cache_seqlens_int32=seq_lens_expanded.clone(),
+                nsa_cu_seqlens_q=cu_seqlens_q.clone(),
+                nsa_cu_seqlens_k=nsa_cu_seqlens_k,
+                nsa_extend_seq_lens_list=seq_lens_expanded.cpu().tolist(),
+                nsa_seqlens_expanded=seq_lens_expanded,
+            ),
+            topk_transform_method=TopkTransformMethod.PAGED,
+            topk_backend=topk_backend,
+        )
+
+        with envs.SGLANG_NSA_FUSE_TOPK.override(False):
+            topk_test = metadata.topk_transform(logits, topk, ks=row_starts)
+        self.assertEqual(topk_test.shape, (batch_size, topk))
+        self.assertEqual(topk_test.dtype, torch.int32)
+        expected_valid = torch.minimum(
+            seq_lens_expanded,
+            torch.full_like(seq_lens_expanded, topk),
+        )
+        actual_valid = (topk_test >= 0).sum(dim=-1).to(torch.int32)
+        self.assertTrue(torch.equal(actual_valid, expected_valid))
+
+        starts = (
+            row_starts.to(torch.int32)
+            if row_starts is not None
+            else torch.zeros(
+                (topk_test.shape[0],), dtype=torch.int32, device=topk_test.device
+            )
+        )
+        eps = 1e-6
+        for row in range(topk_test.shape[0]):
+            test_row = topk_test[row]
+            valid_test = test_row[test_row >= 0]
+            expected_k = int(expected_valid[row].item())
+            self.assertEqual(valid_test.numel(), expected_k)
+            if expected_k == 0:
+                continue
+            start = int(starts[row].item())
+            row_len = int(seq_lens_expanded[row].item())
+            self.assertTrue(torch.all((valid_test >= 0) & (valid_test < row_len)))
+            self.assertEqual(torch.unique(valid_test).numel(), valid_test.numel())
+
+            row_scores = logits[row, start : start + row_len]
+            test_vals = row_scores[valid_test.to(torch.long)]
+            kth_largest = torch.kthvalue(-row_scores.float(), expected_k).values * -1
+
+            # FlashInfer-style validity check for non-deterministic/tie cases:
+            # all selected values must be at least the row-wise kth-largest value.
+            self.assertGreaterEqual(
+                test_vals.min().item(),
+                kth_largest.item() - eps,
+            )
 
     @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm")
     def test_indexer_basic_creation(self, mock_deep_gemm):
@@ -625,6 +749,28 @@ class TestNSAIndexer(CustomTestCase):
         topk = 64
         topk_indices = metadata.topk_transform(logits, topk)
         self.assertEqual(topk_indices.shape, (batch_size, topk))
+
+    def test_topk_unfused_backends_valid_selection(self):
+        batch_size = 8
+        max_score_len = 16 * 1024
+        topk = 2048
+        for topk_backend in [
+            NSATopKBackend.SGL_KERNEL,
+            NSATopKBackend.TORCH,
+            NSATopKBackend.FLASHINFER,
+        ]:
+            for with_row_starts in [False, True]:
+                with self.subTest(
+                    topk_backend=topk_backend.value,
+                    with_row_starts=with_row_starts,
+                ):
+                    self._run_unfused_topk_backend_validity_test(
+                        batch_size,
+                        max_score_len,
+                        topk,
+                        topk_backend=topk_backend,
+                        with_row_starts=with_row_starts,
+                    )
 
     # TODO: enable this test after indexer accuracy aligned
     # @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm")

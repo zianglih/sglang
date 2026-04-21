@@ -227,6 +227,8 @@ NSA_CHOICES = [
     "trtllm",
 ]
 
+NSA_TOPK_BACKEND_CHOICES = ["sgl-kernel", "torch", "flashinfer"]
+
 MAMBA_SCHEDULER_STRATEGY_CHOICES = ["auto", "no_buffer", "extra_buffer"]
 
 MAMBA_BACKEND_CHOICES = ["triton", "flashinfer"]
@@ -490,6 +492,7 @@ class ServerArgs:
     nsa_decode_backend: Optional[str] = (
         None  # auto-detect based on hardware/kv_cache_dtype
     )
+    nsa_topk_backend: str = "sgl-kernel"
     disable_flashinfer_autotune: bool = False
     mamba_backend: str = "triton"
 
@@ -5041,6 +5044,15 @@ class ServerArgs:
             type=str,
             choices=NSA_CHOICES,
             help="NSA decode backend. If not specified, auto-detects based on hardware and kv_cache_dtype.",
+        )
+        parser.add_argument(
+            "--nsa-topk-backend",
+            default=ServerArgs.nsa_topk_backend,
+            type=str,
+            choices=NSA_TOPK_BACKEND_CHOICES,
+            help="NSA indexer top-k backend for the unfused path. "
+            "Options: 'sgl-kernel', 'torch', 'flashinfer'. "
+            "The 'torch' and 'flashinfer' backends currently require SGLANG_NSA_FUSE_TOPK=false.",
         )
         parser.add_argument(
             "--fp8-gemm-backend",
