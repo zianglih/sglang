@@ -549,6 +549,136 @@ class TestNSAIndexer(CustomTestCase):
                 )
             )
 
+    def _run_fused_topk_backend_equivalence_test(
+        self,
+        batch_size: int,
+        max_score_len: int,
+        topk: int,
+        topk_transform_method: TopkTransformMethod,
+        with_row_starts: bool,
+    ):
+        # Construct tie-free logits
+        perm = torch.argsort(
+            torch.randn(
+                batch_size, max_score_len, dtype=torch.float32, device=self.device
+            ),
+            dim=-1,
+        )
+        logits = torch.gather(
+            torch.arange(max_score_len, device=self.device, dtype=torch.float32)
+            .unsqueeze(0)
+            .expand(batch_size, -1),
+            dim=1,
+            index=perm,
+        )
+
+        if with_row_starts:
+            row_starts = torch.randint(
+                0,
+                max_score_len - 1,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            max_lengths = max_score_len - row_starts
+            random_lengths = torch.randint(
+                1,
+                max_score_len,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            seq_lens_expanded = torch.minimum(max_lengths, random_lengths)
+        else:
+            row_starts = None
+            seq_lens_expanded = torch.randint(
+                1,
+                max_score_len,
+                (batch_size,),
+                dtype=torch.int32,
+                device=self.device,
+            )
+
+        # Synthetic offsets for fused ragged path.
+        topk_indices_offset = (
+            torch.arange(batch_size, dtype=torch.int32, device=self.device) * 1024
+        )
+        cu_seqlens_q = torch.arange(
+            batch_size + 1, dtype=torch.int32, device=self.device
+        )
+        # Keep batch base offsets zero for this synthetic equivalence test.
+        cu_seqlens_k = torch.zeros(
+            batch_size + 1, dtype=torch.int32, device=self.device
+        )
+        nsa_cu_seqlens_k = torch.zeros(
+            batch_size + 1, dtype=torch.int32, device=self.device
+        )
+        nsa_cu_seqlens_k[1:] = torch.cumsum(seq_lens_expanded, dim=0)
+
+        page_table_1 = (
+            (
+                torch.arange(max_score_len, dtype=torch.int32, device=self.device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
+            + (
+                torch.arange(
+                    batch_size, dtype=torch.int32, device=self.device
+                ).unsqueeze(1)
+                * max_score_len
+            )
+        ).contiguous()
+
+        attn_metadata = NSAMetadata(
+            page_size=1,
+            cache_seqlens_int32=seq_lens_expanded.clone(),
+            max_seq_len_q=1,
+            max_seq_len_k=max_score_len,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            page_table_1=page_table_1,
+            real_page_table=page_table_1,
+            nsa_cache_seqlens_int32=seq_lens_expanded.clone(),
+            nsa_cu_seqlens_q=cu_seqlens_q.clone(),
+            nsa_cu_seqlens_k=nsa_cu_seqlens_k,
+            nsa_extend_seq_lens_list=seq_lens_expanded.cpu().tolist(),
+            nsa_seqlens_expanded=seq_lens_expanded,
+            topk_indices_offset=(
+                topk_indices_offset
+                if topk_transform_method == TopkTransformMethod.RAGGED
+                else None
+            ),
+        )
+
+        metadata_sgl = NSAIndexerMetadata(
+            attn_metadata=attn_metadata,
+            topk_transform_method=topk_transform_method,
+            topk_backend=NSATopKBackend.SGL_KERNEL,
+        )
+        metadata_flashinfer = NSAIndexerMetadata(
+            attn_metadata=attn_metadata,
+            topk_transform_method=topk_transform_method,
+            topk_backend=NSATopKBackend.FLASHINFER,
+        )
+
+        with envs.SGLANG_NSA_FUSE_TOPK.override(True):
+            out_sgl = metadata_sgl.topk_transform(logits, topk, ks=row_starts)
+            out_flashinfer = metadata_flashinfer.topk_transform(
+                logits, topk, ks=row_starts
+            )
+
+        self.assertEqual(out_sgl.shape, out_flashinfer.shape)
+        self.assertEqual(out_sgl.dtype, out_flashinfer.dtype)
+        self.assertEqual(out_sgl.dtype, torch.int32)
+
+        # Compare selected set per row (ordering may differ).
+        self.assertTrue(
+            torch.equal(
+                torch.sort(out_sgl, dim=-1).values,
+                torch.sort(out_flashinfer, dim=-1).values,
+            )
+        )
+
     @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm")
     def test_indexer_basic_creation(self, mock_deep_gemm):
         """Test basic indexer creation and initialization."""
@@ -777,6 +907,32 @@ class TestNSAIndexer(CustomTestCase):
                         max_score_len,
                         topk,
                         topk_backend=topk_backend,
+                        with_row_starts=with_row_starts,
+                    )
+
+    def test_topk_fused_flashinfer_equals_sgl_kernel(self):
+        batch_size = 8
+        max_score_len = 16 * 1024
+        topk = 2048
+        for topk_transform_method in [
+            TopkTransformMethod.PAGED,
+            TopkTransformMethod.RAGGED,
+        ]:
+            for with_row_starts in [False, True]:
+                if (
+                    topk_transform_method == TopkTransformMethod.PAGED
+                    and with_row_starts
+                ):
+                    continue
+                with self.subTest(
+                    topk_transform_method=topk_transform_method.name,
+                    with_row_starts=with_row_starts,
+                ):
+                    self._run_fused_topk_backend_equivalence_test(
+                        batch_size=batch_size,
+                        max_score_len=max_score_len,
+                        topk=topk,
+                        topk_transform_method=topk_transform_method,
                         with_row_starts=with_row_starts,
                     )
 
