@@ -433,8 +433,19 @@ class TestNSAIndexer(CustomTestCase):
         topk_backend: NSATopKBackend,
         with_row_starts: bool,
     ):
-        logits = torch.randn(
-            batch_size, max_score_len, dtype=torch.float32, device=self.device
+        # Construct tie-free logits
+        perm = torch.argsort(
+            torch.randn(
+                batch_size, max_score_len, dtype=torch.float32, device=self.device
+            ),
+            dim=-1,
+        )
+        logits = torch.gather(
+            torch.arange(max_score_len, device=self.device, dtype=torch.float32)
+            .unsqueeze(0)
+            .expand(batch_size, -1),
+            dim=1,
+            index=perm,
         )
 
         if with_row_starts:
@@ -517,7 +528,6 @@ class TestNSAIndexer(CustomTestCase):
                 (topk_test.shape[0],), dtype=torch.int32, device=topk_test.device
             )
         )
-        eps = 1e-6
         for row in range(topk_test.shape[0]):
             test_row = topk_test[row]
             valid_test = test_row[test_row >= 0]
@@ -531,14 +541,12 @@ class TestNSAIndexer(CustomTestCase):
             self.assertEqual(torch.unique(valid_test).numel(), valid_test.numel())
 
             row_scores = logits[row, start : start + row_len]
-            test_vals = row_scores[valid_test.to(torch.long)]
-            kth_largest = torch.kthvalue(-row_scores.float(), expected_k).values * -1
-
-            # FlashInfer-style validity check for non-deterministic/tie cases:
-            # all selected values must be at least the row-wise kth-largest value.
-            self.assertGreaterEqual(
-                test_vals.min().item(),
-                kth_largest.item() - eps,
+            ref_topk = torch.topk(row_scores, expected_k, dim=-1, sorted=False).indices
+            self.assertTrue(
+                torch.equal(
+                    torch.sort(valid_test.to(torch.int32)).values,
+                    torch.sort(ref_topk.to(torch.int32)).values,
+                )
             )
 
     @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm")
