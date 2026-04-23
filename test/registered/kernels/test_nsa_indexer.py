@@ -888,7 +888,7 @@ class TestNSAIndexer(CustomTestCase):
         topk_indices = metadata.topk_transform(logits, topk)
         self.assertEqual(topk_indices.shape, (batch_size, topk))
 
-    def test_topk_unfused_backends_valid_selection(self):
+    def test_topk_backends_unfused(self):
         batch_size = 8
         max_score_len = 16 * 1024
         topk = 2048
@@ -910,7 +910,7 @@ class TestNSAIndexer(CustomTestCase):
                         with_row_starts=with_row_starts,
                     )
 
-    def test_topk_fused_flashinfer_equals_sgl_kernel(self):
+    def test_topk_backends_fused(self):
         batch_size = 8
         max_score_len = 16 * 1024
         topk = 2048
