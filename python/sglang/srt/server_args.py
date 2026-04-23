@@ -5703,9 +5703,9 @@ class ServerArgs:
             default=ServerArgs.nsa_topk_backend,
             type=str,
             choices=NSA_TOPK_BACKEND_CHOICES,
-            help="NSA indexer top-k backend for the unfused path. "
+            help="NSA indexer top-k backend. "
             "Options: 'sgl-kernel', 'torch', 'flashinfer'. "
-            "The 'torch' and 'flashinfer' backends currently require SGLANG_NSA_FUSE_TOPK=false.",
+            "The 'torch' backend currently requires SGLANG_NSA_FUSE_TOPK=false.",
         )
         parser.add_argument(
             "--fp8-gemm-backend",

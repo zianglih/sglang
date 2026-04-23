@@ -288,6 +288,39 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
     def get_token_to_batch_idx(self) -> torch.Tensor:
         return self.attn_metadata.token_to_batch_idx
 
+    def _build_flashinfer_paged_args(
+        self,
+        ks: Optional[torch.Tensor],
+        cu_seqlens_q_topk: Optional[torch.Tensor],
+        batch_idx_list: Optional[List[int]],
+        device: torch.device,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        row_to_batch = (
+            torch.as_tensor(batch_idx_list, dtype=torch.int32, device=device)
+            if batch_idx_list is not None
+            else None
+        )
+
+        if ks is not None and row_to_batch is None:
+            if cu_seqlens_q_topk is None:
+                raise RuntimeError(
+                    "PAGED topk_transform with row_starts requires cu_seqlens_q metadata."
+                )
+            q_lens = torch.diff(cu_seqlens_q_topk).to(dtype=torch.int32, device=device)
+            row_to_batch = torch.repeat_interleave(
+                torch.arange(q_lens.shape[0], dtype=torch.int32, device=device),
+                q_lens,
+            )
+
+        row_starts = ks
+        if row_starts is not None and row_to_batch is not None:
+            batch_base = self.attn_metadata.cu_seqlens_k.to(
+                dtype=torch.int32, device=device
+            )[:-1]
+            row_starts = row_starts - batch_base[row_to_batch]
+
+        return row_to_batch, row_starts
+
     def topk_transform(
         self,
         logits: torch.Tensor,
@@ -344,7 +377,11 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                     topk,
                     row_starts=ks,
                     topk_op=flashinfer.top_k,
-                    topk_op_kwargs={"sorted": False, "deterministic": False},
+                    topk_op_kwargs={
+                        "sorted": False,
+                        "deterministic": False,
+                        "dsa_graph_safe": True,
+                    },
                 )
         else:
             # Fused topk
@@ -375,6 +412,46 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                         lengths=seq_lens_topk,
                         topk_indices_offset=cu_topk_indices_offset,
                         topk=topk,
+                        row_starts=ks,
+                    )
+                else:
+                    assert False, f"Unsupported {self.topk_transform_method = }"
+            elif self.topk_backend.is_flashinfer():
+                import flashinfer
+
+                if self.topk_transform_method == TopkTransformMethod.PAGED:
+                    row_to_batch, row_starts = self._build_flashinfer_paged_args(
+                        ks=ks,
+                        cu_seqlens_q_topk=cu_seqlens_q_topk,
+                        batch_idx_list=batch_idx_list,
+                        device=logits.device,
+                    )
+
+                    return flashinfer.top_k_page_table_transform(
+                        logits,
+                        self.attn_metadata.page_table_1,
+                        seq_lens_topk,
+                        topk,
+                        row_to_batch=row_to_batch,
+                        deterministic=False,
+                        dsa_graph_safe=True,
+                        row_starts=row_starts,
+                    )
+                elif self.topk_transform_method == TopkTransformMethod.RAGGED:
+                    if cu_topk_indices_offset is None:
+                        raise RuntimeError(
+                            "RAGGED topk_transform requires topk_indices_offset; "
+                            "expected extend-without-speculative metadata."
+                        )
+                    return flashinfer.top_k_ragged_transform(
+                        logits,
+                        cu_topk_indices_offset.to(
+                            dtype=torch.int32, device=logits.device
+                        ),
+                        seq_lens_topk,
+                        topk,
+                        deterministic=False,
+                        dsa_graph_safe=True,
                         row_starts=ks,
                     )
                 else:
@@ -1525,12 +1602,15 @@ class NativeSparseAttnBackend(
             forward_batch.forward_mode
         )
         if envs.SGLANG_NSA_FUSE_TOPK.get():
-            if self.nsa_topk_backend.is_sgl_kernel():
+            if (
+                self.nsa_topk_backend.is_sgl_kernel()
+                or self.nsa_topk_backend.is_flashinfer()
+            ):
                 page_table_1 = topk_indices
             else:
                 assert (
                     False
-                ), f"Unsupported {self.topk_backend = } for SGLANG_NSA_FUSE_TOPK."
+                ), f"Unsupported {self.nsa_topk_backend = } for SGLANG_NSA_FUSE_TOPK."
         else:
             if topk_transform_method == TopkTransformMethod.RAGGED:
                 topk_indices_offset = metadata.topk_indices_offset
@@ -1720,12 +1800,15 @@ class NativeSparseAttnBackend(
                 layer.layer_id,
             )
         elif envs.SGLANG_NSA_FUSE_TOPK.get():
-            if self.nsa_topk_backend.is_sgl_kernel():
+            if (
+                self.nsa_topk_backend.is_sgl_kernel()
+                or self.nsa_topk_backend.is_flashinfer()
+            ):
                 page_table_1 = topk_indices
             else:
                 assert (
                     False
-                ), f"Unsupported {self.topk_backend = } for SGLANG_NSA_FUSE_TOPK."
+                ), f"Unsupported {self.nsa_topk_backend = } for SGLANG_NSA_FUSE_TOPK."
         else:
             page_table_1 = transform_index_page_table_decode(
                 page_table=metadata.page_table_1,
@@ -2234,12 +2317,15 @@ class NativeSparseAttnBackend(
             topk_indices = self._pad_topk_indices(topk_indices, q.shape[0])
 
         if envs.SGLANG_NSA_FUSE_TOPK.get():
-            if self.nsa_topk_backend.is_sgl_kernel():
+            if (
+                self.nsa_topk_backend.is_sgl_kernel()
+                or self.nsa_topk_backend.is_flashinfer()
+            ):
                 page_table_1 = topk_indices
             else:
                 assert (
                     False
-                ), f"Unsupported {self.topk_backend = } for SGLANG_NSA_FUSE_TOPK."
+                ), f"Unsupported {self.nsa_topk_backend = } for SGLANG_NSA_FUSE_TOPK."
         elif is_prefill:
             page_table_1 = transform_index_page_table_prefill(
                 page_table=metadata.page_table_1,
