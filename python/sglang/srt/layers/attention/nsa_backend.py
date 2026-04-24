@@ -428,9 +428,9 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                     )
 
                     return flashinfer.top_k_page_table_transform(
-                        logits,
-                        self.attn_metadata.page_table_1,
-                        seq_lens_topk,
+                        logits.contiguous(),
+                        self.attn_metadata.page_table_1.contiguous(),
+                        seq_lens_topk.contiguous(),
                         topk,
                         row_to_batch=row_to_batch,
                         deterministic=False,
@@ -444,15 +444,13 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                             "expected extend-without-speculative metadata."
                         )
                     return flashinfer.top_k_ragged_transform(
-                        logits,
-                        cu_topk_indices_offset.to(
-                            dtype=torch.int32, device=logits.device
-                        ),
-                        seq_lens_topk,
+                        logits.contiguous(),
+                        cu_topk_indices_offset.contiguous(),
+                        seq_lens_topk.contiguous(),
                         topk,
                         deterministic=False,
                         dsa_graph_safe=True,
-                        row_starts=ks,
+                        row_starts=ks.contiguous(),
                     )
                 else:
                     assert False, f"Unsupported {self.topk_transform_method = }"
