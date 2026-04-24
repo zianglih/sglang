@@ -387,7 +387,8 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                     topk_op=flashinfer.top_k,
                     topk_op_kwargs={
                         "sorted": False,
-                        "deterministic": False,
+                        "deterministic": envs.SGLANG_NSA_TOPK_FLASHINFER_DETERMINISTIC.get(),
+                        "tie_break": envs.SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK.get(),
                         "dsa_graph_safe": True,
                     },
                 )
@@ -442,7 +443,8 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                         seq_lens_topk.contiguous(),
                         topk,
                         row_to_batch=row_to_batch,
-                        deterministic=False,
+                        deterministic=envs.SGLANG_NSA_TOPK_FLASHINFER_DETERMINISTIC.get(),
+                        tie_break=envs.SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK.get(),
                         dsa_graph_safe=True,
                         row_starts=row_starts,
                     )
@@ -457,7 +459,8 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                         cu_topk_indices_offset.contiguous(),
                         seq_lens_topk.contiguous(),
                         topk,
-                        deterministic=False,
+                        deterministic=envs.SGLANG_NSA_TOPK_FLASHINFER_DETERMINISTIC.get(),
+                        tie_break=envs.SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK.get(),
                         dsa_graph_safe=True,
                         row_starts=ks,
                     )

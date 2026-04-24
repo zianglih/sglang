@@ -897,44 +897,57 @@ class TestNSAIndexer(CustomTestCase):
             NSATopKBackend.TORCH,
             NSATopKBackend.FLASHINFER,
         ]:
-            for with_row_starts in [False, True]:
-                with self.subTest(
-                    topk_backend=topk_backend.value,
-                    with_row_starts=with_row_starts,
-                ):
-                    self._run_unfused_topk_backend_validity_test(
-                        batch_size,
-                        max_score_len,
-                        topk,
-                        topk_backend=topk_backend,
+            tie_break_values = (
+                [0, 1, 2] if topk_backend == NSATopKBackend.FLASHINFER else [0]
+            )
+            for tie_break in tie_break_values:
+                for with_row_starts in [False, True]:
+                    with self.subTest(
+                        topk_backend=topk_backend.value,
+                        tie_break=tie_break,
                         with_row_starts=with_row_starts,
-                    )
+                    ):
+                        with envs.SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK.override(
+                            tie_break
+                        ):
+                            self._run_unfused_topk_backend_validity_test(
+                                batch_size,
+                                max_score_len,
+                                topk,
+                                topk_backend=topk_backend,
+                                with_row_starts=with_row_starts,
+                            )
 
     def test_topk_backends_fused(self):
         batch_size = 8
         max_score_len = 16 * 1024
         topk = 2048
-        for topk_transform_method in [
-            TopkTransformMethod.PAGED,
-            TopkTransformMethod.RAGGED,
-        ]:
-            for with_row_starts in [False, True]:
-                if (
-                    topk_transform_method == TopkTransformMethod.PAGED
-                    and with_row_starts
-                ):
-                    continue
-                with self.subTest(
-                    topk_transform_method=topk_transform_method.name,
-                    with_row_starts=with_row_starts,
-                ):
-                    self._run_fused_topk_backend_equivalence_test(
-                        batch_size=batch_size,
-                        max_score_len=max_score_len,
-                        topk=topk,
-                        topk_transform_method=topk_transform_method,
+        for tie_break in [0, 1, 2]:
+            for topk_transform_method in [
+                TopkTransformMethod.PAGED,
+                TopkTransformMethod.RAGGED,
+            ]:
+                for with_row_starts in [False, True]:
+                    if (
+                        topk_transform_method == TopkTransformMethod.PAGED
+                        and with_row_starts
+                    ):
+                        continue
+                    with self.subTest(
+                        tie_break=tie_break,
+                        topk_transform_method=topk_transform_method.name,
                         with_row_starts=with_row_starts,
-                    )
+                    ):
+                        with envs.SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK.override(
+                            tie_break
+                        ):
+                            self._run_fused_topk_backend_equivalence_test(
+                                batch_size=batch_size,
+                                max_score_len=max_score_len,
+                                topk=topk,
+                                topk_transform_method=topk_transform_method,
+                                with_row_starts=with_row_starts,
+                            )
 
     # TODO: enable this test after indexer accuracy aligned
     # @patch("sglang.srt.layers.attention.nsa.nsa_indexer.deep_gemm")
