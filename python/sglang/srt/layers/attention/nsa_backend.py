@@ -294,6 +294,7 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
         cu_seqlens_q_topk: Optional[torch.Tensor],
         batch_idx_list: Optional[List[int]],
         device: torch.device,
+        num_rows: Optional[int] = None,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         row_to_batch = (
             torch.as_tensor(batch_idx_list, dtype=torch.int32, device=device)
@@ -301,15 +302,22 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
             else None
         )
 
-        if ks is not None and row_to_batch is None:
-            if cu_seqlens_q_topk is None:
-                raise RuntimeError(
-                    "PAGED topk_transform with row_starts requires cu_seqlens_q metadata."
+        if row_to_batch is None and cu_seqlens_q_topk is not None:
+            # Decode-like case (one query row per batch) does not need an explicit mapping.
+            # Avoid dynamic tensor construction in this branch to keep CUDA graph capture safe.
+            num_batches = cu_seqlens_q_topk.shape[0] - 1
+            if not (ks is None and num_rows is not None and num_rows == num_batches):
+                q_lens = torch.diff(cu_seqlens_q_topk).to(
+                    dtype=torch.int32, device=device
                 )
-            q_lens = torch.diff(cu_seqlens_q_topk).to(dtype=torch.int32, device=device)
-            row_to_batch = torch.repeat_interleave(
-                torch.arange(q_lens.shape[0], dtype=torch.int32, device=device),
-                q_lens,
+                row_to_batch = torch.repeat_interleave(
+                    torch.arange(q_lens.shape[0], dtype=torch.int32, device=device),
+                    q_lens,
+                )
+
+        if ks is not None and row_to_batch is None:
+            raise RuntimeError(
+                "PAGED topk_transform with row_starts requires cu_seqlens_q metadata."
             )
 
         row_starts = ks
@@ -425,6 +433,7 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                         cu_seqlens_q_topk=cu_seqlens_q_topk,
                         batch_idx_list=batch_idx_list,
                         device=logits.device,
+                        num_rows=logits.shape[0],
                     )
 
                     return flashinfer.top_k_page_table_transform(
@@ -450,7 +459,7 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
                         topk,
                         deterministic=False,
                         dsa_graph_safe=True,
-                        row_starts=ks.contiguous(),
+                        row_starts=ks,
                     )
                 else:
                     assert False, f"Unsupported {self.topk_transform_method = }"
