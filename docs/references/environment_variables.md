@@ -96,6 +96,8 @@ SGLang supports various environment variables that can be used to configure its 
 | Environment Variable | Description | Default Value |
 | --- | --- | --- |
 | `SGLANG_NSA_FUSE_TOPK` | Fuse the operation of picking topk logits and picking topk indices from page table  | `true` |
+| `SGLANG_NSA_TOPK_FLASHINFER_DETERMINISTIC` | Use deterministic FlashInfer topk kernels when `--nsa-topk-backend=flashinfer` | `false` |
+| `SGLANG_NSA_TOPK_FLASHINFER_TIE_BREAK` | Tie-break mode for FlashInfer NSA topk when `--nsa-topk-backend=flashinfer`. Valid values are `0`, `1`, and `2`; non-zero values imply deterministic topk in FlashInfer. | `0` |
 | `SGLANG_NSA_ENABLE_MTP_PRECOMPUTE_METADATA` | Precompute metadata that can be shared among different draft steps when MTP is enabled | `true` |
 | `SGLANG_USE_FUSED_METADATA_COPY` | Control whether to use fused metadata copy kernel for cuda graph replay  | `true` |
 | `SGLANG_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD` | When the maximum kv len in current prefill batch exceeds this value, the sparse mla kernel will be applied, else it falls back to dense MHA implementation. Default to the index topk of model (2048 for DeepSeek V3.2) | `2048` |
