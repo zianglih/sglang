@@ -1,6 +1,12 @@
 import os
+import re
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_cuda_ci
@@ -155,6 +161,83 @@ class FlashinferTrtllmGenMoeBackendMXFP8Base:
         self.assertGreater(metrics["score"], 0.93)
 
 
+class FlashinferTrtllmGenMoeBackendMXFP8MixedBF16Base:
+    backend = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = "zianglih/JoyAI-LLM-Flash-MXFP8-last-6-BF16"
+        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.process = popen_launch_server(
+            cls.model,
+            cls.base_url,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            env={**os.environ, "SGLANG_ENABLE_JIT_DEEPGEMM": "False"},
+            other_args=[
+                "--kv-cache-dtype",
+                "bf16",
+                "--fp8-gemm-backend",
+                "flashinfer_cutlass",
+                "--moe-runner-backend",
+                cls.backend,
+                "--trust-remote-code",
+            ],
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        kill_process_tree(cls.process.pid)
+
+    def test_gsm8k_platinum(self):
+        repo_root = Path(__file__).resolve().parents[3]
+        benchmark = repo_root / "benchmark" / "gsm8k" / "bench_sglang.py"
+        parsed_url = urlparse(self.base_url)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cmd = [
+                sys.executable,
+                str(benchmark),
+                "--num-shots",
+                "8",
+                "--num-questions",
+                "1209",
+                "--parallel",
+                "1209",
+                "--platinum",
+                "--host",
+                parsed_url.hostname or "127.0.0.1",
+                "--port",
+                str(parsed_url.port or 30000),
+                "--result-file",
+                str(Path(tmp_dir) / "result.jsonl"),
+                "--raw-result-file",
+                str(Path(tmp_dir) / "raw_result.jsonl"),
+            ]
+            result = subprocess.run(
+                cmd,
+                cwd=tmp_dir,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+
+        match = re.search(r"Accuracy:\s*([0-9.]+)", output)
+        self.assertIsNotNone(match, output)
+        accuracy = float(match.group(1))
+        summary = "\n".join(
+            line
+            for line in output.splitlines()
+            if line.startswith(
+                ("Accuracy:", "Invalid:", "Latency:", "Output throughput:")
+            )
+        )
+        print(summary)
+        self.assertGreater(accuracy, 0.92, output)
+
+
 class FlashinferTrtllmGenMoeBackendNVFP4Base:
     backend = None
 
@@ -230,6 +313,12 @@ class TestFlashinferTrtllmGenMoeBackendFP8Routed(
 
 class TestFlashinferTrtllmGenMoeBackendMXFP8Routed(
     FlashinferTrtllmGenMoeBackendMXFP8Base, CustomTestCase
+):
+    backend = "flashinfer_trtllm_routed"
+
+
+class TestFlashinferTrtllmRoutedMxfp8MixedBF16(
+    FlashinferTrtllmGenMoeBackendMXFP8MixedBF16Base, CustomTestCase
 ):
     backend = "flashinfer_trtllm_routed"
 
