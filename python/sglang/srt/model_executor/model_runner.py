@@ -1112,6 +1112,17 @@ class ModelRunner:
 
         self.maybe_precompile_model_kernels_after_loading()
 
+        if self.server_args.enable_diag_es:
+            from sglang.srt.diag_es import register_qwen3_30b_a3b
+
+            self.diag_es_manager = register_qwen3_30b_a3b(
+                self.model,
+                resident_candidate_slots=(
+                    self.server_args.diag_es_resident_candidate_slots
+                ),
+                base_model_revision=self.server_args.model_path,
+            )
+
         # Register model for layerwise NVTX profiling if enabled
         if get_exec().comm.enable_layerwise_nvtx_marker:
             pyt_hooks = PytHooks()
@@ -1615,7 +1626,12 @@ class ModelRunner:
         if has_forward_context():
             ctx_mgr = contextlib.nullcontext()
         else:
-            ctx_mgr = forward_context(ForwardContext(attn_backend=self.attn_backend))
+            ctx_mgr = forward_context(
+                ForwardContext(
+                    attn_backend=self.attn_backend,
+                    es_candidate_slots=forward_batch.es_candidate_slots,
+                )
+            )
         with ctx_mgr:
             mode_check = (
                 forward_batch.forward_mode.is_cpu_graph
@@ -1642,6 +1658,10 @@ class ModelRunner:
                     forward_batch,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
+                if self.server_args.enable_diag_es:
+                    self.diag_es_manager.note_slots_read(
+                        forward_batch.es_candidate_slots_cpu or ()
+                    )
                 return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
             # DP / MLP-sync padding + attn-tp normalization. Only the decode
@@ -1702,6 +1722,11 @@ class ModelRunner:
                 and self.pp_group.is_last_rank
             ):
                 forward_batch.post_forward_mlp_sync_batch(ret)
+
+            if self.server_args.enable_diag_es:
+                self.diag_es_manager.note_slots_read(
+                    forward_batch.es_candidate_slots_cpu or ()
+                )
 
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 

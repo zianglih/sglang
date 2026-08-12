@@ -602,7 +602,10 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
     ):
         with (
             forward_context(
-                ForwardContext(attn_backend=self.model_runner.attn_backend)
+                ForwardContext(
+                    attn_backend=self.model_runner.attn_backend,
+                    es_candidate_slots=forward_batch.es_candidate_slots,
+                )
             ),
             set_tc_piecewise_forward_context(
                 forward_batch,
@@ -720,7 +723,10 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
 
         with (
             forward_context(
-                ForwardContext(attn_backend=self.model_runner.attn_backend)
+                ForwardContext(
+                    attn_backend=self.model_runner.attn_backend,
+                    es_candidate_slots=fb.es_candidate_slots,
+                )
             ),
             set_tc_piecewise_forward_context(
                 fb,
@@ -1238,6 +1244,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                 orig_seq_lens=shape_inputs["orig_seq_lens"],
                 seq_lens_cpu=torch.tensor(capture_seq_lens, device="cpu"),
                 out_cache_loc=_slot("out_cache_loc"),
+                es_candidate_slots=_slot("es_candidate_slots"),
                 seq_lens_sum=num_tokens,
                 mamba_track_indices=(
                     _slot("mamba_track_indices")
@@ -1465,6 +1472,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         )
         positions = _slot("positions")
         out_cache_loc = _slot("out_cache_loc")
+        es_candidate_slots = _slot("es_candidate_slots")
         mrope_positions = (
             _slot("mrope_positions")
             if registry.has_slot("mrope_positions")
@@ -1503,6 +1511,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             orig_seq_lens=forward_batch.orig_seq_lens,
             seq_lens_cpu=forward_batch.seq_lens_cpu,
             out_cache_loc=out_cache_loc,
+            es_candidate_slots=es_candidate_slots,
             seq_lens_sum=forward_batch.seq_lens_sum,
             mamba_track_indices=mamba_track_indices,
             mamba_track_mask=mamba_track_mask,

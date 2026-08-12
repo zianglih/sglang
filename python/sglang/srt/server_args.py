@@ -308,7 +308,7 @@ FP4_GEMM_RUNNER_BACKEND_CHOICES = [
     "marlin",
 ]
 
-BF16_GEMM_BACKEND_CHOICES = ["auto", "cutedsl", "torch"]
+BF16_GEMM_BACKEND_CHOICES = ["auto", "cutedsl", "torch", "triton"]
 
 RADIX_EVICTION_POLICY_CHOICES = ["lru", "lfu", "slru", "priority"]
 RETRACTION_POLICY_CHOICES = ["length", "priority"]
@@ -1752,7 +1752,7 @@ class ServerArgs:
     bf16_gemm_backend: A[
         str,
         Arg(
-            help="Choose the backend for unquantized BF16 GEMM operations. Options: 'auto' (default; selects 'cutedsl' on SM10x GPUs, otherwise uses cuBLAS via torch.nn.functional.linear), 'cutedsl' (SGLang JIT CuTe DSL TGV BF16 GEMM on SM10x; dispatches between the CuTe DSL kernel and cuBLAS), 'torch' (always uses cuBLAS via torch.nn.functional.linear).",
+            help="Choose the backend for unquantized BF16 GEMM operations. Options: 'auto' (default; selects 'cutedsl' on SM10x GPUs, otherwise uses cuBLAS via torch.nn.functional.linear), 'cutedsl' (SGLang JIT CuTe DSL TGV BF16 GEMM on SM10x; dispatches between the CuTe DSL kernel and cuBLAS), 'torch' (always uses cuBLAS via torch.nn.functional.linear), 'triton' (target-only Triton BF16 linear used by diagonal-ES training).",
             cli_name="--bf16-gemm-backend",
             choices=BF16_GEMM_BACKEND_CHOICES,
         ),
@@ -3372,6 +3372,16 @@ class ServerArgs:
         "Allow saving memory using release_memory_occupation and resume_memory_occupation",
         NS("exec.features"),
     ] = False
+    enable_diag_es: A[
+        bool,
+        "Enable the Qwen3-30B-A3B activation-side diagonal ES runtime.",
+        NS("exec.features"),
+    ] = False
+    diag_es_resident_candidate_slots: A[
+        int,
+        "Number of usable resident diagonal-ES candidate slots; slot zero is identity.",
+        NS("exec.features"),
+    ] = 8
     enable_weights_cpu_backup: A[
         bool,
         "Save model weights (both main model and draft model, if any) to CPU memory during release_weights_occupation and resume_weights_occupation",

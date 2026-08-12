@@ -207,7 +207,7 @@ class EagerRunner(BaseRunner):
         raise ValueError(f"Invalid forward mode for eager runner: {mode}")
 
     def _resolve_decode_pdmux(
-        self,
+        self, forward_batch: ForwardBatch
     ) -> Tuple[Any, contextlib.AbstractContextManager]:
         """Resolve the (attn_backend, forward_context) the eager decode forward
         runs under. PDmux selects a per-stream backend and publishes it via an
@@ -215,7 +215,10 @@ class EagerRunner(BaseRunner):
         model_runner = self.model_runner
         if self.enable_pdmux:
             return model_runner.decode_attn_backend, forward_context(
-                ForwardContext(attn_backend=model_runner.decode_attn_backend)
+                ForwardContext(
+                    attn_backend=model_runner.decode_attn_backend,
+                    es_candidate_slots=forward_batch.es_candidate_slots,
+                )
             )
         return model_runner.attn_backend, contextlib.nullcontext()
 
@@ -226,7 +229,7 @@ class EagerRunner(BaseRunner):
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
         model_runner = self.model_runner
         enable_pdmux = self.enable_pdmux
-        attn_backend, pdmux_ctx = self._resolve_decode_pdmux()
+        attn_backend, pdmux_ctx = self._resolve_decode_pdmux(forward_batch)
         if not enable_pdmux:
             forward_batch = self.load_batch(forward_batch, pp_proxy_tensors)
         if forward_batch.needs_forward_metadata_init():

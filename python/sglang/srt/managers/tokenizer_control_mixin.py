@@ -25,6 +25,8 @@ from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqOutput,
     DetachHiCacheStorageReqInput,
     DetachHiCacheStorageReqOutput,
+    DiagESRegistryReqInput,
+    DiagESRegistryReqOutput,
     DumperControlReqInput,
     DumperControlReqOutput,
     ExpertDistributionReq,
@@ -119,6 +121,7 @@ _COMMUNICATOR_SPECS = [
     ("expert_distribution", ExpertDistributionReqOutput),
     ("update_lora_adapter", LoRAUpdateOutput),
     ("dumper_control", DumperControlReqOutput),
+    ("diag_es_registry", DiagESRegistryReqOutput),
     ("scale_elastic_ep", ScaleElasticEPReqOutput),
 ]
 
@@ -180,6 +183,12 @@ class TokenizerControlMixin:
             getattr(self, f"{spec[0]}_communicator").set_fan_out(worker_count)
 
         self.get_internal_state_communicator.set_fan_out(control_fan_out)
+
+    async def diag_es_registry(
+        self: TokenizerManager, obj: DiagESRegistryReqInput
+    ) -> DiagESRegistryReqOutput:
+        self.auto_create_handle_loop()
+        return (await self.diag_es_registry_communicator(obj))[0]
 
     async def add_external_corpus(
         self: TokenizerManager, obj: AddExternalCorpusReqInput

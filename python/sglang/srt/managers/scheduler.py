@@ -125,6 +125,8 @@ from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
     DetachHiCacheStorageReqInput,
     DetachHiCacheStorageReqOutput,
+    DiagESRegistryReqInput,
+    DiagESRegistryReqOutput,
     DumperControlReqInput,
     DumperControlReqOutput,
     ExpertDistributionReq,
@@ -1594,6 +1596,7 @@ class Scheduler(
                 (ConfigureLoggingReq, self.configure_logging),
                 (ScaleElasticEPReqInput, self.handle_scale_elastic_ep),
                 (DumperControlReqInput, self.handle_dumper_control),
+                (DiagESRegistryReqInput, self.handle_diag_es_registry),
                 (AddExternalCorpusReqInput, self.add_external_corpus),
                 (
                     RemoveExternalCorpusReqInput,
@@ -2412,6 +2415,7 @@ class Scheduler(
                 ),
                 routing_key=recv_req.routing_key,
                 extra_key=recv_req.extra_key,
+                es_candidate_id=recv_req.es_candidate_id,
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
                 time_stats=recv_req.time_stats,
@@ -2488,6 +2492,21 @@ class Scheduler(
             self.init_req_max_new_tokens(req)
             self._add_request_to_queue(req)
             return
+
+        if recv_req.es_candidate_id is not None:
+            from sglang.srt.diag_es import (
+                compose_diag_es_extra_key,
+                get_diag_es_manager,
+            )
+
+            candidate = get_diag_es_manager().acquire(recv_req.es_candidate_id)
+            req.es_candidate_id = candidate.candidate_id
+            req.es_candidate_slot = candidate.resident_slot
+            req.es_effective_model_digest = candidate.effective_model_digest
+            req.es_candidate_released = False
+            req.extra_key = compose_diag_es_extra_key(
+                req.extra_key, candidate.effective_model_digest
+            )
 
         self._maybe_namespace_elastic_radix_cache(req)
 
@@ -2737,6 +2756,9 @@ class Scheduler(
             and req.priority is not None
             and self.abort_on_priority_when_disabled
         ):
+            from sglang.srt.diag_es.manager import release_req_candidate
+
+            release_req_candidate(req)
             abort_req = AbortReq(
                 finished_reason={
                     "type": "abort",
@@ -2796,6 +2818,9 @@ class Scheduler(
             ),
             req_to_abort,
         )
+        from sglang.srt.diag_es.manager import release_req_candidate
+
+        release_req_candidate(req_to_abort)
         req_to_abort.time_stats.trace_ctx.abort(abort_info={"reason": message})
         return req_to_abort.rid == recv_req.rid
 
@@ -2822,6 +2847,9 @@ class Scheduler(
                     ),
                     req,
                 )
+                from sglang.srt.diag_es.manager import release_req_candidate
+
+                release_req_candidate(req)
                 deleted_reqs.add(req)
 
         if deleted_reqs:
@@ -2951,6 +2979,9 @@ class Scheduler(
 
         self.chunked_req = None
         self._pending_chunked_abort_req = None
+        from sglang.srt.diag_es.manager import release_req_candidate
+
+        release_req_candidate(req)
         self.ipc_channels.send_to_tokenizer.send_output(AbortReq(rid=req.rid), req)
         logger.debug(f"Abort chunked prefill request. {req.rid=}")
 
@@ -3512,6 +3543,9 @@ class Scheduler(
             self.new_token_ratio_tracker.current = new_token_ratio
             for req in reqs_to_abort:
                 abort_reason: FINISH_ABORT = req.to_finish
+                from sglang.srt.diag_es.manager import release_req_candidate
+
+                release_req_candidate(req)
                 self.ipc_channels.send_to_tokenizer.send_output(
                     AbortReq(
                         finished_reason=abort_reason.to_json(),
@@ -4435,6 +4469,9 @@ class Scheduler(
             # This only works for requests that have not started anything.
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
+            from sglang.srt.diag_es.manager import release_req_candidate
+
+            release_req_candidate(req)
             if self.enable_hicache_storage:
                 # to release prefetch events associated with the request
                 self.tree_cache.release_aborted_request(req.rid)
@@ -4844,6 +4881,15 @@ class Scheduler(
         if recv_req.log_level is not None:
             logging.getLogger().setLevel(recv_req.log_level.upper())
         self.ipc_channels.send_to_detokenizer.send_output(recv_req, recv_req)
+
+    def handle_diag_es_registry(
+        self, recv_req: DiagESRegistryReqInput
+    ) -> DiagESRegistryReqOutput:
+        try:
+            status = self.tp_worker.diag_es_registry(recv_req)
+            return DiagESRegistryReqOutput(success=True, message="", status=status)
+        except Exception as exc:
+            return DiagESRegistryReqOutput(success=False, message=str(exc), status={})
 
     def handle_dumper_control(self, recv_req: DumperControlReqInput):
         from sglang.srt.debug_utils.dumper import dumper

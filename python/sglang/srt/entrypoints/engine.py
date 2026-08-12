@@ -65,6 +65,7 @@ from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     DestroyWeightsUpdateGroupReqInput,
+    DiagESRegistryReqInput,
     EmbeddingReqInput,
     GenerateReqInput,
     GetWeightsByNameReqInput,
@@ -394,6 +395,7 @@ class Engine(EngineScoreMixin, EngineBase):
         session_params: Optional[Dict] = None,
         priority: Optional[int] = None,
         session_id: Optional[str] = None,
+        es_candidate_id: Optional[Union[List[str], str]] = None,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -432,6 +434,7 @@ class Engine(EngineScoreMixin, EngineBase):
             session_id=session_id,
             session_params=session_params,
             priority=priority,
+            es_candidate_id=es_candidate_id,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -500,6 +503,7 @@ class Engine(EngineScoreMixin, EngineBase):
         session_params: Optional[Dict] = None,
         priority: Optional[int] = None,
         session_id: Optional[str] = None,
+        es_candidate_id: Optional[Union[List[str], str]] = None,
     ) -> Union[Dict, AsyncIterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -538,6 +542,7 @@ class Engine(EngineScoreMixin, EngineBase):
             session_id=session_id,
             session_params=session_params,
             priority=priority,
+            es_candidate_id=es_candidate_id,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -1421,6 +1426,101 @@ class Engine(EngineScoreMixin, EngineBase):
         return self.loop.run_until_complete(
             self.tokenizer_manager.update_weights_from_tensor(obj, None)
         )
+
+    def register_diag_es_candidate(
+        self,
+        candidate_id: str,
+        dense_gates: Dict[str, torch.Tensor],
+        expert_fc1_gates: torch.Tensor,
+        expert_fc2_gates: torch.Tensor,
+        effective_model_digest: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        named_gates = [
+            (f"dense:{site_id}", gate) for site_id, gate in dense_gates.items()
+        ]
+        named_gates.extend(
+            (
+                ("expert:moe_fc1", expert_fc1_gates),
+                ("expert:moe_fc2", expert_fc2_gates),
+            )
+        )
+        obj = DiagESRegistryReqInput(
+            action="register",
+            candidate_id=candidate_id,
+            effective_model_digest=effective_model_digest,
+            serialized_gates=self._serialize_tensors_per_rank(named_gates, None),
+        )
+        result = self.loop.run_until_complete(
+            self.tokenizer_manager.diag_es_registry(obj)
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    async def async_register_diag_es_candidate(
+        self,
+        candidate_id: str,
+        dense_gates: Dict[str, torch.Tensor],
+        expert_fc1_gates: torch.Tensor,
+        expert_fc2_gates: torch.Tensor,
+        effective_model_digest: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        named_gates = [
+            (f"dense:{site_id}", gate) for site_id, gate in dense_gates.items()
+        ]
+        named_gates.extend(
+            (
+                ("expert:moe_fc1", expert_fc1_gates),
+                ("expert:moe_fc2", expert_fc2_gates),
+            )
+        )
+        result = await self.tokenizer_manager.diag_es_registry(
+            DiagESRegistryReqInput(
+                action="register",
+                candidate_id=candidate_id,
+                effective_model_digest=effective_model_digest,
+                serialized_gates=self._serialize_tensors_per_rank(named_gates, None),
+            )
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    def retire_diag_es_candidate(self, candidate_id: str) -> Dict[str, Any]:
+        result = self.loop.run_until_complete(
+            self.tokenizer_manager.diag_es_registry(
+                DiagESRegistryReqInput(action="retire", candidate_id=candidate_id)
+            )
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    async def async_retire_diag_es_candidate(self, candidate_id: str) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_registry(
+            DiagESRegistryReqInput(action="retire", candidate_id=candidate_id)
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    def get_diag_es_registry_status(self) -> Dict[str, Any]:
+        result = self.loop.run_until_complete(
+            self.tokenizer_manager.diag_es_registry(
+                DiagESRegistryReqInput(action="status")
+            )
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    async def async_get_diag_es_registry_status(self) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_registry(
+            DiagESRegistryReqInput(action="status")
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
 
     def update_weights_from_disk(
         self,

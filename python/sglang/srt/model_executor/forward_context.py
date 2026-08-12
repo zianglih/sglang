@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    import torch
+
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
     from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
 
@@ -38,6 +40,7 @@ class ForwardContext:
     write time — use dataclasses.replace for per-call overrides."""
 
     attn_backend: AttentionBackend
+    es_candidate_slots: Optional[torch.Tensor] = None
 
 
 _current: Optional[ForwardContext] = None

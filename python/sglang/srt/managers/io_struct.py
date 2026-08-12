@@ -289,6 +289,8 @@ class GenerateReqInput:
     priority: Optional[int] = None
     # Extra cache key for classifying the request (e.g. cache_salt)
     extra_key: Optional[Union[List[str], str]] = None
+    # Immutable diagonal-ES candidate bound to this request.
+    es_candidate_id: Optional[Union[List[str], str]] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -510,6 +512,7 @@ class GenerateReqInput:
         self._normalize_return_hidden_states(num)
         self._normalize_custom_logit_processor(num)
         self._normalize_extra_key(num)
+        self._normalize_es_candidate_id(num)
         self._normalize_bootstrap_params(num)
 
     def _expand_inputs(self, num):
@@ -713,6 +716,20 @@ class GenerateReqInput:
         else:
             raise ValueError("extra_key should be a list or a string.")
 
+    def _normalize_es_candidate_id(self, num):
+        if self.es_candidate_id is None:
+            return
+        if isinstance(self.es_candidate_id, str):
+            self.es_candidate_id = [self.es_candidate_id] * num
+        elif isinstance(self.es_candidate_id, list):
+            if len(self.es_candidate_id) != self.batch_size:
+                raise ValueError(
+                    "The length of es_candidate_id should equal the batch size."
+                )
+            self.es_candidate_id = self.es_candidate_id * self.parallel_sample_num
+        else:
+            raise ValueError("es_candidate_id should be a list or a string.")
+
     def _normalize_bootstrap_params(self, num):
         """Normalize bootstrap parameters for batch processing."""
         # Normalize bootstrap_host
@@ -837,6 +854,11 @@ class GenerateReqInput:
             max_thinking_tokens=self.max_thinking_tokens,
             priority=self.priority,
             extra_key=self.extra_key[i] if self.extra_key is not None else None,
+            es_candidate_id=(
+                self.es_candidate_id[i]
+                if isinstance(self.es_candidate_id, list)
+                else self.es_candidate_id
+            ),
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
             return_bytes=self.return_bytes,
@@ -927,6 +949,7 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
 
     # Extra cache key for classifying the request (e.g. cache_salt)
     extra_key: Optional[str] = None
+    es_candidate_id: Optional[str] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -1734,6 +1757,19 @@ class UpdateWeightsFromTensorReqInput(BaseReq, kw_only=True):
 class UpdateWeightsFromTensorReqOutput(BaseReq, kw_only=True):
     success: bool
     message: str
+
+
+class DiagESRegistryReqInput(BaseReq, kw_only=True):
+    action: Literal["register", "retire", "status"]
+    candidate_id: Optional[str] = None
+    effective_model_digest: Optional[str] = None
+    serialized_gates: Optional[List[bytes]] = None
+
+
+class DiagESRegistryReqOutput(BaseReq, kw_only=True):
+    success: bool
+    message: str
+    status: Dict[str, Any]
 
 
 class InitWeightsSendGroupForRemoteInstanceReqInput(BaseReq, kw_only=True):

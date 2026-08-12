@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SAMPLING_SEED = 42
+
 
 @dataclasses.dataclass
 class SamplingBatchInfo:
@@ -70,7 +72,7 @@ class SamplingBatchInfo:
         Dict[int, Tuple[CustomLogitProcessor, torch.Tensor]]
     ] = None
 
-    # Used for deterministic sampling
+    # Used for reproducible per-request sampling
     sampling_seed: Optional[torch.Tensor] = None
 
     # Per-request flag for returning sparse sampling support metadata.
@@ -114,20 +116,29 @@ class SamplingBatchInfo:
             dtype=torch.float,
             pin_memory=_pin,
         ).to(device, non_blocking=True)
+        # Kernel-level deterministic inference and request-level seeded sampling
+        # are separate contracts.  A request seed must select the seeded sampler
+        # even when deterministic attention/all-reduce modes are disabled (for
+        # example, with trtllm_mha).  The tensor is batch-dense, so requests that
+        # omit a seed in an otherwise seeded batch use the same canonical default
+        # as global deterministic inference.
+        enable_seeded_sampling = enable_deterministic or any(
+            r.sampling_params.sampling_seed is not None for r in reqs
+        )
         sampling_seed = (
             torch.tensor(
                 [
                     (
                         r.sampling_params.sampling_seed
                         if r.sampling_params.sampling_seed is not None
-                        else 42
+                        else DEFAULT_SAMPLING_SEED
                     )
                     for r in reqs
                 ],
                 dtype=torch.int64,
                 pin_memory=_pin,
             ).to(device, non_blocking=True)
-            if enable_deterministic
+            if enable_seeded_sampling
             else None
         )
 
@@ -430,13 +441,19 @@ class SamplingBatchInfo:
         # Note: because the __len()__ operator is defined on the temperatures tensor,
         # please make sure any merge operation with len(self) or len(other) is done before
         # the merge operation of the temperatures tensor below.
-        for item in [
-            "temperatures",
-            "top_ps",
-            "top_ks",
-            "min_ps",
-            "sampling_seed",
-        ]:
+        # ``sampling_seed`` is optional for a fully unseeded batch.  Once either
+        # side is seeded, materialize the missing side with the canonical default
+        # so the merged tensor remains aligned one-to-one with requests.
+        self.sampling_seed = merge_bias_tensor(
+            self.sampling_seed,
+            other.sampling_seed,
+            self_len,
+            other_len,
+            self.device,
+            DEFAULT_SAMPLING_SEED,
+        )
+
+        for item in ["temperatures", "top_ps", "top_ks", "min_ps"]:
             self_val = getattr(self, item, None)
             other_val = getattr(other, item, None)
             if self_val is not None and other_val is not None:

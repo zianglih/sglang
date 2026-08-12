@@ -25,6 +25,7 @@ from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
+    DiagESRegistryReqInput,
     GetWeightsByNameReqInput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
     InitWeightsUpdateGroupReqInput,
@@ -210,6 +211,29 @@ class BaseTpWorker(ABC):
             load_format=recv_req.load_format,
         )
         return success, message
+
+    def diag_es_registry(self, recv_req: DiagESRegistryReqInput):
+        from sglang.srt.diag_es import get_diag_es_manager
+
+        manager = get_diag_es_manager()
+        if recv_req.action == "status":
+            return manager.status()
+        if recv_req.action == "retire":
+            return manager.retire_candidate(recv_req.candidate_id)
+
+        named_gates = dict(self._deserialize_own_rank(recv_req.serialized_gates))
+        dense_gates = {
+            name.removeprefix("dense:"): tensor
+            for name, tensor in named_gates.items()
+            if name.startswith("dense:")
+        }
+        return manager.register_candidate(
+            candidate_id=recv_req.candidate_id,
+            dense_gates=dense_gates,
+            expert_fc1_gates=named_gates["expert:moe_fc1"],
+            expert_fc2_gates=named_gates["expert:moe_fc2"],
+            effective_model_digest=recv_req.effective_model_digest,
+        )
 
     def update_weights_from_ipc(self, recv_req: UpdateWeightsFromIPCReqInput):
         """Update weights from IPC for checkpoint-engine integration."""

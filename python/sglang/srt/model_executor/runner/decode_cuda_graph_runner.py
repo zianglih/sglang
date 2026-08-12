@@ -806,6 +806,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         seq_lens_cpu = _slot("seq_lens_cpu")
         out_cache_loc = _slot("out_cache_loc")
         positions = _slot("positions")
+        es_candidate_slots = _slot("es_candidate_slots")
         encoder_lens = (
             _slot("encoder_lens") if registry.has_slot("encoder_lens") else None
         )
@@ -902,6 +903,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             encoder_lens=encoder_lens,
             return_logprob=False,
             positions=positions,
+            es_candidate_slots=es_candidate_slots,
             global_num_tokens_gpu=buffers.global_num_tokens_gpu,
             global_num_tokens_for_logprob_gpu=buffers.global_num_tokens_for_logprob_gpu,
             dp_padding_mode=DpPaddingMode.get_default_mode_in_cuda_graph(),
@@ -1052,7 +1054,12 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         # All setup hooks below read get_attn_backend() (TboForwardBatchPreparer,
         # DeepEP adapter, …) so they must run inside the same ForwardContext
         # that wraps the warmup/capture forward.
-        with forward_context(ForwardContext(attn_backend=attn_backend)):
+        with forward_context(
+            ForwardContext(
+                attn_backend=attn_backend,
+                es_candidate_slots=forward_batch.es_candidate_slots,
+            )
+        ):
             self.tbo_plugin.capture_one_batch_size(forward_batch, num_tokens=num_tokens)
 
             if forward_batch.lora_ids is not None:
@@ -1181,6 +1188,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                 self._stage_ragged_verify_layout(ragged_layout, graph_size_key)
             self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
+            self.buffers.es_candidate_slots[: self.raw_num_token].copy_(
+                forward_batch.es_candidate_slots
+            )
             if (
                 not is_ragged
                 and self.model_runner.spec_algorithm.is_dflash_family()

@@ -41,6 +41,7 @@ class MoeRunnerConfig:
     hidden_size: Optional[int] = None
     intermediate_size_per_partition: Optional[int] = None
     layer_id: Optional[int] = None
+    es_layer_id: Optional[int] = None
     top_k: Optional[int] = None
     num_fused_shared_experts: Optional[int] = None
     params_dtype: Optional[torch.dtype] = None

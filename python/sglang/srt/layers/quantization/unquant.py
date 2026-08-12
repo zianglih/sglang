@@ -69,12 +69,16 @@ class Bf16GemmBackend(Enum):
     AUTO = "auto"
     CUTEDSL = "cutedsl"
     TORCH = "torch"
+    TRITON = "triton"
 
     def is_auto(self) -> bool:
         return self == Bf16GemmBackend.AUTO
 
     def is_cutedsl(self) -> bool:
         return self == Bf16GemmBackend.CUTEDSL
+
+    def is_triton(self) -> bool:
+        return self == Bf16GemmBackend.TRITON
 
 
 _BF16_GEMM_BACKEND: Optional[Bf16GemmBackend] = None
@@ -118,6 +122,10 @@ def _bf16_gemm_dispatch_fake(
 def bf16_gemm_dispatch(
     x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]
 ) -> torch.Tensor:
+    if get_bf16_gemm_backend().is_triton():
+        from sglang.kernels.ops.gemm.triton_bf16_gemm import triton_bf16_linear
+
+        return triton_bf16_linear(x, weight, bias)
     if _use_cutedsl_bf16_gemm is not None and _use_cutedsl_bf16_gemm(
         x.numel() // x.shape[-1], weight.shape[0], weight.shape[1]
     ):
@@ -207,6 +215,11 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if getattr(layer, "es_site_id", None) is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_diag_es
+
+            x = maybe_apply_diag_es(layer, x)
+
         if use_intel_amx_backend(layer):
             x_shapes = x.shape
             if len(x_shapes) == 3:
@@ -223,6 +236,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
         elif _use_aiter and type(layer.weight.data) is torch.Tensor:
             return tgemm.mm(x, layer.weight, bias, otype=x.dtype)
+
+        elif get_bf16_gemm_backend().is_triton():
+            from sglang.kernels.ops.gemm.triton_bf16_gemm import (
+                triton_bf16_linear,
+            )
+
+            return triton_bf16_linear(x, layer.weight, bias)
 
         elif (
             get_bf16_gemm_backend().is_cutedsl()
@@ -261,6 +281,18 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run an inference-only BF16 linear into caller-owned storage."""
+        if getattr(layer, "es_site_id", None) is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_diag_es
+
+            x = maybe_apply_diag_es(layer, x)
+
+        if get_bf16_gemm_backend().is_triton():
+            from sglang.kernels.ops.gemm.triton_bf16_gemm import (
+                triton_bf16_linear_out,
+            )
+
+            return triton_bf16_linear_out(x, layer.weight, output, bias)
+
         if (
             get_bf16_gemm_backend().is_cutedsl()
             and x.is_cuda

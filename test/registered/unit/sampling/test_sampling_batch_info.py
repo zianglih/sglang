@@ -439,6 +439,38 @@ class TestMergeBatch(CustomTestCase):
         self.assertEqual(info1.sampling_seed[1].item(), 20)
         self.assertEqual(info1.sampling_seed[2].item(), 30)
 
+    def test_merge_materializes_missing_sampling_seeds(self):
+        """A seeded and unseeded batch keep one seed aligned per request."""
+        seeded = _make_info(batch_size=1)
+        seeded.sampling_seed = torch.tensor([10], dtype=torch.int64)
+        unseeded = _make_info(batch_size=2)
+        unseeded.sampling_seed = None
+
+        seeded.merge_batch(unseeded)
+
+        self.assertTrue(
+            torch.equal(
+                seeded.sampling_seed,
+                torch.tensor([10, 42, 42], dtype=torch.int64),
+            )
+        )
+
+    def test_merge_materializes_missing_sampling_seeds_on_left(self):
+        """The optional seed merge is symmetric when the left side is unseeded."""
+        unseeded = _make_info(batch_size=2)
+        unseeded.sampling_seed = None
+        seeded = _make_info(batch_size=1)
+        seeded.sampling_seed = torch.tensor([10], dtype=torch.int64)
+
+        unseeded.merge_batch(seeded)
+
+        self.assertTrue(
+            torch.equal(
+                unseeded.sampling_seed,
+                torch.tensor([42, 42, 10], dtype=torch.int64),
+            )
+        )
+
 
 # copy_for_forward
 class TestCopyForForward(CustomTestCase):
@@ -552,6 +584,30 @@ class TestFromScheduleBatch(CustomTestCase):
         self.assertIsNotNone(info.sampling_seed)
         self.assertEqual(info.sampling_seed[0].item(), 123)
         self.assertEqual(info.sampling_seed[1].item(), 42)  # default
+
+    def test_request_seed_without_deterministic_kernel_mode(self):
+        """An explicit request seed does not require deterministic kernels."""
+        self.assertFalse(self._exec_ns.deterministic.enable_deterministic_inference)
+        reqs = [self._make_req(seed=123), self._make_req(seed=None)]
+        batch = MagicMock(reqs=reqs, device=DEVICE)
+
+        info = SamplingBatchInfo.from_schedule_batch(batch, VOCAB_SIZE)
+
+        self.assertTrue(
+            torch.equal(
+                info.sampling_seed,
+                torch.tensor([123, 42], dtype=torch.int64),
+            )
+        )
+
+    def test_unseeded_batch_without_deterministic_kernel_mode(self):
+        """Fully unseeded batches retain the ordinary stochastic sampler path."""
+        reqs = [self._make_req(seed=None), self._make_req(seed=None)]
+        batch = MagicMock(reqs=reqs, device=DEVICE)
+
+        info = SamplingBatchInfo.from_schedule_batch(batch, VOCAB_SIZE)
+
+        self.assertIsNone(info.sampling_seed)
 
     def test_from_schedule_batch_sampling_flags(self):
         """Test that sampling flags (need_top_p/top_k/min_p) are set correctly."""

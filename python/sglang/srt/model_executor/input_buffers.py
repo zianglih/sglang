@@ -50,6 +50,7 @@ INDEX_SEMANTIC_BUFFERS = frozenset(
         "mrope_positions",
         "out_cache_loc",
         "req_pool_indices",
+        "es_candidate_slots",
         "mamba_track_indices",
         "mamba_track_mask",
     }

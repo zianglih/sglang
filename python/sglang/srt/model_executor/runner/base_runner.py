@@ -588,6 +588,9 @@ class BaseRunner(ABC):
             next_token_logits_buffer=next_token_logits_buffer,
             orig_seq_lens=seq_lens,
             out_cache_loc=out_cache_loc,
+            es_candidate_slots=torch.zeros(
+                (num_tokens,), dtype=torch.int32, device=mr.device
+            ),
             seq_lens_sum=seq_lens.sum().item(),
             encoder_lens=encoder_lens,
             return_logprob=False,
@@ -656,7 +659,12 @@ class BaseRunner(ABC):
 
         torch.get_device_module(mr.device).synchronize()
         mr.tp_group.barrier()
-        with forward_context(ForwardContext(attn_backend=mr.attn_backend)):
+        with forward_context(
+            ForwardContext(
+                attn_backend=mr.attn_backend,
+                es_candidate_slots=forward_batch.es_candidate_slots,
+            )
+        ):
             with run_ctx or empty_context():
                 run_once()
 

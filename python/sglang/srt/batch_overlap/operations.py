@@ -50,7 +50,7 @@ def execute_overlapped_operations(
     # Each TBO child sub-batch dispatches against its own per-child backend
     # (children[i] has metadata init'd for sub-batch i; the parent's primary
     # has metadata for the full pre-split batch).
-    child_ctx_a, child_ctx_b = _resolve_tbo_child_contexts()
+    child_ctx_a, child_ctx_b = _resolve_tbo_child_contexts(inputs_a, inputs_b)
 
     stages_a = _convert_operations_to_stages(operations_a)
     stages_b = _convert_operations_to_stages(operations_b)
@@ -71,7 +71,7 @@ def execute_overlapped_operations(
     return [executor_a.output, executor_b.output]
 
 
-def _resolve_tbo_child_contexts():
+def _resolve_tbo_child_contexts(inputs_a, inputs_b):
     """Return (child_ctx_a, child_ctx_b) derived from the active TboAttnBackend,
     or (None, None) if the active backend is not a TBO dispatcher (e.g. a
     backend that handles TBO splitting internally like DeepSeek MHA's
@@ -85,8 +85,16 @@ def _resolve_tbo_child_contexts():
         return None, None
     child_a, child_b = backend.children
     return (
-        replace(ctx, attn_backend=child_a),
-        replace(ctx, attn_backend=child_b),
+        replace(
+            ctx,
+            attn_backend=child_a,
+            es_candidate_slots=inputs_a["forward_batch"].es_candidate_slots,
+        ),
+        replace(
+            ctx,
+            attn_backend=child_b,
+            es_candidate_slots=inputs_b["forward_batch"].es_candidate_slots,
+        ),
     )
 
 

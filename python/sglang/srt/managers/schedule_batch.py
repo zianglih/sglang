@@ -846,6 +846,7 @@ class Req(ReqDllmMixin):
         priority: Optional[int] = None,
         metrics_collector: Optional[SchedulerMetricsCollector] = None,
         extra_key: Optional[str] = None,
+        es_candidate_id: Optional[str] = None,
         routing_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
@@ -931,6 +932,12 @@ class Req(ReqDllmMixin):
             ) + lora_id  # lora_id is concatenated to the extra key
 
         self.extra_key = extra_key
+        self.es_candidate_id = es_candidate_id
+        self.es_candidate_slot = 0
+        self.es_effective_model_digest: Optional[str] = None
+        # The scheduler flips this only after the resident manager acquire.
+        # Requests rejected before that point must not release an unheld ref.
+        self.es_candidate_released = True
         self.lora_id = lora_id
         self.routing_key = routing_key
 

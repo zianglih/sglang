@@ -69,6 +69,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
     seq_lens_cpu: torch.Tensor
     out_cache_loc: torch.Tensor
     positions: torch.Tensor
+    es_candidate_slots: torch.Tensor
     mrope_positions: torch.Tensor
     num_token_non_padded: torch.Tensor
     custom_mask: torch.Tensor
@@ -114,6 +115,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
             seq_lens = torch.full((max_bs,), seq_len_fill_value, dtype=torch.int64)
             out_cache_loc = torch.zeros((max_num_token,), dtype=cache_loc_dtype)
             positions = torch.zeros((max_num_token,), dtype=torch.int64)
+            es_candidate_slots = torch.zeros((max_num_token,), dtype=torch.int32)
             mrope_positions = torch.zeros((3, max_num_token), dtype=torch.int64)
             num_token_non_padded = torch.zeros((1,), dtype=torch.int32)
             custom_mask = torch.ones(
@@ -204,6 +206,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
             seq_lens_cpu=seq_lens_cpu,
             out_cache_loc=out_cache_loc,
             positions=positions,
+            es_candidate_slots=es_candidate_slots,
             mrope_positions=mrope_positions,
             num_token_non_padded=num_token_non_padded,
             custom_mask=custom_mask,
@@ -236,6 +239,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
         if bs != raw_bs:
             self.seq_lens.fill_(seq_len_fill_value)
             self.out_cache_loc.zero_()
+            self.es_candidate_slots.zero_()
             if self.mamba_track_indices is not None:
                 self.mamba_track_indices.zero_()
             if self.mamba_track_mask is not None:
@@ -248,6 +252,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
             self.seq_lens[:raw_bs],
             self.out_cache_loc[:raw_num_token],
             self.positions[:raw_num_token],
+            self.es_candidate_slots[:raw_num_token],
         ]
         srcs = [
             forward_batch.input_ids,
@@ -255,6 +260,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
             forward_batch.seq_lens,
             forward_batch.out_cache_loc,
             forward_batch.positions,
+            forward_batch.es_candidate_slots,
         ]
 
         if self.ngram_embedding_info is not None:
@@ -335,6 +341,7 @@ class DecodeInputBuffers(ForwardInputBuffers):
 class PrefillInputBuffers(ForwardInputBuffers):
     input_ids: torch.Tensor
     out_cache_loc: torch.Tensor
+    es_candidate_slots: torch.Tensor
     num_token_non_padded: torch.Tensor
     mamba_track_indices: Optional[torch.Tensor]
     mamba_track_mask: Optional[torch.Tensor]
@@ -359,6 +366,7 @@ class PrefillInputBuffers(ForwardInputBuffers):
         with torch.device(device):
             input_ids = torch.zeros((max_num_tokens,), dtype=torch.int64)
             out_cache_loc = torch.zeros((max_num_tokens,), dtype=cache_loc_dtype)
+            es_candidate_slots = torch.zeros((max_num_tokens,), dtype=torch.int32)
             num_token_non_padded = torch.zeros((1,), dtype=torch.int32)
             mamba_track_indices = (
                 torch.zeros((max_bs,), dtype=torch.int64)
@@ -385,6 +393,7 @@ class PrefillInputBuffers(ForwardInputBuffers):
         return cls(
             input_ids=input_ids,
             out_cache_loc=out_cache_loc,
+            es_candidate_slots=es_candidate_slots,
             num_token_non_padded=num_token_non_padded,
             mamba_track_indices=mamba_track_indices,
             mamba_track_mask=mamba_track_mask,
@@ -410,6 +419,7 @@ class PrefillInputBuffers(ForwardInputBuffers):
             self.out_cache_loc.zero_()
             self.input_ids[raw_num_tokens:static_num_tokens].zero_()
             self.positions[raw_num_tokens:static_num_tokens].zero_()
+            self.es_candidate_slots[raw_num_tokens:static_num_tokens].zero_()
             if is_multimodal:
                 self.input_embeds[raw_num_tokens:static_num_tokens].zero_()
             if forward_batch.mrope_positions is not None:
@@ -420,6 +430,7 @@ class PrefillInputBuffers(ForwardInputBuffers):
         self.input_ids[:raw_num_tokens].copy_(forward_batch.input_ids)
         self.positions[:raw_num_tokens].copy_(forward_batch.positions)
         self.out_cache_loc[:raw_num_tokens].copy_(forward_batch.out_cache_loc)
+        self.es_candidate_slots[:raw_num_tokens].copy_(forward_batch.es_candidate_slots)
 
         if self.mamba_track_indices is not None:
             if forward_batch.mamba_track_indices is not None:

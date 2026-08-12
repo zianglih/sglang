@@ -427,6 +427,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     out_cache_loc: torch.Tensor
     # The sum of all sequence lengths
     seq_lens_sum: int
+    # Diagonal-ES resident slot for each activation/input row.
+    es_candidate_slots: Optional[torch.Tensor] = None
+    # Request-level CPU snapshot used only to fence resident-slot reuse after
+    # the forward is submitted.  It intentionally does not participate in
+    # model batching or graph input shapes.
+    es_candidate_slots_cpu: Optional[tuple[int, ...]] = None
 
     # === Borrowed from ScheduleBatch: GPU tensors (cross-stream; clone targets for stream isolation) ===
     # FIXME(lsyin): these are currently aliased by reference from ScheduleBatch. Once
@@ -799,6 +805,20 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
             out_cache_loc=batch.out_cache_loc,
+            es_candidate_slots=torch.tensor(
+                (
+                    [req.es_candidate_slot for req in batch.reqs]
+                    if batch.forward_mode.is_decode_or_idle()
+                    else [
+                        req.es_candidate_slot
+                        for req, extend_len in zip(batch.reqs, batch.extend_lens)
+                        for _ in range(extend_len)
+                    ]
+                ),
+                dtype=torch.int32,
+                device=model_runner.device,
+            ),
+            es_candidate_slots_cpu=tuple(req.es_candidate_slot for req in batch.reqs),
             seq_lens_sum=batch.seq_lens_sum,
             # Inputs aliased by reference from ScheduleBatch
             seq_lens_cpu=seq_lens_cpu,

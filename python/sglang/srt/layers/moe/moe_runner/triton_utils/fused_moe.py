@@ -94,6 +94,23 @@ if not _is_cuda and not _is_hip and not _is_xpu:
 padding_size = get_moe_padding_size(_use_aiter)
 
 
+def get_diag_es_moe_inputs(
+    moe_runner_config: MoeRunnerConfig,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    if moe_runner_config.es_layer_id is None:
+        return None, None, None
+
+    from sglang.srt.diag_es import get_expert_gate_bank
+    from sglang.srt.model_executor.forward_context import get_forward_context
+
+    layer_id = moe_runner_config.es_layer_id
+    return (
+        get_forward_context().es_candidate_slots,
+        get_expert_gate_bank(layer_id, "moe_fc1"),
+        get_expert_gate_bank(layer_id, "moe_fc2"),
+    )
+
+
 def _use_moe_sum_reduce_torch_compile(num_tokens: int) -> bool:
     return num_tokens <= 32 and not is_batch_invariant_mode_enabled()
 
@@ -129,6 +146,9 @@ def inplace_fused_experts(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
+    diag_es_token_slots: Optional[torch.Tensor] = None,
+    diag_es_fc1_gate: Optional[torch.Tensor] = None,
+    diag_es_fc2_gate: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -162,6 +182,9 @@ def inplace_fused_experts(
         swiglu_limit=swiglu_limit,
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
+        diag_es_token_slots=diag_es_token_slots,
+        diag_es_fc1_gate=diag_es_fc1_gate,
+        diag_es_fc2_gate=diag_es_fc2_gate,
     )
 
 
@@ -197,6 +220,9 @@ def outplace_fused_experts(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
+    diag_es_token_slots: Optional[torch.Tensor] = None,
+    diag_es_fc1_gate: Optional[torch.Tensor] = None,
+    diag_es_fc2_gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -230,6 +256,9 @@ def outplace_fused_experts(
         swiglu_limit=swiglu_limit,
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
+        diag_es_token_slots=diag_es_token_slots,
+        diag_es_fc1_gate=diag_es_fc1_gate,
+        diag_es_fc2_gate=diag_es_fc2_gate,
     )
 
 
@@ -256,6 +285,9 @@ def fused_experts(
     a1_q: Optional[torch.Tensor] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
+    diag_es_token_slots, diag_es_fc1_gate, diag_es_fc2_gate = get_diag_es_moe_inputs(
+        moe_runner_config
+    )
     filter_expert = (
         moe_runner_config.num_experts is None
         or moe_runner_config.num_experts != moe_runner_config.num_local_experts
@@ -292,6 +324,9 @@ def fused_experts(
             swiglu_limit=moe_runner_config.swiglu_limit,
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
+            diag_es_token_slots=diag_es_token_slots,
+            diag_es_fc1_gate=diag_es_fc1_gate,
+            diag_es_fc2_gate=diag_es_fc2_gate,
         )
         return hidden_states
     else:
@@ -326,6 +361,9 @@ def fused_experts(
             swiglu_limit=moe_runner_config.swiglu_limit,
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
+            diag_es_token_slots=diag_es_token_slots,
+            diag_es_fc1_gate=diag_es_fc1_gate,
+            diag_es_fc2_gate=diag_es_fc2_gate,
         )
 
 
@@ -469,6 +507,9 @@ def _fused_moe_kernel_sequence(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
+    diag_es_token_slots: Optional[torch.Tensor] = None,
+    diag_es_fc1_gate: Optional[torch.Tensor] = None,
+    diag_es_fc2_gate: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -481,6 +522,10 @@ def _fused_moe_kernel_sequence(
     quant, ``a1_scale`` holds the matching scales, rows may exceed
     ``num_tokens`` due to 4-row padding). ``hidden_states`` stays bf16 and is
     still used for output dtype/shape and the inplace combine.
+
+    Diagonal ES supports two experiment arms. ``unfused`` materializes gated
+    route-major FC1 input and gates the dead post-activation buffer in place;
+    ``fused`` multiplies each A tile in the existing expert GEMM kernel.
     """
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
@@ -544,8 +589,28 @@ def _fused_moe_kernel_sequence(
         dtype=hidden_states.dtype,
     )
 
+    diag_es_gate_mode = None
+    fc1_input = a1_q if a1_q is not None else hidden_states
+    fc1_a_route_major = False
+    fc1_fused_gate = None
+    if diag_es_fc1_gate is not None:
+        diag_es_gate_mode = envs.SGLANG_DIAG_ES_MOE_GATE_MODE.get()
+        assert diag_es_gate_mode in ("unfused", "fused")
+        if diag_es_gate_mode == "unfused":
+            from sglang.srt.diag_es.moe_ops import materialize_moe_fc1_input
+
+            fc1_input = materialize_moe_fc1_input(
+                hidden_states,
+                topk_ids,
+                diag_es_token_slots,
+                diag_es_fc1_gate,
+            )
+            fc1_a_route_major = True
+        else:
+            fc1_fused_gate = diag_es_fc1_gate
+
     invoke_fused_moe_kernel(
-        a1_q if a1_q is not None else hidden_states,
+        fc1_input,
         w1,
         b1,
         intermediate_cache1,
@@ -569,7 +634,16 @@ def _fused_moe_kernel_sequence(
         block_shape=block_shape,
         c_sorted=down_moe_use_tma,
         filter_expert=filter_expert,
+        router_topk=topk,
+        a_route_major=fc1_a_route_major,
+        diag_es_gate=fc1_fused_gate,
+        diag_es_token_slots=(
+            diag_es_token_slots if diag_es_gate_mode == "fused" else None
+        ),
     )
+
+    if fc1_a_route_major:
+        del fc1_input
 
     if hooks and hooks.after_gate_up:
         # Hooks expect intermediate_cache1 shaped (num_tokens, topk, N); the
@@ -733,6 +807,16 @@ def _fused_moe_kernel_sequence(
 
     del intermediate_cache1
 
+    if diag_es_gate_mode == "unfused":
+        from sglang.srt.diag_es.moe_ops import apply_moe_fc2_gate_inplace
+
+        apply_moe_fc2_gate_inplace(
+            intermediate_cache2,
+            topk_ids,
+            diag_es_token_slots,
+            diag_es_fc2_gate,
+        )
+
     intermediate_cache3 = torch.empty(
         (num_tokens, topk, w2.shape[1]),
         device=hidden_states.device,
@@ -784,6 +868,10 @@ def _fused_moe_kernel_sequence(
         filter_expert=filter_expert,
         fuse_sum_all_reduce=use_fused_moe_sum_all_reduce,
         router_topk=topk,
+        diag_es_gate=(diag_es_fc2_gate if diag_es_gate_mode == "fused" else None),
+        diag_es_token_slots=(
+            diag_es_token_slots if diag_es_gate_mode == "fused" else None
+        ),
     )
 
     if hooks and hooks.after_down:
@@ -905,6 +993,9 @@ def fused_experts_impl(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
+    diag_es_token_slots: Optional[torch.Tensor] = None,
+    diag_es_fc1_gate: Optional[torch.Tensor] = None,
+    diag_es_fc2_gate: Optional[torch.Tensor] = None,
 ):
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
@@ -982,6 +1073,9 @@ def fused_experts_impl(
         swiglu_limit=swiglu_limit,
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
+        diag_es_token_slots=diag_es_token_slots,
+        diag_es_fc1_gate=diag_es_fc1_gate,
+        diag_es_fc2_gate=diag_es_fc2_gate,
     )
 
 

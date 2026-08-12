@@ -578,6 +578,13 @@ def build_decode_registry(
             padding_policy=PaddingPolicy.ZERO,
         ),
         GraphSlot(
+            "es_candidate_slots",
+            _tokens,
+            torch.int32,
+            axis="tokens",
+            padding_policy=PaddingPolicy.ZERO,
+        ),
+        GraphSlot(
             "req_pool_indices",
             _bs,
             torch.int64,
@@ -868,6 +875,13 @@ def build_prefill_registry(
             "out_cache_loc",
             _tokens,
             cache_loc_dtype,
+            axis="tokens",
+            padding_policy=PaddingPolicy.ZERO,
+        ),
+        GraphSlot(
+            "es_candidate_slots",
+            _tokens,
+            torch.int32,
             axis="tokens",
             padding_policy=PaddingPolicy.ZERO,
         ),

@@ -336,6 +336,8 @@ def fused_moe_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     add_mask_ptr,
+    diag_es_gate_ptr,
+    diag_es_token_slots_ptr,
     # Matrix dimensions
     N,
     K,
@@ -359,6 +361,9 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
+    stride_diag_es_ge,
+    stride_diag_es_gs,
+    stride_diag_es_gk,
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -383,6 +388,8 @@ def fused_moe_kernel(
     FUSE_SUM_ALL_REDUCE: tl.constexpr,
     LORA_PRESERVE_BASE: tl.constexpr,
     ROUTER_TOPK: tl.constexpr,
+    A_ROUTE_MAJOR: tl.constexpr,
+    APPLY_DIAG_ES: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -459,15 +466,22 @@ def fused_moe_kernel(
             )
         return
 
+    if APPLY_DIAG_ES:
+        original_token = offs_token // ROUTER_TOPK
+        diag_es_slot = tl.load(
+            diag_es_token_slots_ptr + original_token,
+            mask=token_mask,
+            other=0,
+        ).to(tl.int64)
+
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     if a_desc is not None:
         assert use_fp8_w8a8 and group_n > 0 and group_k > 0
         start_offs_m = pid_m * BLOCK_SIZE_M
     else:
-        a_ptrs = a_ptr + (
-            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-        )
+        offs_a = offs_token if A_ROUTE_MAJOR else offs_token // top_k
+        a_ptrs = a_ptr + (offs_a[:, None] * stride_am + offs_k[None, :] * stride_ak)
 
     if b_desc is not None:
         start_offs_n = pid_n * BLOCK_SIZE_N
@@ -494,7 +508,8 @@ def fused_moe_kernel(
             if a_desc is not None:
                 a_scale_ptrs = a_scale_ptr + offs_token_id * stride_asm
             else:
-                a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+                offs_a_scale = offs_token if A_ROUTE_MAJOR else offs_token // top_k
+                a_scale_ptrs = a_scale_ptr + offs_a_scale * stride_asm
             if BLOCK_SIZE_N > group_n:
                 offs_bsn = offs_bn // group_n
             else:
@@ -509,7 +524,8 @@ def fused_moe_kernel(
             )
             b_scale = tl.load(b_scale_ptrs)
             # Load per-token scale for activations
-            a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+            offs_a_scale = offs_token if A_ROUTE_MAJOR else offs_token // top_k
+            a_scale_ptrs = a_scale_ptr + offs_a_scale * stride_asm
             a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
         # tensor-wise
         else:
@@ -543,6 +559,18 @@ def fused_moe_kernel(
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k_start),
                 other=0.0,
             )
+
+        if APPLY_DIAG_ES:
+            diag_es_k = k_start + offs_k
+            diag_es_gate = tl.load(
+                diag_es_gate_ptr
+                + off_experts * stride_diag_es_ge
+                + diag_es_slot[:, None] * stride_diag_es_gs
+                + diag_es_k[None, :] * stride_diag_es_gk,
+                mask=token_mask[:, None] & (diag_es_k[None, :] < K),
+                other=0.0,
+            )
+            a = (a * diag_es_gate).to(compute_type)
 
         if b_desc is not None:
             b = (
@@ -745,9 +773,13 @@ def invoke_fused_moe_kernel(
     add_output_mask: Optional[torch.Tensor] = None,
     mask_output: bool = False,
     lora_preserve_base: bool = False,
+    a_route_major: bool = False,
+    diag_es_gate: Optional[torch.Tensor] = None,
+    diag_es_token_slots: Optional[torch.Tensor] = None,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
+    assert (diag_es_gate is None) == (diag_es_token_slots is None)
 
     if use_fp8_w8a8:
         swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -924,6 +956,8 @@ def invoke_fused_moe_kernel(
             expert_ids,
             num_tokens_post_padded,
             add_output_mask,
+            diag_es_gate,
+            diag_es_token_slots,
             B.shape[1],
             B.shape[2] - padded_size,
             sorted_token_ids.shape[0],
@@ -942,6 +976,9 @@ def invoke_fused_moe_kernel(
             B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
             B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
             B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+            diag_es_gate.stride(0) if diag_es_gate is not None else 0,
+            diag_es_gate.stride(1) if diag_es_gate is not None else 0,
+            diag_es_gate.stride(2) if diag_es_gate is not None else 0,
             0 if block_shape is None else block_shape[0],
             0 if block_shape is None else block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -960,6 +997,8 @@ def invoke_fused_moe_kernel(
             LORA_PRESERVE_BASE=lora_preserve_base,
             FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
             ROUTER_TOPK=router_topk,
+            A_ROUTE_MAJOR=a_route_major,
+            APPLY_DIAG_ES=diag_es_gate is not None,
             **config,
         )
 

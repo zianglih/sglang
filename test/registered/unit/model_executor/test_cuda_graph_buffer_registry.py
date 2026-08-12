@@ -41,6 +41,7 @@ class _MiniForwardBatch:
     req_pool_indices: Optional[torch.Tensor] = None
     out_cache_loc: Optional[torch.Tensor] = None
     positions: Optional[torch.Tensor] = None
+    es_candidate_slots: Optional[torch.Tensor] = None
     seq_lens_cpu: Optional[torch.Tensor] = None
     encoder_lens: Optional[torch.Tensor] = None
     mrope_positions: Optional[torch.Tensor] = None
@@ -671,6 +672,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             "input_ids",
             "positions",
             "out_cache_loc",
+            "es_candidate_slots",
             "req_pool_indices",
             "seq_lens",
             "seq_lens_cpu",
@@ -685,13 +687,20 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.tensor([10, 11], dtype=torch.int64),
             positions=torch.tensor([0, 1], dtype=torch.int64),
             out_cache_loc=torch.tensor([100, 101], dtype=torch.int64),
+            es_candidate_slots=torch.tensor([1, 2], dtype=torch.int32),
             req_pool_indices=torch.tensor([1, 2], dtype=torch.int64),
             seq_lens=torch.tensor([7, 8], dtype=torch.int64),
             seq_lens_cpu=torch.tensor([7, 8], dtype=torch.int64),
             mrope_positions=torch.tensor([[0, 1], [0, 1], [0, 1]], dtype=torch.int64),
         )
         # Poison tails so resets are observable.
-        for n in ("input_ids", "positions", "out_cache_loc", "req_pool_indices"):
+        for n in (
+            "input_ids",
+            "positions",
+            "out_cache_loc",
+            "es_candidate_slots",
+            "req_pool_indices",
+        ):
             reg.get_slot(n).buffer.fill_(99)
         reg.fill_from(
             fb,
@@ -709,6 +718,12 @@ class TestBuildDecodeRegistry(unittest.TestCase):
         oc = reg.get_slot("out_cache_loc").buffer
         self.assertTrue(torch.equal(oc[:2], torch.tensor([100, 101])))
         self.assertTrue(torch.equal(oc[2:4], torch.tensor([0, 0])))
+        slots = reg.get_slot("es_candidate_slots").buffer
+        self.assertEqual(slots.dtype, torch.int32)
+        self.assertTrue(torch.equal(slots[:2], torch.tensor([1, 2], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(slots[2:4], torch.tensor([0, 0], dtype=torch.int32))
+        )
         rp = reg.get_slot("req_pool_indices").buffer
         self.assertTrue(torch.equal(rp[:2], torch.tensor([1, 2])))
         self.assertTrue(torch.equal(rp[2:4], torch.tensor([0, 0])))
@@ -747,6 +762,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
             out_cache_loc=torch.zeros(8, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(8, dtype=torch.int32),
             req_pool_indices=torch.zeros(4, dtype=torch.int64),
             seq_lens=torch.full((4,), 5, dtype=torch.int64),
             seq_lens_cpu=torch.full((4,), 5, dtype=torch.int64),
@@ -763,7 +779,13 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             source=src,
         )
         # Registry slots share storage with the source's tensors.
-        for name in ("input_ids", "seq_lens", "seq_lens_cpu", "mrope_positions"):
+        for name in (
+            "input_ids",
+            "es_candidate_slots",
+            "seq_lens",
+            "seq_lens_cpu",
+            "mrope_positions",
+        ):
             self.assertEqual(
                 reg.get_slot(name).buffer.data_ptr(),
                 getattr(src, name).data_ptr(),
@@ -782,6 +804,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
             out_cache_loc=torch.zeros(8, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(8, dtype=torch.int32),
             req_pool_indices=torch.zeros(4, dtype=torch.int64),
             seq_lens=torch.full((4,), 5, dtype=torch.int64),
             seq_lens_cpu=torch.full((4,), 5, dtype=torch.int64),
@@ -879,6 +902,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
             out_cache_loc=torch.zeros(8, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(8, dtype=torch.int32),
             req_pool_indices=torch.zeros(4, dtype=torch.int64),
             seq_lens=torch.full((4,), 5, dtype=torch.int64),
             seq_lens_cpu=torch.full((4,), 5, dtype=torch.int64),
@@ -927,6 +951,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
             out_cache_loc=torch.zeros(8, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(8, dtype=torch.int32),
             req_pool_indices=torch.zeros(4, dtype=torch.int64),
             seq_lens=torch.full((4,), 5, dtype=torch.int64),
             seq_lens_cpu=torch.full((4,), 5, dtype=torch.int64),
@@ -975,6 +1000,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             input_ids=torch.zeros(8, dtype=torch.int64),
             positions=torch.zeros(8, dtype=torch.int64),
             out_cache_loc=torch.zeros(8, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(8, dtype=torch.int32),
             req_pool_indices=torch.zeros(4, dtype=torch.int64),
             seq_lens=torch.full((4,), 5, dtype=torch.int64),
             seq_lens_cpu=torch.full((4,), 5, dtype=torch.int64),
@@ -1019,9 +1045,43 @@ class TestBuildPrefillRegistry(unittest.TestCase):
             input_ids=torch.zeros(16, dtype=torch.int64),
             positions=torch.zeros(16, dtype=torch.int64),
             out_cache_loc=torch.zeros(16, dtype=torch.int64),
+            es_candidate_slots=torch.zeros(16, dtype=torch.int32),
         )
         base.update(extra)
         return SimpleNamespace(**base)
+
+    def test_prefill_input_buffers_adopt_candidate_slot_storage(self):
+        from sglang.srt.model_executor.cuda_graph_buffer_registry import (
+            build_prefill_registry,
+        )
+        from sglang.srt.model_executor.runner_utils.buffers import (
+            PrefillInputBuffers,
+        )
+
+        source = PrefillInputBuffers.create(
+            device=torch.device("cpu"),
+            max_bs=2,
+            max_num_tokens=16,
+            cache_loc_dtype=torch.int64,
+            is_multimodal=False,
+            hidden_size=4,
+            dtype=torch.bfloat16,
+            enable_mamba_track=False,
+        )
+        reg = build_prefill_registry(
+            device=torch.device("cpu"),
+            max_bs=2,
+            max_num_token=16,
+            cache_loc_dtype=torch.int64,
+            source=source,
+        )
+
+        self.assertEqual(source.es_candidate_slots.dtype, torch.int32)
+        self.assertEqual(tuple(source.es_candidate_slots.shape), (16,))
+        self.assertEqual(
+            reg.get_slot("es_candidate_slots").buffer.data_ptr(),
+            source.es_candidate_slots.data_ptr(),
+        )
 
     def test_core_token_slots_zero_tail_and_copy_head(self):
         from sglang.srt.model_executor.cuda_graph_buffer_registry import (
@@ -1036,19 +1096,30 @@ class TestBuildPrefillRegistry(unittest.TestCase):
             cache_loc_dtype=torch.int64,
             source=src,
         )
-        for name in ("input_ids", "positions", "out_cache_loc"):
+        for name in (
+            "input_ids",
+            "positions",
+            "out_cache_loc",
+            "es_candidate_slots",
+        ):
             self.assertEqual(
                 reg.get_slot(name).buffer.data_ptr(),
                 getattr(src, name).data_ptr(),
                 name,
             )
         # poison tails so the ZERO reset is observable
-        for name in ("input_ids", "positions", "out_cache_loc"):
+        for name in (
+            "input_ids",
+            "positions",
+            "out_cache_loc",
+            "es_candidate_slots",
+        ):
             reg.get_slot(name).buffer.fill_(7)
         fb = _MiniForwardBatch(
             input_ids=torch.tensor([1, 2, 3], dtype=torch.int64),
             positions=torch.tensor([4, 5, 6], dtype=torch.int64),
             out_cache_loc=torch.tensor([8, 9, 10], dtype=torch.int64),
+            es_candidate_slots=torch.tensor([1, 2, 1], dtype=torch.int32),
         )
         # raw 3 tokens, padded (static) bucket 8
         reg.fill_from(fb, raw_bs=1, padded_bs=1, raw_num_tokens=3, padded_num_tokens=8)
@@ -1058,6 +1129,12 @@ class TestBuildPrefillRegistry(unittest.TestCase):
         )
         self.assertTrue(torch.all(ids[3:8] == 0))  # padded tail reset
         self.assertTrue(torch.all(ids[8:] == 7))  # beyond the bucket: untouched
+        slots = reg.get_slot("es_candidate_slots").buffer
+        self.assertTrue(
+            torch.equal(slots[:3], torch.tensor([1, 2, 1], dtype=torch.int32))
+        )
+        self.assertTrue(torch.all(slots[3:8] == 0))
+        self.assertTrue(torch.all(slots[8:] == 7))
 
     def test_num_token_non_padded_scalar_copy(self):
         from sglang.srt.model_executor.cuda_graph_buffer_registry import (
