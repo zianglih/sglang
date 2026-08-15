@@ -54,6 +54,8 @@ class DiagESManager:
         device: torch.device,
         base_model_revision: Optional[str] = None,
         model_artifact_id: Optional[str] = None,
+        tp_rank: int = 0,
+        tp_size: int = 1,
     ) -> None:
         self.manifest = manifest
         if (
@@ -76,6 +78,8 @@ class DiagESManager:
             raise ValueError("model_artifact_id must be a non-empty string")
         self.base_model_revision = base_model_revision
         self.device = device
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
         self.physical_slots = resident_candidate_slots + 1
         self._lock = threading.Lock()
         self._records: dict[str, CandidateRecord] = {}
@@ -90,7 +94,12 @@ class DiagESManager:
 
         self._dense_gate_banks = {
             site.site_id: torch.ones(
-                (self.physical_slots, site.input_width),
+                (
+                    self.physical_slots,
+                    site.input_width // self.tp_size
+                    if self.tp_size > 1 and ".o_proj.input" in site.site_id
+                    else site.input_width,
+                ),
                 dtype=torch.bfloat16,
                 device=device,
             )
@@ -98,7 +107,13 @@ class DiagESManager:
         }
         self._grouped_gate_banks = {
             name: torch.ones(
-                (*shape[:-1], self.physical_slots, shape[-1]),
+                (
+                    *shape[:-1],
+                    self.physical_slots,
+                    shape[-1] // self.tp_size
+                    if name == "moe_fc2" and self.tp_size > 1
+                    else shape[-1],
+                ),
                 dtype=torch.bfloat16,
                 device=device,
             )
@@ -108,11 +123,27 @@ class DiagESManager:
     def get_dense_gate_bank(self, site_id: str) -> torch.Tensor:
         return self._dense_gate_banks[site_id]
 
+    def _local_dense_gate(self, site_id: str, gate: torch.Tensor) -> torch.Tensor:
+        if self.tp_size == 1 or ".o_proj.input" not in site_id:
+            return gate
+        assert gate.shape[0] % self.tp_size == 0
+        width = gate.shape[0] // self.tp_size
+        start = self.tp_rank * width
+        return gate[start : start + width].contiguous()
+
     def get_expert_gate_bank(self, layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
         return self._grouped_gate_banks[kind][layer_id]
 
     def get_grouped_gate_bank(self, name: str) -> torch.Tensor:
         return self._grouped_gate_banks[name]
+
+    def _local_grouped_gate(self, name: str, gate: torch.Tensor) -> torch.Tensor:
+        if name != "moe_fc2" or self.tp_size == 1:
+            return gate
+        assert gate.shape[-1] % self.tp_size == 0
+        width = gate.shape[-1] // self.tp_size
+        start = self.tp_rank * width
+        return gate[..., start : start + width].contiguous()
 
     def register_candidate(
         self,
@@ -182,11 +213,14 @@ class DiagESManager:
         with torch.cuda.stream(stream):
             for site in self.manifest.dense_sites:
                 self._dense_gate_banks[site.site_id][slot].copy_(
-                    dense_gates[site.site_id], non_blocking=True
+                    self._local_dense_gate(
+                        site.site_id, dense_gates[site.site_id]
+                    ),
+                    non_blocking=True,
                 )
             for name, gate in grouped_gates.items():
                 self._grouped_gate_banks[name][..., slot, :].copy_(
-                    gate, non_blocking=True
+                    self._local_grouped_gate(name, gate), non_blocking=True
                 )
         stream.synchronize()
 
@@ -345,6 +379,10 @@ def register_diag_es_model(
     tp_size: int,
 ) -> DiagESManager:
     global _manager
+    from sglang.srt.distributed.parallel_state import (
+        get_tensor_model_parallel_rank,
+    )
+
     if schema_id == QWEN3_30B_A3B_SCHEMA_ID:
         manifest = register_qwen3_30b_a3b_dense_sites(model)
     elif schema_id == QWEN2_5_1_5B_SCHEMA_ID:
@@ -356,6 +394,8 @@ def register_diag_es_model(
         resident_candidate_slots=resident_candidate_slots,
         model_artifact_id=model_artifact_id,
         device=next(model.parameters()).device,
+        tp_rank=get_tensor_model_parallel_rank(),
+        tp_size=tp_size,
     )
     return _manager
 
