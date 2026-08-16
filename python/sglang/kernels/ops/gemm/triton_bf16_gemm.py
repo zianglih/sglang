@@ -45,14 +45,14 @@ _MATMUL_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_MATMUL_CONFIGS, key=["M", "N", "K"])
-@triton.jit
+@triton.autotune(configs=_MATMUL_CONFIGS, key=["N", "K"])
+@triton.jit(do_not_specialize=["M"])
 def _triton_bf16_linear_kernel(
     x_ptr,
     weight_ptr,
     bias_ptr,
     out_ptr,
-    M: tl.constexpr,
+    M,
     N: tl.constexpr,
     K: tl.constexpr,
     stride_xm: tl.constexpr,

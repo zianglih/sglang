@@ -13,6 +13,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required", allow_module_level=True)
 
 from sglang.kernels.ops.gemm.triton_bf16_gemm import (  # noqa: E402
+    _triton_bf16_linear_kernel,
     triton_bf16_linear,
     triton_bf16_linear_out,
 )
@@ -23,6 +24,11 @@ TARGET_SHAPES = [
     (257, 128, 2048),
     (1, 151936, 2048),
 ]
+
+
+def test_triton_bf16_linear_reuses_kernel_across_dynamic_batch_sizes():
+    assert _triton_bf16_linear_kernel.keys == ["N", "K"]
+    assert "M" in _triton_bf16_linear_kernel.fn.do_not_specialize
 
 
 @pytest.mark.parametrize("has_bias", [False, True])
