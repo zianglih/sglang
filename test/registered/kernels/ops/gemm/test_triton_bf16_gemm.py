@@ -31,6 +31,30 @@ def test_triton_bf16_linear_reuses_kernel_across_dynamic_batch_sizes():
     assert "M" in _triton_bf16_linear_kernel.fn.do_not_specialize
 
 
+def test_triton_bf16_linear_dynamic_batch_reuses_binary_in_cuda_graph():
+    torch.manual_seed(20260819)
+    n, k = 128, 2048
+    weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
+
+    # Compile/autotune only M=1 before capture. Capturing a previously unseen
+    # M=17 succeeds only when M is not a specialization or autotune key.
+    x1 = torch.randn((1, k), dtype=torch.bfloat16, device="cuda")
+    out1 = torch.empty((1, n), dtype=torch.bfloat16, device="cuda")
+    triton_bf16_linear_out(x1, weight, out1)
+    torch.cuda.synchronize()
+
+    x17 = torch.randn((17, k), dtype=torch.bfloat16, device="cuda")
+    out17 = torch.empty((17, n), dtype=torch.bfloat16, device="cuda")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        triton_bf16_linear_out(x17, weight, out17)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    ref = (x17.float() @ weight.float().T).bfloat16()
+    torch.testing.assert_close(out17, ref, rtol=2e-2, atol=2.5)
+
+
 @pytest.mark.parametrize("has_bias", [False, True])
 @pytest.mark.parametrize("m,n,k", TARGET_SHAPES)
 def test_triton_bf16_linear_target_shapes(m, n, k, has_bias):

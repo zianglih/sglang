@@ -13,6 +13,9 @@ from sglang.srt.diag_es.manifest import (
     register_qwen2_5_1_5b_dense_sites,
 )
 from sglang.srt.diag_es.protocol import prepare_register_payload
+from sglang.test.ci.ci_register import register_cpu_ci
+
+register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class _Linear:
@@ -219,6 +222,50 @@ def test_dense_manager_accepts_empty_grouped_payload(monkeypatch):
         grouped_deltas={},
     )
     assert registered["state"] == "READY"
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_qwen3_manager_shards_only_tp_local_input_dimensions(tp_rank):
+    qkv_site = "model.layers.0.self_attn.qkv_proj.input"
+    out_site = "model.layers.0.self_attn.o_proj.input"
+    manifest = Qwen3DiagESManifest(
+        dense_sites=(DenseSite(qkv_site, 8), DenseSite(out_site, 8)),
+        num_layers=1,
+        num_experts=2,
+        hidden_size=8,
+        moe_intermediate_size=6,
+        schema_digest="cd" * 32,
+    )
+    manager = DiagESManager(
+        manifest=manifest,
+        resident_candidate_slots=1,
+        base_model_revision="test-model",
+        device=torch.device("cpu"),
+        tp_rank=tp_rank,
+        tp_size=2,
+    )
+
+    qkv = torch.arange(8, dtype=torch.float32)
+    out = torch.arange(8, dtype=torch.float32)
+    fc1 = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
+    fc2 = torch.arange(12, dtype=torch.float32).reshape(1, 2, 6)
+    dense_start = tp_rank * 4
+    fc2_start = tp_rank * 3
+
+    assert manager.get_dense_delta_bank(qkv_site).shape == (2, 8)
+    assert manager.get_dense_delta_bank(out_site).shape == (2, 4)
+    assert manager.get_grouped_delta_bank("moe_fc1").shape == (1, 2, 2, 8)
+    assert manager.get_grouped_delta_bank("moe_fc2").shape == (1, 2, 2, 3)
+    assert torch.equal(manager._local_dense_delta(qkv_site, qkv), qkv)
+    assert torch.equal(
+        manager._local_dense_delta(out_site, out),
+        out[dense_start : dense_start + 4],
+    )
+    assert torch.equal(manager._local_grouped_delta("moe_fc1", fc1), fc1)
+    assert torch.equal(
+        manager._local_grouped_delta("moe_fc2", fc2),
+        fc2[..., fc2_start : fc2_start + 3],
+    )
 
 
 def test_legacy_manager_status_retains_qwen3_fields():

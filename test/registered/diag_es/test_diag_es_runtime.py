@@ -204,6 +204,41 @@ def test_triton_fp32_delta_preserves_signal_lost_by_bf16_multiplier():
     assert not torch.equal(actual, legacy)
 
 
+def test_triton_fp32_delta_cuda_graph_replay_observes_live_bank_and_slots():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang.srt.diag_es.ops import apply_dense_delta
+
+    torch.manual_seed(20260819)
+    rows, width = 17, 2048
+    x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
+    delta_bank = torch.zeros((3, width), dtype=torch.float32, device="cuda")
+    delta_bank[1:].uniform_(-0.01, 0.01)
+    slots = torch.arange(rows, dtype=torch.int32, device="cuda") % 3
+
+    # Compile before capture. The captured graph must retain only stable
+    # pointers; candidate slots and resident delta rows remain mutable data.
+    apply_dense_delta(x, delta_bank, slots)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = apply_dense_delta(x, delta_bank, slots)
+
+    graph.replay()
+    torch.cuda.synchronize()
+    expected = torch.addcmul(x.float(), x.float(), delta_bank[slots.long()]).bfloat16()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    x.copy_(torch.randn_like(x))
+    slots.copy_((torch.arange(rows, device="cuda", dtype=torch.int32) + 1) % 3)
+    delta_bank[1:].uniform_(-0.02, 0.02)
+    graph.replay()
+    torch.cuda.synchronize()
+    expected = torch.addcmul(x.float(), x.float(), delta_bank[slots.long()]).bfloat16()
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("width", [1536, 8960])
 def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
     monkeypatch, width
