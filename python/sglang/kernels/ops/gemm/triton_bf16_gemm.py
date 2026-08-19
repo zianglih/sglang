@@ -45,13 +45,15 @@ _MATMUL_CONFIGS = [
 ]
 
 
-@triton.autotune(configs=_MATMUL_CONFIGS, key=["N", "K"])
+@triton.autotune(configs=_MATMUL_CONFIGS, key=["N", "K", "APPLY_POST_DELTA"])
 @triton.jit(do_not_specialize=["M"])
 def _triton_bf16_linear_kernel(
     x_ptr,
     weight_ptr,
     bias_ptr,
     out_ptr,
+    post_delta_ptr,
+    candidate_slots_ptr,
     M,
     N: tl.constexpr,
     K: tl.constexpr,
@@ -61,7 +63,10 @@ def _triton_bf16_linear_kernel(
     stride_wk: tl.constexpr,
     stride_om: tl.constexpr,
     stride_on: tl.constexpr,
+    stride_ds: tl.constexpr,
+    stride_dn: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    APPLY_POST_DELTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -106,6 +111,22 @@ def _triton_bf16_linear_kernel(
         bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
         accumulator += bias[None, :]
 
+    if APPLY_POST_DELTA:
+        row_mask = offs_m < M
+        slots = tl.load(candidate_slots_ptr + offs_m, mask=row_mask, other=0)
+        delta_ptrs = (
+            post_delta_ptr + slots[:, None] * stride_ds + offs_n[None, :] * stride_dn
+        )
+        delta = tl.load(
+            delta_ptrs,
+            mask=row_mask[:, None] & (offs_n[None, :] < N),
+            other=0.0,
+        )
+        # The tensor-core accumulator and bias-adjusted affine value are FP32.
+        # Apply the zero-centered residual in FP32, then round exactly once at
+        # the existing BF16 store below.
+        accumulator = tl.fma(accumulator, delta, accumulator)
+
     out_ptrs = out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
     tl.store(
         out_ptrs,
@@ -119,6 +140,9 @@ def triton_bf16_linear_out(
     weight: torch.Tensor,
     output: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
+    *,
+    post_delta_bank: Optional[torch.Tensor] = None,
+    candidate_slots: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Compute ``x @ weight.T + bias`` into caller-owned BF16 storage."""
 
@@ -126,6 +150,21 @@ def triton_bf16_linear_out(
     m, k = x_2d.shape
     n = weight.shape[0]
     output_2d = output.view(m, n)
+    apply_post_delta = post_delta_bank is not None
+    if apply_post_delta != (candidate_slots is not None):
+        raise ValueError(
+            "post_delta_bank and candidate_slots must be provided together"
+        )
+    if apply_post_delta:
+        assert post_delta_bank is not None and candidate_slots is not None
+        assert post_delta_bank.ndim == 2 and post_delta_bank.is_contiguous()
+        assert post_delta_bank.dtype == torch.float32
+        assert post_delta_bank.device == x.device
+        assert post_delta_bank.shape[1] == n
+        assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
+        assert candidate_slots.dtype == torch.int32
+        assert candidate_slots.device == x.device
+        assert candidate_slots.shape[0] == m
 
     def grid(meta):
         return (triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),)
@@ -135,6 +174,8 @@ def triton_bf16_linear_out(
         weight,
         bias if bias is not None else x_2d,
         output_2d,
+        post_delta_bank if post_delta_bank is not None else x_2d,
+        candidate_slots if candidate_slots is not None else x_2d,
         m,
         n,
         k,
@@ -144,7 +185,10 @@ def triton_bf16_linear_out(
         weight.stride(1),
         output_2d.stride(0),
         output_2d.stride(1),
+        post_delta_bank.stride(0) if post_delta_bank is not None else 0,
+        post_delta_bank.stride(1) if post_delta_bank is not None else 0,
         HAS_BIAS=bias is not None,
+        APPLY_POST_DELTA=apply_post_delta,
     )
     return output
 
@@ -153,6 +197,9 @@ def triton_bf16_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: Optional[torch.Tensor] = None,
+    *,
+    post_delta_bank: Optional[torch.Tensor] = None,
+    candidate_slots: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Return ``torch.nn.functional.linear``-compatible BF16 output."""
 
@@ -161,4 +208,11 @@ def triton_bf16_linear(
         device=x.device,
         dtype=x.dtype,
     )
-    return triton_bf16_linear_out(x, weight, output, bias)
+    return triton_bf16_linear_out(
+        x,
+        weight,
+        output,
+        bias,
+        post_delta_bank=post_delta_bank,
+        candidate_slots=candidate_slots,
+    )

@@ -11,6 +11,7 @@ from sglang.srt.diag_es.manager import (
 from sglang.srt.diag_es.manifest import (
     QWEN2_5_1_5B_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
+    DiagESPlacement,
     DiagESManifest,
     Qwen3DiagESManifest,
     compute_effective_model_digest,
@@ -20,6 +21,7 @@ from sglang.srt.diag_es.manifest import (
 __all__ = [
     "DiagESManager",
     "DiagESManifest",
+    "DiagESPlacement",
     "QWEN2_5_1_5B_SCHEMA_ID",
     "QWEN3_30B_A3B_SCHEMA_ID",
     "Qwen3DiagESManifest",

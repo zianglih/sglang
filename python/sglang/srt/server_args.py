@@ -3382,6 +3382,11 @@ class ServerArgs:
         "Exact diagonal-ES site schema ID; required when diagonal ES is enabled.",
         NS("exec.features"),
     ] = None
+    diag_es_placement: A[
+        str,
+        "Immutable diagonal-ES linear placement: pre, post, or both.",
+        NS("exec.features"),
+    ] = "pre"
     diag_es_model_artifact_id: A[
         Optional[str],
         "Stable model artifact identity used by diagonal-ES cache digests.",
@@ -3708,13 +3713,26 @@ class ServerArgs:
         if not self.enable_diag_es:
             return
         supported = {
-            "qwen3-30b-a3b-diag-es-v1",
+            "qwen3-30b-a3b-diag-es-v2",
             "qwen2.5-1.5b-instruct-dense-diag-es-v1",
         }
         if self.diag_es_schema_id not in supported:
             raise ValueError(
                 "enable_diag_es requires an explicit supported diag_es_schema_id"
             )
+        if self.diag_es_placement not in ("pre", "post", "both"):
+            raise ValueError("diag_es_placement must be pre, post, or both")
+        if (
+            self.diag_es_schema_id == "qwen2.5-1.5b-instruct-dense-diag-es-v1"
+            and self.diag_es_placement != "pre"
+        ):
+            raise ValueError("Qwen2 diagonal ES supports pre placement only")
+        if (
+            self.diag_es_schema_id == "qwen3-30b-a3b-diag-es-v2"
+            and self.diag_es_placement in ("post", "both")
+            and self.tp_size != 1
+        ):
+            raise ValueError("Qwen3 diagonal-ES post placement requires tp_size=1")
         if (
             not isinstance(self.diag_es_model_artifact_id, str)
             or not self.diag_es_model_artifact_id.strip()

@@ -215,10 +215,16 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if getattr(layer, "es_site_id", None) is not None:
-            from sglang.srt.diag_es.ops import maybe_apply_diag_es
+        if getattr(layer, "es_pre_site_id", None) is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
-            x = maybe_apply_diag_es(layer, x)
+            x = maybe_apply_diag_es_pre(layer, x)
+
+        has_post_delta = getattr(layer, "es_post_site_id", None) is not None
+        if has_post_delta and not get_bf16_gemm_backend().is_triton():
+            raise RuntimeError(
+                "dense diagonal-ES post placement requires the Triton BF16 GEMM backend"
+            )
 
         if use_intel_amx_backend(layer):
             x_shapes = x.shape
@@ -241,8 +247,16 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from sglang.kernels.ops.gemm.triton_bf16_gemm import (
                 triton_bf16_linear,
             )
+            from sglang.srt.diag_es.ops import get_diag_es_post_inputs
 
-            return triton_bf16_linear(x, layer.weight, bias)
+            post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
+            return triton_bf16_linear(
+                x,
+                layer.weight,
+                bias,
+                post_delta_bank=post_delta_bank,
+                candidate_slots=candidate_slots,
+            )
 
         elif (
             get_bf16_gemm_backend().is_cutedsl()
@@ -281,17 +295,32 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run an inference-only BF16 linear into caller-owned storage."""
-        if getattr(layer, "es_site_id", None) is not None:
-            from sglang.srt.diag_es.ops import maybe_apply_diag_es
+        if getattr(layer, "es_pre_site_id", None) is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
-            x = maybe_apply_diag_es(layer, x)
+            x = maybe_apply_diag_es_pre(layer, x)
+
+        has_post_delta = getattr(layer, "es_post_site_id", None) is not None
+        if has_post_delta and not get_bf16_gemm_backend().is_triton():
+            raise RuntimeError(
+                "dense diagonal-ES post placement requires the Triton BF16 GEMM backend"
+            )
 
         if get_bf16_gemm_backend().is_triton():
             from sglang.kernels.ops.gemm.triton_bf16_gemm import (
                 triton_bf16_linear_out,
             )
+            from sglang.srt.diag_es.ops import get_diag_es_post_inputs
 
-            return triton_bf16_linear_out(x, layer.weight, output, bias)
+            post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
+            return triton_bf16_linear_out(
+                x,
+                layer.weight,
+                output,
+                bias,
+                post_delta_bank=post_delta_bank,
+                candidate_slots=candidate_slots,
+            )
 
         if (
             get_bf16_gemm_backend().is_cutedsl()

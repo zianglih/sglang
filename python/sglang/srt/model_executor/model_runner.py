@@ -1123,6 +1123,7 @@ class ModelRunner:
                 ),
                 model_artifact_id=self.server_args.diag_es_model_artifact_id,
                 tp_size=self.server_args.tp_size,
+                placement=self.server_args.diag_es_placement,
             )
 
         # Register model for layerwise NVTX profiling if enabled

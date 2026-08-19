@@ -336,7 +336,8 @@ def fused_moe_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     add_mask_ptr,
-    diag_es_delta_ptr,
+    diag_es_pre_delta_ptr,
+    diag_es_post_delta_ptr,
     diag_es_token_slots_ptr,
     # Matrix dimensions
     N,
@@ -361,9 +362,12 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
-    stride_diag_es_ge,
-    stride_diag_es_gs,
-    stride_diag_es_gk,
+    stride_diag_es_pre_ge,
+    stride_diag_es_pre_gs,
+    stride_diag_es_pre_gk,
+    stride_diag_es_post_ge,
+    stride_diag_es_post_gs,
+    stride_diag_es_post_gn,
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -389,7 +393,8 @@ def fused_moe_kernel(
     LORA_PRESERVE_BASE: tl.constexpr,
     ROUTER_TOPK: tl.constexpr,
     A_ROUTE_MAJOR: tl.constexpr,
-    APPLY_DIAG_ES: tl.constexpr,
+    APPLY_DIAG_ES_PRE: tl.constexpr,
+    APPLY_DIAG_ES_POST: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -466,7 +471,7 @@ def fused_moe_kernel(
             )
         return
 
-    if APPLY_DIAG_ES:
+    if APPLY_DIAG_ES_PRE or APPLY_DIAG_ES_POST:
         original_token = offs_token // ROUTER_TOPK
         diag_es_slot = tl.load(
             diag_es_token_slots_ptr + original_token,
@@ -560,13 +565,13 @@ def fused_moe_kernel(
                 other=0.0,
             )
 
-        if APPLY_DIAG_ES:
+        if APPLY_DIAG_ES_PRE:
             diag_es_k = k_start + offs_k
             diag_es_delta = tl.load(
-                diag_es_delta_ptr
-                + off_experts * stride_diag_es_ge
-                + diag_es_slot[:, None] * stride_diag_es_gs
-                + diag_es_k[None, :] * stride_diag_es_gk,
+                diag_es_pre_delta_ptr
+                + off_experts * stride_diag_es_pre_ge
+                + diag_es_slot[:, None] * stride_diag_es_pre_gs
+                + diag_es_k[None, :] * stride_diag_es_pre_gk,
                 mask=token_mask[:, None] & (diag_es_k[None, :] < K),
                 other=0.0,
             )
@@ -627,6 +632,18 @@ def fused_moe_kernel(
 
     if bias_ptr is not None:
         accumulator += bias
+
+    if APPLY_DIAG_ES_POST:
+        diag_es_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+        diag_es_delta = tl.load(
+            diag_es_post_delta_ptr
+            + off_experts * stride_diag_es_post_ge
+            + diag_es_slot[:, None] * stride_diag_es_post_gs
+            + diag_es_n[None, :] * stride_diag_es_post_gn,
+            mask=token_mask[:, None] & (diag_es_n[None, :] < N),
+            other=0.0,
+        )
+        accumulator = tl.fma(accumulator, diag_es_delta, accumulator)
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
@@ -775,15 +792,41 @@ def invoke_fused_moe_kernel(
     mask_output: bool = False,
     lora_preserve_base: bool = False,
     a_route_major: bool = False,
-    diag_es_delta: Optional[torch.Tensor] = None,
+    diag_es_pre_delta: Optional[torch.Tensor] = None,
+    diag_es_post_delta: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
-    assert (diag_es_delta is None) == (diag_es_token_slots is None)
-    if diag_es_delta is not None:
+    has_diag_es = diag_es_pre_delta is not None or diag_es_post_delta is not None
+    assert has_diag_es == (diag_es_token_slots is not None)
+    if has_diag_es:
         assert A.dtype == torch.bfloat16
-        assert diag_es_delta.dtype == torch.float32
+        assert diag_es_token_slots.dtype == torch.int32
+        assert diag_es_token_slots.ndim == 1
+        assert diag_es_token_slots.shape[0] == topk_ids.shape[0]
+        assert diag_es_token_slots.is_contiguous()
+        assert diag_es_token_slots.device == A.device
+        assert router_topk == topk_ids.shape[1]
+    if diag_es_pre_delta is not None:
+        assert diag_es_pre_delta.dtype == torch.float32
+        assert diag_es_pre_delta.ndim == 3
+        assert diag_es_pre_delta.is_contiguous()
+        assert diag_es_pre_delta.device == A.device
+        assert diag_es_pre_delta.shape[0] == B.shape[0]
+        assert diag_es_pre_delta.shape[2] == A.shape[1]
+    if diag_es_post_delta is not None:
+        assert B.dtype == torch.bfloat16
+        assert compute_type == tl.bfloat16
+        assert not (
+            use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
+        ), "post-accumulator diagonal ES requires unquantized BF16 Triton MoE"
+        assert diag_es_post_delta.dtype == torch.float32
+        assert diag_es_post_delta.ndim == 3
+        assert diag_es_post_delta.is_contiguous()
+        assert diag_es_post_delta.device == A.device
+        assert diag_es_post_delta.shape[0] == B.shape[0]
+        assert diag_es_post_delta.shape[2] == B.shape[1]
 
     if use_fp8_w8a8:
         swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -881,6 +924,7 @@ def invoke_fused_moe_kernel(
         and block_shape is not None
         and block_shape[1] > 0
     ):
+        assert not has_diag_es, "diagonal ES requires the BF16 Triton MoE kernel"
         assert (
             not fuse_sum_all_reduce
         ), "fuse_sum_all_reduce is not supported for GPTQ/AWQ kernels"
@@ -960,7 +1004,8 @@ def invoke_fused_moe_kernel(
             expert_ids,
             num_tokens_post_padded,
             add_output_mask,
-            diag_es_delta,
+            diag_es_pre_delta,
+            diag_es_post_delta,
             diag_es_token_slots,
             B.shape[1],
             B.shape[2] - padded_size,
@@ -980,9 +1025,12 @@ def invoke_fused_moe_kernel(
             B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
             B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
             B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
-            diag_es_delta.stride(0) if diag_es_delta is not None else 0,
-            diag_es_delta.stride(1) if diag_es_delta is not None else 0,
-            diag_es_delta.stride(2) if diag_es_delta is not None else 0,
+            diag_es_pre_delta.stride(0) if diag_es_pre_delta is not None else 0,
+            diag_es_pre_delta.stride(1) if diag_es_pre_delta is not None else 0,
+            diag_es_pre_delta.stride(2) if diag_es_pre_delta is not None else 0,
+            diag_es_post_delta.stride(0) if diag_es_post_delta is not None else 0,
+            diag_es_post_delta.stride(1) if diag_es_post_delta is not None else 0,
+            diag_es_post_delta.stride(2) if diag_es_post_delta is not None else 0,
             0 if block_shape is None else block_shape[0],
             0 if block_shape is None else block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -1002,7 +1050,8 @@ def invoke_fused_moe_kernel(
             FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
             ROUTER_TOPK=router_topk,
             A_ROUTE_MAJOR=a_route_major,
-            APPLY_DIAG_ES=diag_es_delta is not None,
+            APPLY_DIAG_ES_PRE=diag_es_pre_delta is not None,
+            APPLY_DIAG_ES_POST=diag_es_post_delta is not None,
             **config,
         )
 

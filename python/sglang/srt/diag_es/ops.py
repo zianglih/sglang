@@ -122,10 +122,38 @@ def apply_dense_delta(
     return out
 
 
-def maybe_apply_diag_es(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    site_id = getattr(layer, "es_site_id", None)
+def get_dense_delta_inputs(
+    layer: torch.nn.Module, position: str
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+    """Return the live slot tensor and fixed-address bank for one dense site."""
+
+    if position not in ("pre", "post"):
+        raise ValueError("dense diagonal-ES position must be pre or post")
+    site_id = getattr(layer, f"es_{position}_site_id", None)
     if site_id is None:
-        return x
+        return None, None
     slots = get_forward_context().es_candidate_slots
+    assert slots is not None
     delta_bank = get_diag_es_manager().get_dense_delta_bank(site_id)
+    expected_width = getattr(layer, f"es_{position}_site_width")
+    assert delta_bank.shape[1] == expected_width
+    return delta_bank, slots
+
+
+def maybe_apply_diag_es_pre(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    delta_bank, slots = get_dense_delta_inputs(layer, "pre")
+    if delta_bank is None:
+        return x
     return apply_dense_delta(x, delta_bank, slots)
+
+
+def get_diag_es_post_inputs(
+    layer: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
+    return get_dense_delta_inputs(layer, "post")
+
+
+def maybe_apply_diag_es(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Compatibility alias for the v1 input-only hook."""
+
+    return maybe_apply_diag_es_pre(layer, x)

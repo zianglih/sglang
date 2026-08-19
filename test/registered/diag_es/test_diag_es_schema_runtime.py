@@ -123,29 +123,14 @@ def test_generic_digest_hashes_empty_grouped_qwen2_fp32_delta_payload():
     )
 
 
-def test_generic_digest_rejects_grouped_and_legacy_expert_conflict():
-    expert = torch.zeros((1, 1, 2), dtype=torch.float32)
-    with pytest.raises(ValueError, match="conflict"):
-        compute_effective_model_digest(
-            base_model_revision="legacy",
-            schema_digest="schema",
-            dense_deltas={},
-            grouped_deltas={"moe_fc1": expert, "moe_fc2": expert},
-            expert_fc1_deltas=expert,
-            expert_fc2_deltas=expert,
-        )
-
-
 def test_digest_rejects_conflicting_legacy_and_generic_artifact_identity():
-    expert = torch.zeros((1, 1, 2), dtype=torch.float32)
     with pytest.raises(ValueError, match="conflict"):
         compute_effective_model_digest(
             base_model_revision="legacy-artifact",
             model_artifact_id="different-artifact",
             schema_digest="schema",
             dense_deltas={},
-            expert_fc1_deltas=expert,
-            expert_fc2_deltas=expert,
+            grouped_deltas={},
         )
 
 
@@ -254,21 +239,21 @@ def test_qwen3_manager_shards_only_tp_local_input_dimensions(tp_rank):
 
     assert manager.get_dense_delta_bank(qkv_site).shape == (2, 8)
     assert manager.get_dense_delta_bank(out_site).shape == (2, 4)
-    assert manager.get_grouped_delta_bank("moe_fc1").shape == (1, 2, 2, 8)
-    assert manager.get_grouped_delta_bank("moe_fc2").shape == (1, 2, 2, 3)
+    assert manager.get_grouped_delta_bank("moe_fc1_pre").shape == (1, 2, 2, 8)
+    assert manager.get_grouped_delta_bank("moe_fc2_pre").shape == (1, 2, 2, 3)
     assert torch.equal(manager._local_dense_delta(qkv_site, qkv), qkv)
     assert torch.equal(
         manager._local_dense_delta(out_site, out),
         out[dense_start : dense_start + 4],
     )
-    assert torch.equal(manager._local_grouped_delta("moe_fc1", fc1), fc1)
+    assert torch.equal(manager._local_grouped_delta("moe_fc1_pre", fc1), fc1)
     assert torch.equal(
-        manager._local_grouped_delta("moe_fc2", fc2),
+        manager._local_grouped_delta("moe_fc2_pre", fc2),
         fc2[..., fc2_start : fc2_start + 3],
     )
 
 
-def test_legacy_manager_status_retains_qwen3_fields():
+def test_qwen3_manager_status_reports_v2_placement_and_shapes():
     manifest = Qwen3DiagESManifest(
         dense_sites=(DenseSite("dense", 3),),
         num_layers=1,
@@ -280,17 +265,16 @@ def test_legacy_manager_status_retains_qwen3_fields():
     manager = DiagESManager(
         manifest=manifest,
         resident_candidate_slots=1,
-        base_model_revision="legacy-artifact",
+        model_artifact_id="qwen3-artifact",
         device=torch.device("cpu"),
     )
 
     status = manager.status()
-    assert status["base_model_revision"] == "legacy-artifact"
-    assert status["expert_fc1_shape"] == [1, 2, 3]
-    assert status["expert_fc2_shape"] == [1, 2, 4]
+    assert status["placement"] == "pre"
+    assert status["model_artifact_id"] == "qwen3-artifact"
     assert status["grouped_gate_shapes"] == {
-        "moe_fc1": [1, 2, 3],
-        "moe_fc2": [1, 2, 4],
+        "moe_fc1_pre": [1, 2, 3],
+        "moe_fc2_pre": [1, 2, 4],
     }
 
 
@@ -308,18 +292,6 @@ def test_register_protocol_serializes_generic_grouped_names():
     assert digest == "digest"
 
 
-def test_register_protocol_preserves_legacy_positional_adapter():
-    fc1 = torch.zeros(2, dtype=torch.float32)
-    fc2 = torch.zeros(3, dtype=torch.float32)
-    named, digest = prepare_register_payload({}, fc1, fc2, "legacy-digest")
-    assert dict(named) == {
-        "expert_delta:moe_fc1": fc1,
-        "expert_delta:moe_fc2": fc2,
-    }
-    assert digest == "legacy-digest"
-
-
-def test_register_protocol_rejects_grouped_and_expert_keywords():
-    delta = torch.zeros(2, dtype=torch.float32)
-    with pytest.raises(ValueError, match="conflict"):
-        prepare_register_payload({}, delta, delta, grouped_deltas={})
+def test_register_protocol_rejects_non_string_audit_digest():
+    with pytest.raises(ValueError, match="string"):
+        prepare_register_payload({}, {}, effective_model_digest=object())

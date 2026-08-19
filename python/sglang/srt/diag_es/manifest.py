@@ -3,18 +3,27 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import Literal, Mapping, Optional
 
 import torch
 
-QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v1"
+QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v2"
 QWEN2_5_1_5B_SCHEMA_ID = "qwen2.5-1.5b-instruct-dense-diag-es-v1"
+
+DiagESPlacement = Literal["pre", "post", "both"]
 
 
 @dataclass(frozen=True, slots=True)
 class DenseSite:
     site_id: str
-    input_width: int
+    width: int
+    position: Literal["pre", "post"] = "pre"
+
+    @property
+    def input_width(self) -> int:
+        """Compatibility name for the input-only Qwen2 manifest."""
+
+        return self.width
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +34,7 @@ class Qwen3DiagESManifest:
     hidden_size: int
     moe_intermediate_size: int
     schema_digest: str
+    placement: DiagESPlacement = "pre"
 
     @property
     def schema_id(self) -> str:
@@ -32,14 +42,38 @@ class Qwen3DiagESManifest:
 
     @property
     def grouped_gate_shapes(self) -> Mapping[str, tuple[int, ...]]:
-        return {
-            "moe_fc1": (self.num_layers, self.num_experts, self.hidden_size),
-            "moe_fc2": (
-                self.num_layers,
-                self.num_experts,
-                self.moe_intermediate_size,
-            ),
-        }
+        shapes: dict[str, tuple[int, ...]] = {}
+        if self.placement in ("pre", "both"):
+            shapes.update(
+                {
+                    "moe_fc1_pre": (
+                        self.num_layers,
+                        self.num_experts,
+                        self.hidden_size,
+                    ),
+                    "moe_fc2_pre": (
+                        self.num_layers,
+                        self.num_experts,
+                        self.moe_intermediate_size,
+                    ),
+                }
+            )
+        if self.placement in ("post", "both"):
+            shapes.update(
+                {
+                    "moe_fc1_post": (
+                        self.num_layers,
+                        self.num_experts,
+                        2 * self.moe_intermediate_size,
+                    ),
+                    "moe_fc2_post": (
+                        self.num_layers,
+                        self.num_experts,
+                        self.hidden_size,
+                    ),
+                }
+            )
+        return shapes
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,30 +82,57 @@ class DiagESManifest:
     dense_sites: tuple[DenseSite, ...]
     grouped_gate_shapes: Mapping[str, tuple[int, ...]]
     schema_digest: str
+    placement: DiagESPlacement = "pre"
 
 
 def _schema_digest(
     dense_sites: tuple[DenseSite, ...],
     *,
+    placement: DiagESPlacement,
     num_layers: int,
     num_experts: int,
     hidden_size: int,
     moe_intermediate_size: int,
 ) -> str:
+    grouped_gate_shapes: dict[str, tuple[int, ...]] = {}
+    if placement in ("pre", "both"):
+        grouped_gate_shapes.update(
+            {
+                "moe_fc1_pre": (num_layers, num_experts, hidden_size),
+                "moe_fc2_pre": (
+                    num_layers,
+                    num_experts,
+                    moe_intermediate_size,
+                ),
+            }
+        )
+    if placement in ("post", "both"):
+        grouped_gate_shapes.update(
+            {
+                "moe_fc1_post": (
+                    num_layers,
+                    num_experts,
+                    2 * moe_intermediate_size,
+                ),
+                "moe_fc2_post": (num_layers, num_experts, hidden_size),
+            }
+        )
     payload = {
         "version": QWEN3_30B_A3B_SCHEMA_ID,
-        "dense_sites": [(site.site_id, site.input_width) for site in dense_sites],
-        "num_layers": num_layers,
-        "num_experts": num_experts,
-        "hidden_size": hidden_size,
-        "moe_intermediate_size": moe_intermediate_size,
-        "expert_sites": ["moe_fc1", "moe_fc2"],
+        "placement": placement,
+        "dense_sites": [(site.site_id, site.width) for site in dense_sites],
+        "grouped_gate_shapes": grouped_gate_shapes,
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
-def register_qwen3_30b_a3b_dense_sites(model: torch.nn.Module) -> Qwen3DiagESManifest:
+def register_qwen3_30b_a3b_dense_sites(
+    model: torch.nn.Module,
+    *,
+    placement: DiagESPlacement = "pre",
+    tp_size: int = 1,
+) -> Qwen3DiagESManifest:
     """Attach stable diagonal-ES metadata to the target Qwen model.
 
     This is deliberately an exact model manifest: attention QKV and output
@@ -79,6 +140,11 @@ def register_qwen3_30b_a3b_dense_sites(model: torch.nn.Module) -> Qwen3DiagESMan
     fused runner config, and the router and LM head remain outside the search
     space.
     """
+
+    if placement not in ("pre", "post", "both"):
+        raise ValueError("diagonal-ES placement must be pre, post, or both")
+    if placement in ("post", "both") and tp_size != 1:
+        raise ValueError("Qwen3 diagonal-ES post placement requires tp_size=1")
 
     config = model.config
     layers = model.model.layers
@@ -91,23 +157,44 @@ def register_qwen3_30b_a3b_dense_sites(model: torch.nn.Module) -> Qwen3DiagESMan
     for layer_id, decoder_layer in enumerate(layers):
         qkv = decoder_layer.self_attn.qkv_proj
         out = decoder_layer.self_attn.o_proj
+        assert qkv.input_size == 2048 and qkv.output_size == 5120
+        assert out.input_size == 4096 and out.output_size == 2048
 
-        qkv_site_id = f"model.layers.{layer_id}.self_attn.qkv_proj.input"
-        out_site_id = f"model.layers.{layer_id}.self_attn.o_proj.input"
-        qkv.es_site_id = qkv_site_id
-        qkv.es_site_width = qkv.input_size
-        out.es_site_id = out_site_id
-        out.es_site_width = out.input_size
-        dense_sites.extend(
-            (
-                DenseSite(qkv_site_id, qkv.input_size),
-                DenseSite(out_site_id, out.input_size),
-            )
-        )
+        for linear, path in (
+            (qkv, "self_attn.qkv_proj"),
+            (out, "self_attn.o_proj"),
+        ):
+            linear.es_pre_site_id = None
+            linear.es_pre_site_width = None
+            linear.es_post_site_id = None
+            linear.es_post_site_width = None
+            if placement in ("pre", "both"):
+                site_id = f"model.layers.{layer_id}.{path}.input"
+                linear.es_pre_site_id = site_id
+                linear.es_pre_site_width = linear.input_size
+                # Keep the historical attributes as aliases for pre-only
+                # consumers while the v2 runtime uses position-specific names.
+                linear.es_site_id = site_id
+                linear.es_site_width = linear.input_size
+                dense_sites.append(DenseSite(site_id, linear.input_size, "pre"))
+            else:
+                linear.es_site_id = None
+                linear.es_site_width = None
+            if placement in ("post", "both"):
+                site_id = f"model.layers.{layer_id}.{path}.output"
+                linear.es_post_site_id = site_id
+                linear.es_post_site_width = linear.output_size
+                dense_sites.append(DenseSite(site_id, linear.output_size, "post"))
 
         # The router is intentionally clean. Experts are stacked parameters,
         # so their semantic layer marker lives on the runner configuration.
-        decoder_layer.mlp.gate.es_site_id = None
+        router = decoder_layer.mlp.gate
+        router.es_site_id = None
+        router.es_site_width = None
+        router.es_pre_site_id = None
+        router.es_pre_site_width = None
+        router.es_post_site_id = None
+        router.es_post_site_width = None
         decoder_layer.mlp.experts.moe_runner_config.es_layer_id = layer_id
 
     dense_sites_tuple = tuple(dense_sites)
@@ -117,8 +204,10 @@ def register_qwen3_30b_a3b_dense_sites(model: torch.nn.Module) -> Qwen3DiagESMan
         num_experts=config.num_experts,
         hidden_size=config.hidden_size,
         moe_intermediate_size=config.moe_intermediate_size,
+        placement=placement,
         schema_digest=_schema_digest(
             dense_sites_tuple,
+            placement=placement,
             num_layers=len(layers),
             num_experts=config.num_experts,
             hidden_size=config.hidden_size,
@@ -200,6 +289,10 @@ def register_qwen2_5_1_5b_dense_sites(
             site_id = f"model.layers.{layer_id}.{path}.input"
             layer.es_site_id = site_id
             layer.es_site_width = width
+            layer.es_pre_site_id = site_id
+            layer.es_pre_site_width = width
+            layer.es_post_site_id = None
+            layer.es_post_site_width = None
             dense_sites.append(DenseSite(site_id, width))
 
     dense_sites_tuple = tuple(dense_sites)
@@ -219,23 +312,9 @@ def compute_effective_model_digest(
     schema_digest: str,
     dense_deltas: Mapping[str, torch.Tensor],
     grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
-    expert_fc1_deltas: Optional[torch.Tensor] = None,
-    expert_fc2_deltas: Optional[torch.Tensor] = None,
 ) -> str:
     """Hash the exact FP32 residual deltas used as the KV namespace."""
 
-    if grouped_deltas is not None and (
-        expert_fc1_deltas is not None or expert_fc2_deltas is not None
-    ):
-        raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
-    if (expert_fc1_deltas is None) != (expert_fc2_deltas is None):
-        raise ValueError("legacy expert delta arguments must be provided together")
-    legacy_adapter = expert_fc1_deltas is not None
-    if legacy_adapter:
-        grouped_deltas = {
-            "moe_fc1": expert_fc1_deltas,
-            "moe_fc2": expert_fc2_deltas,
-        }
     grouped_deltas = dict(grouped_deltas or {})
     if (
         base_model_revision is not None
@@ -248,15 +327,11 @@ def compute_effective_model_digest(
     )
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("model_artifact_id must be a non-empty string")
-    legacy_codec = (
-        base_model_revision is not None
-        or legacy_adapter
-        or schema_id == QWEN3_30B_A3B_SCHEMA_ID
-    )
-
     digest = hashlib.sha256()
-    digest.update(b"diag-es-effective-model-fp32-delta-v3\0")
+    digest.update(b"diag-es-effective-model-fp32-delta-v4\0")
     digest.update(artifact_id.encode())
+    digest.update(b"\0")
+    digest.update((schema_id or "").encode())
     digest.update(b"\0")
     digest.update(schema_digest.encode())
 
@@ -270,14 +345,6 @@ def compute_effective_model_digest(
 
     for site_id in sorted(dense_deltas):
         update_tensor(f"dense:{site_id}", dense_deltas[site_id])
-    if legacy_codec:
-        if set(grouped_deltas) != {"moe_fc1", "moe_fc2"}:
-            raise ValueError(
-                "legacy digest requires moe_fc1 and moe_fc2 grouped deltas"
-            )
-        update_tensor("expert:moe_fc1", grouped_deltas["moe_fc1"])
-        update_tensor("expert:moe_fc2", grouped_deltas["moe_fc2"])
-    else:
-        for delta_name in sorted(grouped_deltas):
-            update_tensor(f"grouped:{delta_name}", grouped_deltas[delta_name])
+    for delta_name in sorted(grouped_deltas):
+        update_tensor(f"grouped:{delta_name}", grouped_deltas[delta_name])
     return digest.hexdigest()

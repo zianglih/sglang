@@ -232,14 +232,10 @@ class BaseTpWorker(ABC):
             for name, tensor in named_deltas.items()
             if name.startswith("grouped_delta:")
         }
-        expert_fc1_deltas = named_deltas.get("expert_delta:moe_fc1")
-        expert_fc2_deltas = named_deltas.get("expert_delta:moe_fc2")
         return manager.register_candidate(
             candidate_id=recv_req.candidate_id,
             dense_deltas=dense_deltas,
-            grouped_deltas=grouped_deltas or None,
-            expert_fc1_deltas=expert_fc1_deltas,
-            expert_fc2_deltas=expert_fc2_deltas,
+            grouped_deltas=grouped_deltas,
             effective_model_digest=recv_req.effective_model_digest,
         )
 

@@ -20,10 +20,15 @@ register_cuda_ci(est_time=20, stage="base-b", runner_config="1-gpu-small")
 
 
 class _Linear:
-    def __init__(self, input_size: int):
+    def __init__(self, input_size: int, output_size: int):
         self.input_size = input_size
+        self.output_size = output_size
         self.es_site_id = None
         self.es_site_width = None
+        self.es_pre_site_id = None
+        self.es_pre_site_width = None
+        self.es_post_site_id = None
+        self.es_post_site_width = None
 
 
 def _make_model():
@@ -33,11 +38,11 @@ def _make_model():
         layers.append(
             SimpleNamespace(
                 self_attn=SimpleNamespace(
-                    qkv_proj=_Linear(2048),
-                    o_proj=_Linear(4096),
+                    qkv_proj=_Linear(2048, 5120),
+                    o_proj=_Linear(4096, 2048),
                 ),
                 mlp=SimpleNamespace(
-                    gate=_Linear(2048),
+                    gate=_Linear(2048, 128),
                     experts=SimpleNamespace(moe_runner_config=runner_config),
                 ),
             )
@@ -49,22 +54,76 @@ def _make_model():
             moe_intermediate_size=768,
         ),
         model=SimpleNamespace(layers=layers),
+        lm_head=_Linear(2048, 151936),
     )
 
 
-def test_qwen_manifest_is_semantic_and_excludes_router():
+@pytest.mark.parametrize(
+    ("placement", "expected_dense", "expected_grouped", "expected_digest"),
+    [
+        (
+            "pre",
+            [("qkv_proj.input", 2048), ("o_proj.input", 4096)],
+            {
+                "moe_fc1_pre": (48, 128, 2048),
+                "moe_fc2_pre": (48, 128, 768),
+            },
+            "3650c468725df70692ae0470aa3769eb97ec91f9a04fe4de1f419c36a017b956",
+        ),
+        (
+            "post",
+            [("qkv_proj.output", 5120), ("o_proj.output", 2048)],
+            {
+                "moe_fc1_post": (48, 128, 1536),
+                "moe_fc2_post": (48, 128, 2048),
+            },
+            "7502d6adee8003103476e4faf4bf9f3bef2ed19bf4a1a8bfd8e5e011da5b3342",
+        ),
+        (
+            "both",
+            [
+                ("qkv_proj.input", 2048),
+                ("qkv_proj.output", 5120),
+                ("o_proj.input", 4096),
+                ("o_proj.output", 2048),
+            ],
+            {
+                "moe_fc1_pre": (48, 128, 2048),
+                "moe_fc2_pre": (48, 128, 768),
+                "moe_fc1_post": (48, 128, 1536),
+                "moe_fc2_post": (48, 128, 2048),
+            },
+            "d63a0480f277675fce4af8646bed81cad5c004002b44e8150a22b8121e6d7e60",
+        ),
+    ],
+)
+def test_qwen_manifest_is_semantic_and_excludes_router(
+    placement, expected_dense, expected_grouped, expected_digest
+):
     model = _make_model()
-    manifest = register_qwen3_30b_a3b_dense_sites(model)
+    manifest = register_qwen3_30b_a3b_dense_sites(model, placement=placement)
 
-    assert len(manifest.dense_sites) == 96
-    assert manifest.dense_sites[0].site_id == (
-        "model.layers.0.self_attn.qkv_proj.input"
-    )
-    assert manifest.dense_sites[0].input_width == 2048
-    assert manifest.dense_sites[1].site_id == "model.layers.0.self_attn.o_proj.input"
-    assert manifest.dense_sites[1].input_width == 4096
+    assert manifest.placement == placement
+    assert len(manifest.dense_sites) == 48 * len(expected_dense)
+    assert [
+        (site.site_id.removeprefix("model.layers.0.self_attn."), site.width)
+        for site in manifest.dense_sites[: len(expected_dense)]
+    ] == expected_dense
+    assert manifest.grouped_gate_shapes == expected_grouped
+    assert manifest.schema_digest == expected_digest
     assert model.model.layers[47].mlp.experts.moe_runner_config.es_layer_id == 47
     assert model.model.layers[0].mlp.gate.es_site_id is None
+    assert model.model.layers[0].mlp.gate.es_post_site_id is None
+    assert model.lm_head.es_pre_site_id is None
+    assert model.lm_head.es_post_site_id is None
+
+
+@pytest.mark.parametrize("placement", ["post", "both"])
+def test_qwen_post_manifest_rejects_tp_greater_than_one(placement):
+    with pytest.raises(ValueError, match="tp_size=1"):
+        register_qwen3_30b_a3b_dense_sites(
+            _make_model(), placement=placement, tp_size=2
+        )
 
 
 def test_effective_digest_hashes_exact_fp32_delta_payload():
@@ -73,27 +132,27 @@ def test_effective_digest_hashes_exact_fp32_delta_payload():
     fc2 = torch.zeros((1, 1, 1), dtype=torch.float32)
 
     digest = compute_effective_model_digest(
-        base_model_revision="Qwen/Qwen3-30B-A3B",
+        model_artifact_id="Qwen/Qwen3-30B-A3B",
+        schema_id="qwen3-30b-a3b-diag-es-v2",
         schema_digest="schema",
         dense_deltas=dense,
-        expert_fc1_deltas=fc1,
-        expert_fc2_deltas=fc2,
+        grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
     assert digest != compute_effective_model_digest(
-        base_model_revision="Qwen/Qwen3-30B-A3B",
+        model_artifact_id="Qwen/Qwen3-30B-A3B",
+        schema_id="qwen3-30b-a3b-diag-es-v2",
         schema_digest="schema",
         dense_deltas={"site-a": torch.zeros(2, dtype=torch.float32)},
-        expert_fc1_deltas=fc1,
-        expert_fc2_deltas=fc2,
+        grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
 
     dense["site-a"][0] = 2e-4
     assert digest != compute_effective_model_digest(
-        base_model_revision="Qwen/Qwen3-30B-A3B",
+        model_artifact_id="Qwen/Qwen3-30B-A3B",
+        schema_id="qwen3-30b-a3b-diag-es-v2",
         schema_digest="schema",
         dense_deltas=dense,
-        expert_fc1_deltas=fc1,
-        expert_fc2_deltas=fc2,
+        grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
 
 
@@ -337,6 +396,10 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
         weight=weight,
         es_site_id=site_id,
         es_site_width=width,
+        es_pre_site_id=site_id,
+        es_pre_site_width=width,
+        es_post_site_id=None,
+        es_post_site_width=None,
     )
     candidate_slot_pattern = torch.tensor(
         [
@@ -395,6 +458,143 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
         torch.testing.assert_close(graph_output, expected_replay, rtol=0, atol=0)
 
 
+def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
+    monkeypatch,
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang.srt.diag_es import manager as manager_module
+    from sglang.srt.layers.quantization import unquant as unquant_module
+    from sglang.srt.layers.quantization.unquant import (
+        Bf16GemmBackend,
+        UnquantizedLinearMethod,
+    )
+    from sglang.srt.model_executor.forward_context import (
+        ForwardContext,
+        forward_context,
+    )
+
+    torch.manual_seed(20260820)
+    rows, input_width, output_width = 17, 256, 128
+    pre_site = "model.layers.0.test_proj.input"
+    post_site = "model.layers.0.test_proj.output"
+    manifest = DiagESManifest(
+        schema_id="test-dense-diag-es-v2",
+        dense_sites=(
+            DenseSite(pre_site, input_width, "pre"),
+            DenseSite(post_site, output_width, "post"),
+        ),
+        grouped_gate_shapes={},
+        schema_digest="cd" * 32,
+        placement="both",
+    )
+    manager = DiagESManager(
+        manifest=manifest,
+        resident_candidate_slots=2,
+        model_artifact_id="test-artifact",
+        device=torch.device("cuda"),
+    )
+    resident_slots = []
+    for candidate in range(2):
+        registered = manager.register_candidate(
+            candidate_id=f"candidate-{candidate}",
+            dense_deltas={
+                pre_site: torch.empty(input_width, dtype=torch.float32).uniform_(
+                    -0.02, 0.02
+                ),
+                post_site: torch.empty(output_width, dtype=torch.float32).uniform_(
+                    -0.03, 0.03
+                ),
+            },
+            grouped_deltas={},
+        )
+        resident_slots.append(registered["resident_slot"])
+    monkeypatch.setattr(manager_module, "_manager", manager)
+    monkeypatch.setattr(
+        unquant_module,
+        "_BF16_GEMM_BACKEND",
+        Bf16GemmBackend.TRITON,
+    )
+
+    x = torch.randn((rows, input_width), dtype=torch.bfloat16, device="cuda")
+    weight = (
+        torch.randn((output_width, input_width), dtype=torch.bfloat16, device="cuda")
+        * 0.1
+    )
+    bias = torch.randn(output_width, dtype=torch.bfloat16, device="cuda") * 0.1
+    layer = SimpleNamespace(
+        weight=weight,
+        es_pre_site_id=pre_site,
+        es_pre_site_width=input_width,
+        es_post_site_id=post_site,
+        es_post_site_width=output_width,
+    )
+    candidate_slots = torch.tensor(
+        [0, *resident_slots] * 6,
+        dtype=torch.int32,
+        device="cuda",
+    )[:rows].contiguous()
+    pre_bank = manager.get_dense_delta_bank(pre_site)
+    post_bank = manager.get_dense_delta_bank(post_site)
+    pre = torch.addcmul(
+        x.float(), x.float(), pre_bank[candidate_slots.long()]
+    ).bfloat16()
+    affine = pre.float() @ weight.float().T + bias.float()
+    expected = torch.addcmul(
+        affine,
+        affine,
+        post_bank[candidate_slots.long()],
+    ).bfloat16()
+
+    method = UnquantizedLinearMethod()
+    caller_output = torch.empty_like(expected)
+    with forward_context(
+        ForwardContext(attn_backend=None, es_candidate_slots=candidate_slots)
+    ):
+        allocated = method.apply(layer, x, bias)
+        returned = method.apply_into(layer, x, caller_output, bias)
+
+    assert returned.data_ptr() == caller_output.data_ptr()
+    torch.testing.assert_close(allocated, expected, rtol=0.02, atol=0.5)
+    torch.testing.assert_close(caller_output, expected, rtol=0.02, atol=0.5)
+    assert torch.equal(allocated, caller_output)
+
+    # The server captures the caller-owned path.  Capture after eager warmup,
+    # then mutate every live input while preserving the captured pointers.
+    graph_output = torch.empty_like(expected)
+    graph = torch.cuda.CUDAGraph()
+    with forward_context(
+        ForwardContext(attn_backend=None, es_candidate_slots=candidate_slots)
+    ):
+        with torch.cuda.graph(graph):
+            method.apply_into(layer, x, graph_output, bias)
+
+    x.copy_(torch.randn_like(x))
+    candidate_slots.copy_(
+        torch.tensor(
+            [resident_slots[1], 0, resident_slots[0]] * 6,
+            dtype=torch.int32,
+            device="cuda",
+        )[:rows]
+    )
+    pre_bank[resident_slots[0]].uniform_(-0.04, 0.04)
+    post_bank[resident_slots[1]].uniform_(-0.05, 0.05)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    replay_pre = torch.addcmul(
+        x.float(), x.float(), pre_bank[candidate_slots.long()]
+    ).bfloat16()
+    replay_affine = replay_pre.float() @ weight.float().T + bias.float()
+    replay_expected = torch.addcmul(
+        replay_affine,
+        replay_affine,
+        post_bank[candidate_slots.long()],
+    ).bfloat16()
+    torch.testing.assert_close(graph_output, replay_expected, rtol=0.02, atol=0.5)
+
+
 def test_resident_manager_retire_is_nonblocking_and_backpressures():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -415,8 +615,10 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
     )
     payload = {
         "dense_deltas": {"dense": torch.zeros(4, dtype=torch.float32)},
-        "expert_fc1_deltas": torch.zeros((1, 2, 4), dtype=torch.float32),
-        "expert_fc2_deltas": torch.zeros((1, 2, 3), dtype=torch.float32),
+        "grouped_deltas": {
+            "moe_fc1_pre": torch.zeros((1, 2, 4), dtype=torch.float32),
+            "moe_fc2_pre": torch.zeros((1, 2, 3), dtype=torch.float32),
+        },
     }
 
     registered = manager.register_candidate(

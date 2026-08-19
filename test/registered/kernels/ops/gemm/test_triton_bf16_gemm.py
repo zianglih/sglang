@@ -27,7 +27,7 @@ TARGET_SHAPES = [
 
 
 def test_triton_bf16_linear_reuses_kernel_across_dynamic_batch_sizes():
-    assert _triton_bf16_linear_kernel.keys == ["N", "K"]
+    assert _triton_bf16_linear_kernel.keys == ["N", "K", "APPLY_POST_DELTA"]
     assert "M" in _triton_bf16_linear_kernel.fn.do_not_specialize
 
 
@@ -53,6 +53,103 @@ def test_triton_bf16_linear_dynamic_batch_reuses_binary_in_cuda_graph():
 
     ref = (x17.float() @ weight.float().T).bfloat16()
     torch.testing.assert_close(out17, ref, rtol=2e-2, atol=2.5)
+
+
+def test_triton_bf16_linear_post_delta_dynamic_batch_cuda_graph():
+    torch.manual_seed(20260820)
+    n, k = 128, 2048
+    weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
+    delta_bank = torch.zeros((3, n), dtype=torch.float32, device="cuda")
+    delta_bank[1:].uniform_(-0.02, 0.02)
+
+    # Warm the post-delta specialization before capture; M remains dynamic.
+    x1 = torch.randn((1, k), dtype=torch.bfloat16, device="cuda")
+    out1 = torch.empty((1, n), dtype=torch.bfloat16, device="cuda")
+    slots1 = torch.ones(1, dtype=torch.int32, device="cuda")
+    triton_bf16_linear_out(
+        x1,
+        weight,
+        out1,
+        post_delta_bank=delta_bank,
+        candidate_slots=slots1,
+    )
+    torch.cuda.synchronize()
+
+    x17 = torch.randn((17, k), dtype=torch.bfloat16, device="cuda")
+    out17 = torch.empty((17, n), dtype=torch.bfloat16, device="cuda")
+    slots17 = torch.arange(17, dtype=torch.int32, device="cuda") % 3
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        triton_bf16_linear_out(
+            x17,
+            weight,
+            out17,
+            post_delta_bank=delta_bank,
+            candidate_slots=slots17,
+        )
+
+    x17.copy_(torch.randn_like(x17))
+    slots17.copy_((torch.arange(17, dtype=torch.int32, device="cuda") + 1) % 3)
+    delta_bank[1:].uniform_(-0.03, 0.03)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    affine = x17.float() @ weight.float().T
+    ref = torch.addcmul(
+        affine,
+        affine,
+        delta_bank[slots17.long()],
+    ).bfloat16()
+    torch.testing.assert_close(out17, ref, rtol=2e-2, atol=2.5)
+
+
+def test_triton_bf16_linear_post_delta_bias_order_and_identity():
+    m = n = k = 64
+    x = torch.zeros((m, k), dtype=torch.bfloat16, device="cuda")
+    weight = torch.zeros((n, k), dtype=torch.bfloat16, device="cuda")
+    bias = torch.linspace(-2, 2, n, dtype=torch.bfloat16, device="cuda")
+    delta_bank = torch.zeros((3, n), dtype=torch.float32, device="cuda")
+    delta_bank[1].fill_(0.125)
+    delta_bank[2].fill_(-0.25)
+    slots = torch.arange(m, dtype=torch.int32, device="cuda") % 3
+
+    actual = triton_bf16_linear(
+        x,
+        weight,
+        bias,
+        post_delta_bank=delta_bank,
+        candidate_slots=slots,
+    )
+    output = torch.empty_like(actual)
+    returned = triton_bf16_linear_out(
+        x,
+        weight,
+        output,
+        bias,
+        post_delta_bank=delta_bank,
+        candidate_slots=slots,
+    )
+    affine = bias.float().expand(m, n)
+    expected = torch.addcmul(
+        affine,
+        affine,
+        delta_bank[slots.long()],
+    ).bfloat16()
+
+    assert returned.data_ptr() == output.data_ptr()
+    assert torch.equal(actual, expected)
+    assert torch.equal(output, expected)
+
+    identity_slots = torch.zeros(m, dtype=torch.int32, device="cuda")
+    native = triton_bf16_linear(x, weight, bias)
+    identity = triton_bf16_linear(
+        x,
+        weight,
+        bias,
+        post_delta_bank=delta_bank,
+        candidate_slots=identity_slots,
+    )
+    assert torch.equal(identity, native)
 
 
 @pytest.mark.parametrize("has_bias", [False, True])

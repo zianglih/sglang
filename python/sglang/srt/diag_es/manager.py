@@ -17,7 +17,12 @@ from sglang.srt.diag_es.manifest import (
     register_qwen3_30b_a3b_dense_sites,
 )
 
-ExpertGateKind = Literal["moe_fc1", "moe_fc2"]
+ExpertGateKind = Literal[
+    "moe_fc1_pre",
+    "moe_fc1_post",
+    "moe_fc2_pre",
+    "moe_fc2_post",
+]
 
 
 @dataclass(slots=True)
@@ -93,9 +98,9 @@ class DiagESManager:
                 (
                     self.physical_slots,
                     (
-                        site.input_width // self.tp_size
+                        site.width // self.tp_size
                         if self.tp_size > 1 and ".o_proj.input" in site.site_id
-                        else site.input_width
+                        else site.width
                     ),
                 ),
                 dtype=torch.float32,
@@ -110,7 +115,7 @@ class DiagESManager:
                     self.physical_slots,
                     (
                         shape[-1] // self.tp_size
-                        if name == "moe_fc2" and self.tp_size > 1
+                        if name == "moe_fc2_pre" and self.tp_size > 1
                         else shape[-1]
                     ),
                 ),
@@ -140,7 +145,7 @@ class DiagESManager:
         return self._grouped_delta_banks[name]
 
     def _local_grouped_delta(self, name: str, delta: torch.Tensor) -> torch.Tensor:
-        if name != "moe_fc2" or self.tp_size == 1:
+        if name != "moe_fc2_pre" or self.tp_size == 1:
             return delta
         assert delta.shape[-1] % self.tp_size == 0
         width = delta.shape[-1] // self.tp_size
@@ -153,26 +158,11 @@ class DiagESManager:
         candidate_id: str,
         dense_deltas: Mapping[str, torch.Tensor],
         grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
-        expert_fc1_deltas: Optional[torch.Tensor] = None,
-        expert_fc2_deltas: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
     ) -> dict[str, Any]:
-        if grouped_deltas is not None and (
-            expert_fc1_deltas is not None or expert_fc2_deltas is not None
-        ):
-            raise ValueError(
-                "grouped_deltas conflict with legacy expert delta arguments"
-            )
-        if (expert_fc1_deltas is None) != (expert_fc2_deltas is None):
-            raise ValueError("legacy expert delta arguments must be provided together")
-        if expert_fc1_deltas is not None:
-            grouped_deltas = {
-                "moe_fc1": expert_fc1_deltas,
-                "moe_fc2": expert_fc2_deltas,
-            }
         grouped_deltas = dict(grouped_deltas or {})
         expected_dense_sites = {
-            site.site_id: site.input_width for site in self.manifest.dense_sites
+            site.site_id: site.width for site in self.manifest.dense_sites
         }
         assert set(dense_deltas) == set(expected_dense_sites)
         for site_id, width in expected_dense_sites.items():
@@ -286,11 +276,12 @@ class DiagESManager:
             status = {
                 "schema_id": self.manifest.schema_id,
                 "schema_digest": self.manifest.schema_digest,
+                "placement": self.manifest.placement,
                 "model_artifact_id": self.model_artifact_id,
                 "physical_slots": self.physical_slots,
                 "free_slots": list(self._free_slots),
                 "dense_sites": {
-                    site.site_id: site.input_width for site in self.manifest.dense_sites
+                    site.site_id: site.width for site in self.manifest.dense_sites
                 },
                 "grouped_gate_shapes": {
                     name: list(shape)
@@ -301,18 +292,6 @@ class DiagESManager:
                     for candidate_id, record in self._records.items()
                 },
             }
-            if self.manifest.schema_id == QWEN3_30B_A3B_SCHEMA_ID:
-                status.update(
-                    {
-                        "base_model_revision": self.model_artifact_id,
-                        "expert_fc1_shape": list(
-                            self.manifest.grouped_gate_shapes["moe_fc1"]
-                        ),
-                        "expert_fc2_shape": list(
-                            self.manifest.grouped_gate_shapes["moe_fc2"]
-                        ),
-                    }
-                )
             return status
 
     def _reclaim_retired_locked(self) -> None:
@@ -360,9 +339,10 @@ def register_qwen3_30b_a3b(
     *,
     resident_candidate_slots: int,
     base_model_revision: str,
+    placement: Literal["pre", "post", "both"] = "pre",
 ) -> DiagESManager:
     global _manager
-    manifest = register_qwen3_30b_a3b_dense_sites(model)
+    manifest = register_qwen3_30b_a3b_dense_sites(model, placement=placement, tp_size=1)
     _manager = DiagESManager(
         manifest=manifest,
         resident_candidate_slots=resident_candidate_slots,
@@ -379,6 +359,7 @@ def register_diag_es_model(
     resident_candidate_slots: int,
     model_artifact_id: str,
     tp_size: int,
+    placement: Literal["pre", "post", "both"] = "pre",
 ) -> DiagESManager:
     global _manager
     from sglang.srt.distributed.parallel_state import (
@@ -386,7 +367,9 @@ def register_diag_es_model(
     )
 
     if schema_id == QWEN3_30B_A3B_SCHEMA_ID:
-        manifest = register_qwen3_30b_a3b_dense_sites(model)
+        manifest = register_qwen3_30b_a3b_dense_sites(
+            model, placement=placement, tp_size=tp_size
+        )
     elif schema_id == QWEN2_5_1_5B_SCHEMA_ID:
         manifest = register_qwen2_5_1_5b_dense_sites(model, tp_size=tp_size)
     else:

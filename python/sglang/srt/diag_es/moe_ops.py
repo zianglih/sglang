@@ -6,7 +6,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _apply_expert_route_delta_kernel(
+def _apply_expert_route_pre_delta_kernel(
     x_ptr,
     topk_ids_ptr,
     token_slots_ptr,
@@ -52,7 +52,7 @@ def _apply_expert_route_delta_kernel(
     )
 
 
-def _launch_expert_route_delta(
+def _launch_expert_route_pre_delta(
     x: torch.Tensor,
     topk_ids: torch.Tensor,
     token_slots: torch.Tensor,
@@ -76,7 +76,7 @@ def _launch_expert_route_delta(
     assert x.device == topk_ids.device == token_slots.device
     assert token_slots.shape[0] == topk_ids.shape[0]
     assert delta_bank.shape[2] == width
-    _apply_expert_route_delta_kernel[grid](
+    _apply_expert_route_pre_delta_kernel[grid](
         x,
         topk_ids,
         token_slots,
@@ -96,20 +96,20 @@ def _launch_expert_route_delta(
     )
 
 
-def materialize_moe_fc1_input(
+def materialize_moe_fc1_pre_input(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
     token_slots: torch.Tensor,
     delta_bank: torch.Tensor,
 ) -> torch.Tensor:
-    """Expand token-major hidden states into gated route-major FC1 input."""
+    """Expand token-major states into pre-gated route-major FC1 input."""
 
     out = torch.empty(
         (topk_ids.numel(), hidden_states.shape[1]),
         dtype=hidden_states.dtype,
         device=hidden_states.device,
     )
-    _launch_expert_route_delta(
+    _launch_expert_route_pre_delta(
         hidden_states,
         topk_ids,
         token_slots,
@@ -120,15 +120,15 @@ def materialize_moe_fc1_input(
     return out
 
 
-def apply_moe_fc2_delta_inplace(
+def apply_moe_fc2_pre_delta_inplace(
     activations: torch.Tensor,
     topk_ids: torch.Tensor,
     token_slots: torch.Tensor,
     delta_bank: torch.Tensor,
 ) -> torch.Tensor:
-    """Gate the dead post-activation route buffer immediately before FC2."""
+    """Pre-gate the dead post-activation route buffer immediately before FC2."""
 
-    _launch_expert_route_delta(
+    _launch_expert_route_pre_delta(
         activations,
         topk_ids,
         token_slots,
