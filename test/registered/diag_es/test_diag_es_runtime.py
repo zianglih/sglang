@@ -149,6 +149,28 @@ def test_effective_digest_is_the_radix_cache_identity():
     assert different_model_match.device_indices.numel() == 0
 
 
+@pytest.mark.parametrize(
+    ("rows", "width", "expected"),
+    [
+        (8, 2048, (256, None)),
+        (256, 4096, (256, None)),
+        (512, 2048, (256, None)),
+        (512, 4096, (512, 4)),
+        (1024, 2048, (512, 4)),
+        (1024, 4096, (2048, 4)),
+        (2048, 2048, (2048, 4)),
+        (2048, 4096, (2048, 8)),
+        (4096, 2048, (2048, 8)),
+        (4096, 4096, (4096, 8)),
+        (4096, 8960, (256, None)),
+    ],
+)
+def test_dense_delta_launch_config(rows, width, expected):
+    from sglang.srt.diag_es.ops import _dense_delta_launch_config
+
+    assert _dense_delta_launch_config(rows, width) == expected
+
+
 @pytest.mark.parametrize("width", [1536, 2048, 4096, 8960])
 def test_triton_dense_delta_mixed_slots_and_identity(width):
     if not torch.cuda.is_available():
@@ -175,6 +197,31 @@ def test_triton_dense_delta_mixed_slots_and_identity(width):
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     identity_rows = slots == 0
     assert torch.equal(out[identity_rows], x[identity_rows])
+
+
+@pytest.mark.parametrize(
+    ("rows", "width"),
+    [(512, 2048), (1024, 4096), (2048, 2048), (4096, 4096)],
+)
+def test_triton_dense_delta_tuned_launch_and_caller_owned_output(rows, width):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang.srt.diag_es.ops import apply_dense_delta_out
+
+    torch.manual_seed(20260819 + rows + width)
+    x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
+    delta_bank = torch.empty((9, width), dtype=torch.float32, device="cuda")
+    delta_bank.uniform_(-0.02, 0.02)
+    delta_bank[0].zero_()
+    slots = (torch.arange(rows, dtype=torch.int32, device="cuda") % 8) + 1
+    output = torch.empty_like(x)
+
+    returned = apply_dense_delta_out(x, delta_bank, slots, output)
+    expected = torch.addcmul(x.float(), x.float(), delta_bank[slots.long()]).bfloat16()
+
+    assert returned.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
 
 
 def test_triton_fp32_delta_preserves_signal_lost_by_bf16_multiplier():
@@ -204,14 +251,14 @@ def test_triton_fp32_delta_preserves_signal_lost_by_bf16_multiplier():
     assert not torch.equal(actual, legacy)
 
 
-def test_triton_fp32_delta_cuda_graph_replay_observes_live_bank_and_slots():
+@pytest.mark.parametrize(("rows", "width"), [(17, 2048), (1024, 4096), (4096, 2048)])
+def test_triton_fp32_delta_cuda_graph_replay_observes_live_bank_and_slots(rows, width):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
     from sglang.srt.diag_es.ops import apply_dense_delta
 
-    torch.manual_seed(20260819)
-    rows, width = 17, 2048
+    torch.manual_seed(20260819 + rows + width)
     x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
     delta_bank = torch.zeros((3, width), dtype=torch.float32, device="cuda")
     delta_bank[1:].uniform_(-0.01, 0.01)
@@ -239,9 +286,11 @@ def test_triton_fp32_delta_cuda_graph_replay_observes_live_bank_and_slots():
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("width", [1536, 8960])
+@pytest.mark.parametrize(
+    ("width", "rows"), [(1536, 9), (8960, 9), (2048, 1024), (4096, 1024)]
+)
 def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
-    monkeypatch, width
+    monkeypatch, width, rows
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -281,7 +330,6 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
         slots.append(registered["resident_slot"])
     monkeypatch.setattr(manager_module, "_manager", manager)
 
-    rows = 9
     output_width = 64
     x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((output_width, width), dtype=torch.bfloat16, device="cuda")
@@ -290,7 +338,7 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
         es_site_id=site_id,
         es_site_width=width,
     )
-    candidate_slots = torch.tensor(
+    candidate_slot_pattern = torch.tensor(
         [
             slots[0],
             slots[1],
@@ -305,6 +353,9 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
         dtype=torch.int32,
         device="cuda",
     )
+    candidate_slots = candidate_slot_pattern.repeat(
+        (rows + candidate_slot_pattern.numel() - 1) // candidate_slot_pattern.numel()
+    )[:rows].contiguous()
     delta_bank = manager.get_dense_delta_bank(site_id)
     x_fp32 = x.float()
     delta = delta_bank[candidate_slots.long()]
@@ -313,15 +364,35 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
 
     method = UnquantizedLinearMethod()
     output = torch.empty((rows, output_width), dtype=torch.bfloat16, device="cuda")
+    graph_output = torch.empty_like(output)
+    graph = None
     with forward_context(
         ForwardContext(attn_backend=None, es_candidate_slots=candidate_slots)
     ):
         applied = method.apply(layer, x)
         applied_into = method.apply_into(layer, x, output)
+        if width in (2048, 4096):
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                method.apply_into(layer, x, graph_output)
 
     assert applied_into.data_ptr() == output.data_ptr()
     torch.testing.assert_close(applied, expected, rtol=0, atol=0)
     torch.testing.assert_close(applied_into, expected, rtol=0, atol=0)
+    if graph is not None:
+        x.copy_(torch.randn_like(x))
+        candidate_slots.copy_(candidate_slots.roll(1))
+        delta_bank[slots[1]].uniform_(-0.02, 0.02)
+        graph.replay()
+        torch.cuda.synchronize()
+        steered = torch.addcmul(
+            x.float(),
+            x.float(),
+            delta_bank[candidate_slots.long()],
+        ).bfloat16()
+        expected_replay = torch.nn.functional.linear(steered, weight)
+        torch.testing.assert_close(graph_output, expected_replay, rtol=0, atol=0)
 
 
 def test_resident_manager_retire_is_nonblocking_and_backpressures():

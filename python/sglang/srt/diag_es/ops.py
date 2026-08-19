@@ -34,9 +34,81 @@ def _apply_dense_delta_kernel(
     )
 
 
+def _dense_delta_launch_config(rows: int, width: int) -> tuple[int, int | None]:
+    """Return the offline-tuned B300 launch geometry for target dense sites."""
+
+    if width not in (2048, 4096) or rows < 512:
+        return 256, None
+    if rows < 1024:
+        return (256, None) if width == 2048 else (512, 4)
+    if width == 2048:
+        if rows < 2048:
+            return 512, 4
+        if rows < 4096:
+            return 2048, 4
+        return 2048, 8
+    if rows < 2048:
+        return 2048, 4
+    if rows < 4096:
+        return 2048, 8
+    return 4096, 8
+
+
+def _launch_dense_delta(
+    x: torch.Tensor,
+    delta_bank: torch.Tensor,
+    candidate_slots: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    width = x.shape[1]
+    block, num_warps = _dense_delta_launch_config(x.shape[0], width)
+    grid = (x.shape[0], triton.cdiv(width, block))
+    if num_warps is None:
+        _apply_dense_delta_kernel[grid](
+            x,
+            delta_bank,
+            candidate_slots,
+            out,
+            width=width,
+            BLOCK=block,
+        )
+    else:
+        _apply_dense_delta_kernel[grid](
+            x,
+            delta_bank,
+            candidate_slots,
+            out,
+            width=width,
+            BLOCK=block,
+            num_warps=num_warps,
+        )
+
+
+def apply_dense_delta_out(
+    x: torch.Tensor,
+    delta_bank: torch.Tensor,
+    candidate_slots: torch.Tensor,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    assert x.ndim == 2 and x.is_contiguous()
+    assert delta_bank.ndim == 2 and delta_bank.is_contiguous()
+    assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
+    assert x.dtype == torch.bfloat16 and delta_bank.dtype == torch.float32
+    assert candidate_slots.dtype == torch.int32
+    assert out.ndim == 2 and out.is_contiguous()
+    assert out.dtype == x.dtype and out.shape == x.shape
+    assert x.device == delta_bank.device == candidate_slots.device == out.device
+    assert candidate_slots.shape[0] == x.shape[0]
+    assert delta_bank.shape[1] == x.shape[1]
+    _launch_dense_delta(x, delta_bank, candidate_slots, out)
+    return out
+
+
 def apply_dense_delta(
     x: torch.Tensor, delta_bank: torch.Tensor, candidate_slots: torch.Tensor
 ) -> torch.Tensor:
+    # Keep the integration hot path at the same validation cost as the original
+    # standalone launcher.  The caller-owned API performs its own output checks.
     assert x.ndim == 2 and x.is_contiguous()
     assert delta_bank.ndim == 2 and delta_bank.is_contiguous()
     assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
@@ -46,16 +118,7 @@ def apply_dense_delta(
     assert candidate_slots.shape[0] == x.shape[0]
     assert delta_bank.shape[1] == x.shape[1]
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
-    width = x.shape[1]
-    block = 256
-    _apply_dense_delta_kernel[(x.shape[0], triton.cdiv(width, block))](
-        x,
-        delta_bank,
-        candidate_slots,
-        out,
-        width=width,
-        BLOCK=block,
-    )
+    _launch_dense_delta(x, delta_bank, candidate_slots, out)
     return out
 
 
