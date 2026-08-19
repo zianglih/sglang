@@ -3374,9 +3374,19 @@ class ServerArgs:
     ] = False
     enable_diag_es: A[
         bool,
-        "Enable the Qwen3-30B-A3B activation-side diagonal ES runtime.",
+        "Enable the explicit-schema activation-side diagonal ES runtime.",
         NS("exec.features"),
     ] = False
+    diag_es_schema_id: A[
+        Optional[str],
+        "Exact diagonal-ES site schema ID; required when diagonal ES is enabled.",
+        NS("exec.features"),
+    ] = None
+    diag_es_model_artifact_id: A[
+        Optional[str],
+        "Stable model artifact identity used by diagonal-ES cache digests.",
+        NS("exec.features"),
+    ] = None
     diag_es_resident_candidate_slots: A[
         int,
         "Number of usable resident diagonal-ES candidate slots; slot zero is identity.",
@@ -3515,6 +3525,7 @@ class ServerArgs:
         self._resolved_overrides = []
 
         self._handle_return_hidden_states_mode()
+        self._handle_diag_es_identity()
         if self.model_path.lower() in ["none", "dummy"]:
             return
 
@@ -3692,6 +3703,27 @@ class ServerArgs:
                 self.return_hidden_states_mode = "full"
         else:
             self.enable_return_hidden_states = True
+
+    def _handle_diag_es_identity(self):
+        if not self.enable_diag_es:
+            return
+        supported = {
+            "qwen3-30b-a3b-diag-es-v1",
+            "qwen2.5-1.5b-instruct-dense-diag-es-v1",
+        }
+        if self.diag_es_schema_id not in supported:
+            raise ValueError(
+                "enable_diag_es requires an explicit supported diag_es_schema_id"
+            )
+        if (
+            not isinstance(self.diag_es_model_artifact_id, str)
+            or not self.diag_es_model_artifact_id.strip()
+        ):
+            raise ValueError(
+                "enable_diag_es requires a non-empty diag_es_model_artifact_id"
+            )
+        if self.diag_es_resident_candidate_slots < 1:
+            raise ValueError("diag_es_resident_candidate_slots must be positive")
 
     def _handle_model_capability_adjustments(self):
         if parse_connector_type(self.model_path) == ConnectorType.INSTANCE:

@@ -25,6 +25,7 @@ import dataclasses
 import gc
 import logging
 import multiprocessing as mp
+from multiprocessing import resource_sharer
 import os
 import random
 import signal
@@ -89,6 +90,7 @@ from sglang.srt.managers.io_struct import (
     sock_recv,
     sock_send,
 )
+from sglang.srt.diag_es.protocol import prepare_register_payload
 from sglang.srt.managers.multi_tokenizer_mixin import (
     MultiTokenizerRouter,
     run_multi_detokenizer_router_process,
@@ -1257,6 +1259,7 @@ class Engine(EngineScoreMixin, EngineBase):
                 self._weight_cache_daemon_procs = []
 
             kill_process_tree(os.getpid(), include_parent=False, wait_timeout=60)
+            resource_sharer.stop()
         finally:
             if isinstance(self.tokenizer_manager, TokenizerManager):
                 self.tokenizer_manager.cuda_vmm_feature_transport.shutdown()
@@ -1431,18 +1434,18 @@ class Engine(EngineScoreMixin, EngineBase):
         self,
         candidate_id: str,
         dense_gates: Dict[str, torch.Tensor],
-        expert_fc1_gates: torch.Tensor,
-        expert_fc2_gates: torch.Tensor,
+        expert_fc1_gates: Optional[torch.Tensor] = None,
+        expert_fc2_gates: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
+        *,
+        grouped_gates: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
-        named_gates = [
-            (f"dense:{site_id}", gate) for site_id, gate in dense_gates.items()
-        ]
-        named_gates.extend(
-            (
-                ("expert:moe_fc1", expert_fc1_gates),
-                ("expert:moe_fc2", expert_fc2_gates),
-            )
+        named_gates, effective_model_digest = prepare_register_payload(
+            dense_gates,
+            expert_fc1_gates,
+            expert_fc2_gates,
+            effective_model_digest,
+            grouped_gates=grouped_gates,
         )
         obj = DiagESRegistryReqInput(
             action="register",
@@ -1461,18 +1464,18 @@ class Engine(EngineScoreMixin, EngineBase):
         self,
         candidate_id: str,
         dense_gates: Dict[str, torch.Tensor],
-        expert_fc1_gates: torch.Tensor,
-        expert_fc2_gates: torch.Tensor,
+        expert_fc1_gates: Optional[torch.Tensor] = None,
+        expert_fc2_gates: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
+        *,
+        grouped_gates: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
-        named_gates = [
-            (f"dense:{site_id}", gate) for site_id, gate in dense_gates.items()
-        ]
-        named_gates.extend(
-            (
-                ("expert:moe_fc1", expert_fc1_gates),
-                ("expert:moe_fc2", expert_fc2_gates),
-            )
+        named_gates, effective_model_digest = prepare_register_payload(
+            dense_gates,
+            expert_fc1_gates,
+            expert_fc2_gates,
+            effective_model_digest,
+            grouped_gates=grouped_gates,
         )
         result = await self.tokenizer_manager.diag_es_registry(
             DiagESRegistryReqInput(

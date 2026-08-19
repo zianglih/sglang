@@ -227,11 +227,19 @@ class BaseTpWorker(ABC):
             for name, tensor in named_gates.items()
             if name.startswith("dense:")
         }
+        grouped_gates = {
+            name.removeprefix("grouped:"): tensor
+            for name, tensor in named_gates.items()
+            if name.startswith("grouped:")
+        }
+        expert_fc1_gates = named_gates.get("expert:moe_fc1")
+        expert_fc2_gates = named_gates.get("expert:moe_fc2")
         return manager.register_candidate(
             candidate_id=recv_req.candidate_id,
             dense_gates=dense_gates,
-            expert_fc1_gates=named_gates["expert:moe_fc1"],
-            expert_fc2_gates=named_gates["expert:moe_fc2"],
+            grouped_gates=grouped_gates or None,
+            expert_fc1_gates=expert_fc1_gates,
+            expert_fc2_gates=expert_fc2_gates,
             effective_model_digest=recv_req.effective_model_digest,
         )
 

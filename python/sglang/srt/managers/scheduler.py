@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from array import array
 from collections import deque
@@ -51,6 +52,7 @@ import setproctitle
 import torch
 import torch.distributed
 from torch.distributed import barrier
+from tqdm.std import tqdm as std_tqdm
 
 if TYPE_CHECKING:
     from torch.cuda import Stream as CudaStream
@@ -5031,6 +5033,10 @@ def run_scheduler_process(
     display_dp_rank: Optional[int] = None,
     display_moe_ep_rank: Optional[int] = None,
 ):
+    # Torch Dynamo/FX can create a standard tqdm during Scheduler construction.
+    # Keep its write lock process-local so it does not allocate a semaphore.
+    std_tqdm.set_lock(threading.RLock())
+
     # Load plugins so hooks can override Scheduler and its dependencies.
     load_plugins()
     dp_rank = configure_scheduler_process(

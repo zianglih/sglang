@@ -16,6 +16,7 @@ import os
 import re
 import struct
 import tempfile
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import (
@@ -1182,6 +1183,7 @@ def buffered_multi_thread_safetensors_weights_iterator(
         for st_file in itertools.islice(file_iter, buffer_size):
             pending.append((st_file, executor.submit(_load_file, st_file)))
 
+        tqdm.set_lock(threading.RLock())
         with tqdm(
             total=len(hf_weights_files),
             desc="Multi-thread loading shards",

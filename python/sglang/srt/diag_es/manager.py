@@ -8,8 +8,12 @@ from typing import Any, Literal, Mapping, Optional
 import torch
 
 from sglang.srt.diag_es.manifest import (
+    QWEN3_30B_A3B_SCHEMA_ID,
+    QWEN2_5_1_5B_SCHEMA_ID,
+    DiagESManifest,
     Qwen3DiagESManifest,
     compute_effective_model_digest,
+    register_qwen2_5_1_5b_dense_sites,
     register_qwen3_30b_a3b_dense_sites,
 )
 
@@ -45,12 +49,31 @@ class DiagESManager:
     def __init__(
         self,
         *,
-        manifest: Qwen3DiagESManifest,
+        manifest: Qwen3DiagESManifest | DiagESManifest,
         resident_candidate_slots: int,
-        base_model_revision: str,
         device: torch.device,
+        base_model_revision: Optional[str] = None,
+        model_artifact_id: Optional[str] = None,
     ) -> None:
         self.manifest = manifest
+        if (
+            base_model_revision is not None
+            and model_artifact_id is not None
+            and base_model_revision != model_artifact_id
+        ):
+            raise ValueError(
+                "base_model_revision conflicts with model_artifact_id"
+            )
+        self.model_artifact_id = (
+            model_artifact_id
+            if model_artifact_id is not None
+            else base_model_revision
+        )
+        if (
+            not isinstance(self.model_artifact_id, str)
+            or not self.model_artifact_id.strip()
+        ):
+            raise ValueError("model_artifact_id must be a non-empty string")
         self.base_model_revision = base_model_revision
         self.device = device
         self.physical_slots = resident_candidate_slots + 1
@@ -73,47 +96,46 @@ class DiagESManager:
             )
             for site in manifest.dense_sites
         }
-        self._expert_fc1_gate_bank = torch.ones(
-            (
-                manifest.num_layers,
-                manifest.num_experts,
-                self.physical_slots,
-                manifest.hidden_size,
-            ),
-            dtype=torch.bfloat16,
-            device=device,
-        )
-        self._expert_fc2_gate_bank = torch.ones(
-            (
-                manifest.num_layers,
-                manifest.num_experts,
-                self.physical_slots,
-                manifest.moe_intermediate_size,
-            ),
-            dtype=torch.bfloat16,
-            device=device,
-        )
+        self._grouped_gate_banks = {
+            name: torch.ones(
+                (*shape[:-1], self.physical_slots, shape[-1]),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            for name, shape in manifest.grouped_gate_shapes.items()
+        }
 
     def get_dense_gate_bank(self, site_id: str) -> torch.Tensor:
         return self._dense_gate_banks[site_id]
 
     def get_expert_gate_bank(self, layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
-        bank = (
-            self._expert_fc1_gate_bank
-            if kind == "moe_fc1"
-            else self._expert_fc2_gate_bank
-        )
-        return bank[layer_id]
+        return self._grouped_gate_banks[kind][layer_id]
+
+    def get_grouped_gate_bank(self, name: str) -> torch.Tensor:
+        return self._grouped_gate_banks[name]
 
     def register_candidate(
         self,
         *,
         candidate_id: str,
         dense_gates: Mapping[str, torch.Tensor],
-        expert_fc1_gates: torch.Tensor,
-        expert_fc2_gates: torch.Tensor,
+        grouped_gates: Optional[Mapping[str, torch.Tensor]] = None,
+        expert_fc1_gates: Optional[torch.Tensor] = None,
+        expert_fc2_gates: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
     ) -> dict[str, Any]:
+        if grouped_gates is not None and (
+            expert_fc1_gates is not None or expert_fc2_gates is not None
+        ):
+            raise ValueError("grouped_gates conflict with legacy expert gate arguments")
+        if (expert_fc1_gates is None) != (expert_fc2_gates is None):
+            raise ValueError("legacy expert gate arguments must be provided together")
+        if expert_fc1_gates is not None:
+            grouped_gates = {
+                "moe_fc1": expert_fc1_gates,
+                "moe_fc2": expert_fc2_gates,
+            }
+        grouped_gates = dict(grouped_gates or {})
         expected_dense_sites = {
             site.site_id: site.input_width for site in self.manifest.dense_sites
         }
@@ -124,33 +146,24 @@ class DiagESManager:
             assert gate.dtype == torch.bfloat16
             assert gate.is_contiguous()
             assert tuple(gate.shape) == (width,)
-        assert expert_fc1_gates.device.type == "cpu"
-        assert expert_fc1_gates.dtype == torch.bfloat16
-        assert expert_fc1_gates.is_contiguous()
-        assert tuple(expert_fc1_gates.shape) == (
-            self.manifest.num_layers,
-            self.manifest.num_experts,
-            self.manifest.hidden_size,
-        )
-        assert expert_fc2_gates.device.type == "cpu"
-        assert expert_fc2_gates.dtype == torch.bfloat16
-        assert expert_fc2_gates.is_contiguous()
-        assert tuple(expert_fc2_gates.shape) == (
-            self.manifest.num_layers,
-            self.manifest.num_experts,
-            self.manifest.moe_intermediate_size,
-        )
+        assert set(grouped_gates) == set(self.manifest.grouped_gate_shapes)
+        for name, shape in self.manifest.grouped_gate_shapes.items():
+            gate = grouped_gates[name]
+            assert gate.device.type == "cpu"
+            assert gate.dtype == torch.bfloat16
+            assert gate.is_contiguous()
+            assert tuple(gate.shape) == tuple(shape)
 
         # The optional caller value is audit metadata only.  The server owns
         # the cache identity and always derives it from the BF16 payload that
         # passed the exact target-shape contract above.
         _ = effective_model_digest
         actual_digest = compute_effective_model_digest(
-            base_model_revision=self.base_model_revision,
+            model_artifact_id=self.model_artifact_id,
+            schema_id=self.manifest.schema_id,
             schema_digest=self.manifest.schema_digest,
             dense_gates=dense_gates,
-            expert_fc1_gates=expert_fc1_gates,
-            expert_fc2_gates=expert_fc2_gates,
+            grouped_gates=grouped_gates,
         )
         with self._lock:
             self._reclaim_retired_locked()
@@ -171,12 +184,10 @@ class DiagESManager:
                 self._dense_gate_banks[site.site_id][slot].copy_(
                     dense_gates[site.site_id], non_blocking=True
                 )
-            self._expert_fc1_gate_bank[:, :, slot, :].copy_(
-                expert_fc1_gates, non_blocking=True
-            )
-            self._expert_fc2_gate_bank[:, :, slot, :].copy_(
-                expert_fc2_gates, non_blocking=True
-            )
+            for name, gate in grouped_gates.items():
+                self._grouped_gate_banks[name][..., slot, :].copy_(
+                    gate, non_blocking=True
+                )
         stream.synchronize()
 
         record = CandidateRecord(
@@ -236,29 +247,37 @@ class DiagESManager:
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._reclaim_retired_locked()
-            return {
+            status = {
+                "schema_id": self.manifest.schema_id,
                 "schema_digest": self.manifest.schema_digest,
-                "base_model_revision": self.base_model_revision,
+                "model_artifact_id": self.model_artifact_id,
                 "physical_slots": self.physical_slots,
                 "free_slots": list(self._free_slots),
                 "dense_sites": {
                     site.site_id: site.input_width for site in self.manifest.dense_sites
                 },
-                "expert_fc1_shape": [
-                    self.manifest.num_layers,
-                    self.manifest.num_experts,
-                    self.manifest.hidden_size,
-                ],
-                "expert_fc2_shape": [
-                    self.manifest.num_layers,
-                    self.manifest.num_experts,
-                    self.manifest.moe_intermediate_size,
-                ],
+                "grouped_gate_shapes": {
+                    name: list(shape)
+                    for name, shape in self.manifest.grouped_gate_shapes.items()
+                },
                 "candidates": {
                     candidate_id: self._record_status(record)
                     for candidate_id, record in self._records.items()
                 },
             }
+            if self.manifest.schema_id == QWEN3_30B_A3B_SCHEMA_ID:
+                status.update(
+                    {
+                        "base_model_revision": self.model_artifact_id,
+                        "expert_fc1_shape": list(
+                            self.manifest.grouped_gate_shapes["moe_fc1"]
+                        ),
+                        "expert_fc2_shape": list(
+                            self.manifest.grouped_gate_shapes["moe_fc2"]
+                        ),
+                    }
+                )
+            return status
 
     def _reclaim_retired_locked(self) -> None:
         reclaimed = []
@@ -317,6 +336,30 @@ def register_qwen3_30b_a3b(
     return _manager
 
 
+def register_diag_es_model(
+    model: torch.nn.Module,
+    *,
+    schema_id: str,
+    resident_candidate_slots: int,
+    model_artifact_id: str,
+    tp_size: int,
+) -> DiagESManager:
+    global _manager
+    if schema_id == QWEN3_30B_A3B_SCHEMA_ID:
+        manifest = register_qwen3_30b_a3b_dense_sites(model)
+    elif schema_id == QWEN2_5_1_5B_SCHEMA_ID:
+        manifest = register_qwen2_5_1_5b_dense_sites(model, tp_size=tp_size)
+    else:
+        raise ValueError(f"unknown diagonal-ES schema ID: {schema_id!r}")
+    _manager = DiagESManager(
+        manifest=manifest,
+        resident_candidate_slots=resident_candidate_slots,
+        model_artifact_id=model_artifact_id,
+        device=next(model.parameters()).device,
+    )
+    return _manager
+
+
 def has_diag_es_manager() -> bool:
     return _manager is not None
 
@@ -328,6 +371,10 @@ def get_diag_es_manager() -> DiagESManager:
 
 def get_expert_gate_bank(layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
     return get_diag_es_manager().get_expert_gate_bank(layer_id, kind)
+
+
+def get_grouped_gate_bank(name: str) -> torch.Tensor:
+    return get_diag_es_manager().get_grouped_gate_bank(name)
 
 
 def release_req_candidate(req: Any) -> None:

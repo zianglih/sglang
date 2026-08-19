@@ -1113,14 +1113,16 @@ class ModelRunner:
         self.maybe_precompile_model_kernels_after_loading()
 
         if self.server_args.enable_diag_es:
-            from sglang.srt.diag_es import register_qwen3_30b_a3b
+            from sglang.srt.diag_es import register_diag_es_model
 
-            self.diag_es_manager = register_qwen3_30b_a3b(
+            self.diag_es_manager = register_diag_es_model(
                 self.model,
+                schema_id=self.server_args.diag_es_schema_id,
                 resident_candidate_slots=(
                     self.server_args.diag_es_resident_candidate_slots
                 ),
-                base_model_revision=self.server_args.model_path,
+                model_artifact_id=self.server_args.diag_es_model_artifact_id,
+                tp_size=self.server_args.tp_size,
             )
 
         # Register model for layerwise NVTX profiling if enabled

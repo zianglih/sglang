@@ -6,6 +6,7 @@ import torch
 
 from sglang.srt.diag_es.manager import DiagESManager, compose_diag_es_extra_key
 from sglang.srt.diag_es.manifest import (
+    DiagESManifest,
     DenseSite,
     Qwen3DiagESManifest,
     compute_effective_model_digest,
@@ -148,7 +149,7 @@ def test_effective_digest_is_the_radix_cache_identity():
     assert different_model_match.device_indices.numel() == 0
 
 
-@pytest.mark.parametrize("width", [2048, 4096])
+@pytest.mark.parametrize("width", [1536, 2048, 4096, 8960])
 def test_triton_dense_gate_mixed_slots_and_identity(width):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -176,6 +177,97 @@ def test_triton_dense_gate_mixed_slots_and_identity(width):
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
     identity_rows = slots == 0
     assert torch.equal(out[identity_rows], x[identity_rows])
+
+
+@pytest.mark.parametrize("width", [1536, 8960])
+def test_unquantized_linear_apply_and_apply_into_use_dense_gate_hook(
+    monkeypatch, width
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang.srt.diag_es import manager as manager_module
+    from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
+    from sglang.srt.model_executor.forward_context import (
+        ForwardContext,
+        forward_context,
+    )
+
+    torch.manual_seed(20260812 + width)
+    site_id = "model.layers.0.test_proj.input"
+    manifest = DiagESManifest(
+        schema_id="test-dense-diag-es-v1",
+        dense_sites=(DenseSite(site_id, width),),
+        grouped_gate_shapes={},
+        schema_digest="ab" * 32,
+    )
+    manager = DiagESManager(
+        manifest=manifest,
+        resident_candidate_slots=2,
+        model_artifact_id="test-artifact",
+        device=torch.device("cuda"),
+    )
+    gates = {
+        "candidate-a": (0.5 + torch.rand(width, dtype=torch.float32)).to(
+            torch.bfloat16
+        ),
+        "candidate-b": (0.5 + torch.rand(width, dtype=torch.float32)).to(
+            torch.bfloat16
+        ),
+    }
+    slots = [0]
+    for candidate_id, gate in gates.items():
+        registered = manager.register_candidate(
+            candidate_id=candidate_id,
+            dense_gates={site_id: gate},
+            grouped_gates={},
+        )
+        slots.append(registered["resident_slot"])
+    monkeypatch.setattr(manager_module, "_manager", manager)
+
+    rows = 9
+    output_width = 64
+    x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(
+        (output_width, width), dtype=torch.bfloat16, device="cuda"
+    )
+    layer = SimpleNamespace(
+        weight=weight,
+        es_site_id=site_id,
+        es_site_width=width,
+    )
+    candidate_slots = torch.tensor(
+        [
+            slots[0],
+            slots[1],
+            slots[2],
+            slots[0],
+            slots[2],
+            slots[1],
+            slots[1],
+            slots[0],
+            slots[2],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    gate_bank = manager.get_dense_gate_bank(site_id)
+    gated_oracle = (
+        x.float() * gate_bank[candidate_slots.long()].float()
+    ).to(torch.bfloat16)
+    expected = torch.nn.functional.linear(gated_oracle, weight)
+
+    method = UnquantizedLinearMethod()
+    output = torch.empty((rows, output_width), dtype=torch.bfloat16, device="cuda")
+    with forward_context(
+        ForwardContext(attn_backend=None, es_candidate_slots=candidate_slots)
+    ):
+        applied = method.apply(layer, x)
+        applied_into = method.apply_into(layer, x, output)
+
+    assert applied_into.data_ptr() == output.data_ptr()
+    torch.testing.assert_close(applied, expected, rtol=0, atol=0)
+    torch.testing.assert_close(applied_into, expected, rtol=0, atol=0)
 
 
 def test_resident_manager_retire_is_nonblocking_and_backpressures():
