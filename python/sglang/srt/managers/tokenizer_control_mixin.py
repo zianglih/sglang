@@ -188,7 +188,13 @@ class TokenizerControlMixin:
         self: TokenizerManager, obj: DiagESRegistryReqInput
     ) -> DiagESRegistryReqOutput:
         self.auto_create_handle_loop()
-        return (await self.diag_es_registry_communicator(obj))[0]
+        results = await self.diag_es_registry_communicator(obj)
+        if len(results) != 1:
+            raise RuntimeError(
+                "diagonal ES requires exactly one DP worker result, got "
+                f"{len(results)}"
+            )
+        return results[0]
 
     async def add_external_corpus(
         self: TokenizerManager, obj: AddExternalCorpusReqInput

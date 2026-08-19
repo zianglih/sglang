@@ -721,24 +721,9 @@ class LogitsProcessor(nn.Module):
                     hidden_states.bfloat16(), lm_head.weight.T.bfloat16()
                 )
             else:
-                from sglang.srt.layers.quantization.unquant import (
-                    get_bf16_gemm_backend,
+                logits = torch.matmul(
+                    hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
                 )
-
-                if get_bf16_gemm_backend().is_triton():
-                    from sglang.kernels.ops.gemm.triton_bf16_gemm import (
-                        triton_bf16_linear,
-                    )
-
-                    logits = triton_bf16_linear(
-                        hidden_states.to(lm_head.weight.dtype),
-                        lm_head.weight,
-                        embedding_bias,
-                    )
-                else:
-                    logits = torch.matmul(
-                        hidden_states.to(lm_head.weight.dtype), lm_head.weight.T
-                    )
         else:
             # GGUF models
             # TODO: use weight_packed_linear for GGUF models

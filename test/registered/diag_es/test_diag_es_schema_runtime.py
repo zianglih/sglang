@@ -3,295 +3,325 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.srt.diag_es.manager import DiagESManager
+from sglang.srt.diag_es.manager import (
+    DiagESCandidateNotFoundError,
+    DiagESCandidateRetiringError,
+    DiagESInvalidCandidateError,
+    DiagESManager,
+)
 from sglang.srt.diag_es.manifest import (
-    QWEN2_5_1_5B_SCHEMA_ID,
+    QWEN3_30B_A3B_SCHEMA_ID,
     DenseSite,
     DiagESManifest,
-    Qwen3DiagESManifest,
     compute_effective_model_digest,
-    register_qwen2_5_1_5b_dense_sites,
+    register_qwen3_30b_a3b_manifest,
 )
-from sglang.srt.diag_es.protocol import prepare_register_payload
+from sglang.srt.diag_es.protocol import (
+    parse_register_payload,
+    prepare_register_payload,
+    validate_registry_request,
+)
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class _Linear:
-    def __init__(self, input_size: int, weight_dtype=torch.bfloat16):
+    def __init__(self, input_size: int, output_size: int, *, dtype=torch.bfloat16):
         self.input_size = input_size
-        self.weight = SimpleNamespace(dtype=weight_dtype)
-        self.es_site_id = None
-        self.es_site_width = None
+        self.output_size = output_size
+        self.weight = torch.empty((output_size, input_size), dtype=dtype, device="meta")
+        self.es_pre_site_id = None
+        self.es_post_site_id = None
 
 
-class Qwen2ForCausalLM:
-    def __init__(
-        self,
-        *,
-        num_layers=28,
-        hidden_size=1536,
-        intermediate_size=8960,
-        head_dim=None,
-        quant_config=None,
-        weight_dtype=torch.bfloat16,
-    ):
-        self.quant_config = quant_config
+class _Experts:
+    def __init__(self, layer_id: int, *, dtype=torch.bfloat16):
+        self.num_experts = 128
+        self.num_local_experts = 128
+        self.hidden_size = 2048
+        self.intermediate_size_per_partition = 768
+        self.w13_weight = torch.empty((128, 1536, 2048), dtype=dtype, device="meta")
+        self.w2_weight = torch.empty((128, 2048, 768), dtype=dtype, device="meta")
+        self.moe_runner_config = SimpleNamespace(
+            num_experts=128,
+            num_local_experts=128,
+            hidden_size=2048,
+            intermediate_size_per_partition=768,
+            layer_id=layer_id,
+            top_k=8,
+            num_fused_shared_experts=0,
+            params_dtype=dtype,
+        )
+
+
+class Qwen3MoeForCausalLM:
+    def __init__(self, *, num_layers=48, hidden_size=2048, dtype=torch.bfloat16):
+        self.quant_config = None
         self.config = SimpleNamespace(
-            architectures=["Qwen2ForCausalLM"],
             num_hidden_layers=num_layers,
             hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            num_attention_heads=12,
-            num_key_value_heads=2,
+            num_attention_heads=32,
+            num_key_value_heads=4,
+            head_dim=128,
+            num_experts=128,
+            moe_intermediate_size=768,
+            num_experts_per_tok=8,
         )
-        if head_dim is not None:
-            self.config.head_dim = head_dim
         self.model = SimpleNamespace(
             layers=[
                 SimpleNamespace(
                     self_attn=SimpleNamespace(
-                        qkv_proj=_Linear(hidden_size, weight_dtype),
-                        o_proj=_Linear(hidden_size, weight_dtype),
+                        qkv_proj=_Linear(2048, 5120, dtype=dtype),
+                        o_proj=_Linear(4096, 2048, dtype=dtype),
                     ),
                     mlp=SimpleNamespace(
-                        gate_up_proj=_Linear(hidden_size, weight_dtype),
-                        down_proj=_Linear(intermediate_size, weight_dtype),
+                        gate=_Linear(2048, 128, dtype=dtype),
+                        experts=_Experts(layer_id, dtype=dtype),
                     ),
                 )
-                for _ in range(num_layers)
+                for layer_id in range(num_layers)
             ]
         )
 
 
-def test_qwen2_manifest_registers_exact_dense_physical_sites():
-    model = Qwen2ForCausalLM()
-    manifest = register_qwen2_5_1_5b_dense_sites(model, tp_size=1)
+@pytest.mark.parametrize(
+    ("placement", "first_sites", "grouped_shapes", "schema_digest"),
+    [
+        (
+            "pre",
+            [("qkv_proj.input", 2048), ("o_proj.input", 4096)],
+            {
+                "moe_fc1_pre": (48, 128, 2048),
+                "moe_fc2_pre": (48, 128, 768),
+            },
+            "3650c468725df70692ae0470aa3769eb97ec91f9a04fe4de1f419c36a017b956",
+        ),
+        (
+            "post",
+            [("qkv_proj.output", 5120), ("o_proj.output", 2048)],
+            {
+                "moe_fc1_post": (48, 128, 1536),
+                "moe_fc2_post": (48, 128, 2048),
+            },
+            "7502d6adee8003103476e4faf4bf9f3bef2ed19bf4a1a8bfd8e5e011da5b3342",
+        ),
+        (
+            "both",
+            [
+                ("qkv_proj.input", 2048),
+                ("qkv_proj.output", 5120),
+                ("o_proj.input", 4096),
+                ("o_proj.output", 2048),
+            ],
+            {
+                "moe_fc1_pre": (48, 128, 2048),
+                "moe_fc2_pre": (48, 128, 768),
+                "moe_fc1_post": (48, 128, 1536),
+                "moe_fc2_post": (48, 128, 2048),
+            },
+            "d63a0480f277675fce4af8646bed81cad5c004002b44e8150a22b8121e6d7e60",
+        ),
+    ],
+)
+def test_qwen3_v2_manifest_exact_contract(
+    placement, first_sites, grouped_shapes, schema_digest
+):
+    model = Qwen3MoeForCausalLM()
+    manifest = register_qwen3_30b_a3b_manifest(model, placement=placement)
 
-    assert manifest.schema_id == QWEN2_5_1_5B_SCHEMA_ID
-    assert manifest.schema_digest == (
-        "28c1333e3b33f3d18308a36d331a19e0fbc0257ad72e8fd716807114f40555da"
-    )
-    assert len(manifest.dense_sites) == 112
-    assert manifest.grouped_gate_shapes == {}
-    assert [(site.site_id, site.input_width) for site in manifest.dense_sites[:4]] == [
-        ("model.layers.0.self_attn.qkv_proj.input", 1536),
-        ("model.layers.0.self_attn.o_proj.input", 1536),
-        ("model.layers.0.mlp.gate_up_proj.input", 1536),
-        ("model.layers.0.mlp.down_proj.input", 8960),
-    ]
-    layer = model.model.layers[0]
-    assert layer.self_attn.qkv_proj.es_site_width == 1536
-    assert layer.mlp.down_proj.es_site_width == 8960
+    assert manifest.schema_id == QWEN3_30B_A3B_SCHEMA_ID
+    assert manifest.placement == placement
+    assert manifest.schema_digest == schema_digest
+    assert manifest.grouped_delta_shapes == grouped_shapes
+    assert [
+        (site.site_id.removeprefix("model.layers.0.self_attn."), site.width)
+        for site in manifest.dense_sites[: len(first_sites)]
+    ] == first_sites
+    assert model.model.layers[0].mlp.gate.es_pre_site_id is None
+    assert model.model.layers[0].mlp.gate.es_post_site_id is None
+    assert not hasattr(model.model.layers[0].self_attn.qkv_proj, "es_pre_site_width")
 
 
 @pytest.mark.parametrize(
-    ("model", "tp_size", "match"),
+    ("model", "match"),
     [
-        (Qwen2ForCausalLM(num_layers=27), 1, "num_hidden_layers"),
-        (Qwen2ForCausalLM(hidden_size=1024), 1, "hidden_size"),
-        (Qwen2ForCausalLM(intermediate_size=8192), 1, "intermediate_size"),
-        (Qwen2ForCausalLM(head_dim=64), 1, "head_dim"),
-        (Qwen2ForCausalLM(quant_config=object()), 1, "unquantized"),
-        (Qwen2ForCausalLM(weight_dtype=torch.float16), 1, "bfloat16"),
-        (Qwen2ForCausalLM(), 2, "tp_size"),
-        (SimpleNamespace(config=Qwen2ForCausalLM().config), 1, "Qwen2ForCausalLM"),
+        (Qwen3MoeForCausalLM(num_layers=47), "num_hidden_layers"),
+        (Qwen3MoeForCausalLM(hidden_size=1024), "hidden_size"),
+        (Qwen3MoeForCausalLM(dtype=torch.float16), "bfloat16"),
+        (SimpleNamespace(), "Qwen3MoeForCausalLM"),
     ],
 )
-def test_qwen2_manifest_rejects_wrong_architecture_shape_or_tp(model, tp_size, match):
+def test_qwen3_v2_manifest_rejects_unsupported_models(model, match):
     with pytest.raises((TypeError, ValueError), match=match):
-        register_qwen2_5_1_5b_dense_sites(model, tp_size=tp_size)
+        register_qwen3_30b_a3b_manifest(model, placement="pre")
 
 
-def test_generic_digest_hashes_empty_grouped_qwen2_fp32_delta_payload():
-    dense = {"site": torch.zeros(3, dtype=torch.float32)}
-    digest = compute_effective_model_digest(
-        model_artifact_id="qwen2-local",
-        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
-        schema_digest="ab" * 32,
-        dense_deltas=dense,
-        grouped_deltas={},
-    )
-    assert len(digest) == 64
-    assert digest == compute_effective_model_digest(
-        model_artifact_id="qwen2-local",
-        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
-        schema_digest="ab" * 32,
-        dense_deltas=dense,
-        grouped_deltas={},
-    )
+def test_qwen3_v2_manifest_rejects_noncontiguous_expert_weights():
+    model = Qwen3MoeForCausalLM()
+    model.model.layers[0].mlp.experts.w13_weight = torch.empty(
+        (128, 2048, 1536), dtype=torch.bfloat16, device="meta"
+    ).transpose(-1, -2)
+    with pytest.raises(ValueError, match="w13_weight must be contiguous"):
+        register_qwen3_30b_a3b_manifest(model, placement="pre")
 
 
-def test_digest_rejects_conflicting_legacy_and_generic_artifact_identity():
-    with pytest.raises(ValueError, match="conflict"):
-        compute_effective_model_digest(
-            base_model_revision="legacy-artifact",
-            model_artifact_id="different-artifact",
-            schema_digest="schema",
-            dense_deltas={},
-            grouped_deltas={},
-        )
+def test_qwen3_v2_manifest_rejects_noncontiguous_dense_weights():
+    model = Qwen3MoeForCausalLM()
+    model.model.layers[0].self_attn.qkv_proj.weight = torch.empty(
+        (2048, 5120), dtype=torch.bfloat16, device="meta"
+    ).transpose(-1, -2)
+    with pytest.raises(ValueError, match="qkv_proj.weight must be contiguous"):
+        register_qwen3_30b_a3b_manifest(model, placement="pre")
 
 
-def test_dense_manager_status_uses_generic_identity_and_no_expert_fields():
-    manifest = DiagESManifest(
-        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
+def _manifest() -> DiagESManifest:
+    return DiagESManifest(
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        placement="pre",
         dense_sites=(DenseSite("dense", 3),),
-        grouped_gate_shapes={},
+        grouped_delta_shapes={"moe_fc1_pre": (2, 3)},
         schema_digest="ab" * 32,
     )
-    manager = DiagESManager(
-        manifest=manifest,
+
+
+def _payload():
+    return (
+        {"dense": torch.arange(3, dtype=torch.float32)},
+        {"moe_fc1_pre": torch.arange(6, dtype=torch.float32).reshape(2, 3)},
+    )
+
+
+def _cpu_manager() -> DiagESManager:
+    return DiagESManager(
+        manifest=_manifest(),
         resident_candidate_slots=2,
-        model_artifact_id="qwen2-local",
-        device=torch.device("cpu"),
-    )
-
-    status = manager.status()
-    assert status["schema_id"] == QWEN2_5_1_5B_SCHEMA_ID
-    assert status["model_artifact_id"] == "qwen2-local"
-    assert status["dense_sites"] == {"dense": 3}
-    assert status["grouped_gate_shapes"] == {}
-    assert "base_model_revision" not in status
-    assert "expert_fc1_shape" not in status
-    assert "expert_fc2_shape" not in status
-
-
-def test_manager_rejects_blank_artifact_identity():
-    manifest = DiagESManifest(
-        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
-        dense_sites=(),
-        grouped_gate_shapes={},
-        schema_digest="ab" * 32,
-    )
-    with pytest.raises(ValueError, match="model_artifact_id"):
-        DiagESManager(
-            manifest=manifest,
-            resident_candidate_slots=1,
-            model_artifact_id="  ",
-            device=torch.device("cpu"),
-        )
-
-
-def test_dense_manager_accepts_empty_grouped_payload(monkeypatch):
-    manifest = DiagESManifest(
-        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
-        dense_sites=(DenseSite("dense", 3),),
-        grouped_gate_shapes={},
-        schema_digest="ab" * 32,
-    )
-    manager = DiagESManager(
-        manifest=manifest,
-        resident_candidate_slots=1,
-        model_artifact_id="qwen2-local",
-        device=torch.device("cpu"),
-    )
-
-    class _Stream:
-        def synchronize(self):
-            pass
-
-    class _StreamContext:
-        def __enter__(self):
-            pass
-
-        def __exit__(self, *_args):
-            pass
-
-    monkeypatch.setattr(torch.cuda, "Stream", lambda **_kwargs: _Stream())
-    monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamContext())
-    registered = manager.register_candidate(
-        candidate_id="candidate",
-        dense_deltas={"dense": torch.zeros(3, dtype=torch.float32)},
-        grouped_deltas={},
-    )
-    assert registered["state"] == "READY"
-
-
-@pytest.mark.parametrize("tp_rank", [0, 1])
-def test_qwen3_manager_shards_only_tp_local_input_dimensions(tp_rank):
-    qkv_site = "model.layers.0.self_attn.qkv_proj.input"
-    out_site = "model.layers.0.self_attn.o_proj.input"
-    manifest = Qwen3DiagESManifest(
-        dense_sites=(DenseSite(qkv_site, 8), DenseSite(out_site, 8)),
-        num_layers=1,
-        num_experts=2,
-        hidden_size=8,
-        moe_intermediate_size=6,
-        schema_digest="cd" * 32,
-    )
-    manager = DiagESManager(
-        manifest=manifest,
-        resident_candidate_slots=1,
-        base_model_revision="test-model",
-        device=torch.device("cpu"),
-        tp_rank=tp_rank,
-        tp_size=2,
-    )
-
-    qkv = torch.arange(8, dtype=torch.float32)
-    out = torch.arange(8, dtype=torch.float32)
-    fc1 = torch.arange(16, dtype=torch.float32).reshape(1, 2, 8)
-    fc2 = torch.arange(12, dtype=torch.float32).reshape(1, 2, 6)
-    dense_start = tp_rank * 4
-    fc2_start = tp_rank * 3
-
-    assert manager.get_dense_delta_bank(qkv_site).shape == (2, 8)
-    assert manager.get_dense_delta_bank(out_site).shape == (2, 4)
-    assert manager.get_grouped_delta_bank("moe_fc1_pre").shape == (1, 2, 2, 8)
-    assert manager.get_grouped_delta_bank("moe_fc2_pre").shape == (1, 2, 2, 3)
-    assert torch.equal(manager._local_dense_delta(qkv_site, qkv), qkv)
-    assert torch.equal(
-        manager._local_dense_delta(out_site, out),
-        out[dense_start : dense_start + 4],
-    )
-    assert torch.equal(manager._local_grouped_delta("moe_fc1_pre", fc1), fc1)
-    assert torch.equal(
-        manager._local_grouped_delta("moe_fc2_pre", fc2),
-        fc2[..., fc2_start : fc2_start + 3],
-    )
-
-
-def test_qwen3_manager_status_reports_v2_placement_and_shapes():
-    manifest = Qwen3DiagESManifest(
-        dense_sites=(DenseSite("dense", 3),),
-        num_layers=1,
-        num_experts=2,
-        hidden_size=3,
-        moe_intermediate_size=4,
-        schema_digest="cd" * 32,
-    )
-    manager = DiagESManager(
-        manifest=manifest,
-        resident_candidate_slots=1,
         model_artifact_id="qwen3-artifact",
         device=torch.device("cpu"),
     )
 
-    status = manager.status()
-    assert status["placement"] == "pre"
-    assert status["model_artifact_id"] == "qwen3-artifact"
-    assert status["grouped_gate_shapes"] == {
-        "moe_fc1_pre": [1, 2, 3],
-        "moe_fc2_pre": [1, 2, 4],
-    }
+
+def test_manager_status_preserves_external_grouped_gate_shapes_key():
+    status = _cpu_manager().status()
+    assert status["grouped_gate_shapes"] == {"moe_fc1_pre": [2, 3]}
+    assert "grouped_delta_shapes" not in status
 
 
-def test_register_protocol_serializes_generic_grouped_names():
-    delta = torch.zeros(2, dtype=torch.float32)
-    named, digest = prepare_register_payload(
-        {"site": delta},
-        grouped_deltas={"custom": delta},
-        effective_model_digest="digest",
+def test_manager_registration_is_transactional_and_rejects_digest_mismatch(
+    monkeypatch,
+):
+    manager = _cpu_manager()
+    dense, grouped = _payload()
+    attempts = 0
+
+    def fail_once(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("upload failed")
+
+    monkeypatch.setattr(manager, "_upload_candidate", fail_once)
+    with pytest.raises(RuntimeError, match="upload failed"):
+        manager.register_candidate(
+            candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
+        )
+    assert manager.status()["free_slots"] == [1, 2]
+    assert manager.status()["candidates"] == {}
+
+    with pytest.raises(ValueError, match="does not match"):
+        manager.register_candidate(
+            candidate_id="candidate",
+            dense_deltas=dense,
+            grouped_deltas=grouped,
+            effective_model_digest="00" * 32,
+        )
+    registered = manager.register_candidate(
+        candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
     )
-    assert dict(named) == {
-        "dense_delta:site": delta,
-        "grouped_delta:custom": delta,
-    }
-    assert digest == "digest"
+    assert registered["state"] == "READY"
+    assert registered["resident_slot"] == 1
 
 
-def test_register_protocol_rejects_non_string_audit_digest():
-    with pytest.raises(ValueError, match="string"):
-        prepare_register_payload({}, {}, effective_model_digest=object())
+def test_manager_rejects_uppercase_supplied_digest(monkeypatch):
+    manager = _cpu_manager()
+    monkeypatch.setattr(manager, "_upload_candidate", lambda **_kwargs: None)
+    dense, grouped = _payload()
+    with pytest.raises(ValueError, match="lowercase"):
+        manager.register_candidate(
+            candidate_id="candidate",
+            dense_deltas=dense,
+            grouped_deltas=grouped,
+            effective_model_digest="AB" * 32,
+        )
+
+
+def test_manager_candidate_errors_are_request_local_and_typed(monkeypatch):
+    manager = _cpu_manager()
+    monkeypatch.setattr(manager, "_upload_candidate", lambda **_kwargs: None)
+    with pytest.raises(DiagESCandidateNotFoundError):
+        manager.acquire("missing")
+
+    dense, grouped = _payload()
+    manager.register_candidate(
+        candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
+    )
+    manager.acquire("candidate")
+    assert manager.retire_candidate("candidate")["state"] == "RETIRING"
+    with pytest.raises(DiagESCandidateRetiringError):
+        manager.acquire("candidate")
+    manager.release("candidate")
+    assert manager.status()["candidates"] == {}
+
+
+def test_effective_digest_requires_exact_cpu_fp32_payload():
+    dense, grouped = _payload()
+    digest = compute_effective_model_digest(
+        model_artifact_id="qwen3-artifact",
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        schema_digest="ab" * 32,
+        dense_deltas=dense,
+        grouped_deltas=grouped,
+    )
+    assert len(digest) == 64
+    with pytest.raises(ValueError, match="float32"):
+        compute_effective_model_digest(
+            model_artifact_id="qwen3-artifact",
+            schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+            schema_digest="ab" * 32,
+            dense_deltas={"dense": dense["dense"].bfloat16()},
+            grouped_deltas=grouped,
+        )
+
+
+def test_register_protocol_round_trip_and_duplicate_rejection():
+    dense, grouped = _payload()
+    encoded = prepare_register_payload(dense, grouped)
+    decoded_dense, decoded_grouped = parse_register_payload(encoded)
+    assert decoded_dense.keys() == dense.keys()
+    assert decoded_grouped.keys() == grouped.keys()
+    assert torch.equal(decoded_dense["dense"], dense["dense"])
+    assert torch.equal(decoded_grouped["moe_fc1_pre"], grouped["moe_fc1_pre"])
+    with pytest.raises(ValueError, match="duplicate"):
+        parse_register_payload([encoded[0], encoded[0]])
+    with pytest.raises(ValueError, match="unknown"):
+        parse_register_payload([("legacy:dense", dense["dense"])])
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "register", "candidate_id": None, "serialized_deltas": [b"x"]},
+        {"action": "register", "candidate_id": "c", "serialized_deltas": None},
+        {"action": "retire", "candidate_id": "c", "serialized_deltas": [b"x"]},
+        {"action": "status", "candidate_id": "c", "serialized_deltas": None},
+        {"action": "legacy", "candidate_id": None, "serialized_deltas": None},
+    ],
+)
+def test_registry_protocol_rejects_invalid_action_field_combinations(kwargs):
+    expected_error = (
+        DiagESInvalidCandidateError
+        if kwargs["action"] in ("register", "retire") and kwargs["candidate_id"] is None
+        else ValueError
+    )
+    with pytest.raises(expected_error):
+        validate_registry_request(effective_model_digest=None, **kwargs)

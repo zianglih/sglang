@@ -663,7 +663,6 @@ class TboForwardBatchPreparer:
             "input_ids",
             "positions",
             "out_cache_loc",
-            "es_candidate_slots",
         ]:
             old_value = getattr(batch, key)
             assert (
@@ -689,7 +688,6 @@ class TboForwardBatchPreparer:
             "extend_logprob_start_lens_cpu",
             "lora_ids",
             "rids",
-            "es_candidate_slots_cpu",
         ]:
             old_value = getattr(batch, key)
             if old_value is None:

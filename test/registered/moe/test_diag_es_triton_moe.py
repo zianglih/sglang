@@ -1,12 +1,14 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
 from sglang.srt.diag_es.moe_ops import (
+    MoeDeltaBanks,
     apply_moe_fc2_pre_delta_inplace,
+    get_moe_delta_banks,
     materialize_moe_fc1_pre_input,
 )
 from sglang.srt.distributed.parallel_state import (
@@ -15,10 +17,8 @@ from sglang.srt.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from sglang.srt.environ import envs
 from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
     fused_experts_impl,
-    get_diag_es_moe_inputs,
 )
 from sglang.srt.server_args import ServerArgs, set_global_server_args_for_scheduler
 from sglang.test.ci.ci_register import register_cuda_ci
@@ -54,10 +54,8 @@ class TestDiagEsTritonMoe(CustomTestCase):
     def setUp(self):
         set_global_server_args_for_scheduler(ServerArgs(model_path="dummy"))
 
-    def test_get_inputs_respects_active_placement(self):
-        layer_id = 7
+    def test_get_inputs_attaches_live_slots_to_fixed_banks(self):
         token_slots = object()
-        runner_config = SimpleNamespace(es_layer_id=layer_id)
         placements = {
             "pre": ("moe_fc1_pre", "moe_fc2_pre"),
             "post": ("moe_fc1_post", "moe_fc2_post"),
@@ -72,44 +70,28 @@ class TestDiagEsTritonMoe(CustomTestCase):
         for placement, active_names in placements.items():
             with self.subTest(placement=placement):
                 banks = {name: object() for name in active_names}
-                manager = SimpleNamespace(
-                    manifest=SimpleNamespace(
-                        grouped_gate_shapes={name: () for name in active_names}
-                    ),
-                    get_expert_delta_bank=Mock(
-                        side_effect=lambda requested_layer, name: banks[name]
-                    ),
+                fixed_banks = MoeDeltaBanks(
+                    fc1_pre=banks.get("moe_fc1_pre"),
+                    fc1_post=banks.get("moe_fc1_post"),
+                    fc2_pre=banks.get("moe_fc2_pre"),
+                    fc2_post=banks.get("moe_fc2_post"),
                 )
-                with (
-                    patch(
-                        "sglang.srt.diag_es.get_diag_es_manager",
-                        return_value=manager,
-                    ),
-                    patch(
-                        "sglang.srt.model_executor.forward_context.get_forward_context",
-                        return_value=SimpleNamespace(es_candidate_slots=token_slots),
-                    ),
+                runner_config = SimpleNamespace(diag_es_delta_banks=fixed_banks)
+                with patch(
+                    "sglang.srt.model_executor.forward_context.get_forward_context",
+                    return_value=SimpleNamespace(es_candidate_slots=token_slots),
                 ):
-                    actual = get_diag_es_moe_inputs(runner_config)
+                    actual = get_moe_delta_banks(runner_config)
 
-                self.assertIs(actual[0], token_slots)
-                for index, name in enumerate(
-                    (
-                        "moe_fc1_pre",
-                        "moe_fc1_post",
-                        "moe_fc2_pre",
-                        "moe_fc2_post",
-                    ),
-                    start=1,
+                self.assertIs(actual.token_slots, token_slots)
+                for field, name in (
+                    ("fc1_pre", "moe_fc1_pre"),
+                    ("fc1_post", "moe_fc1_post"),
+                    ("fc2_pre", "moe_fc2_pre"),
+                    ("fc2_post", "moe_fc2_post"),
                 ):
-                    self.assertIs(actual[index], banks.get(name))
-                self.assertEqual(
-                    [
-                        item.args
-                        for item in manager.get_expert_delta_bank.call_args_list
-                    ],
-                    [(layer_id, name) for name in active_names],
-                )
+                    expected = banks.get(name)
+                    self.assertIs(getattr(actual, field), expected)
 
     @staticmethod
     def _torch_oracle(
@@ -267,26 +249,25 @@ class TestDiagEsTritonMoe(CustomTestCase):
         fc2_pre[:, 1:].uniform_(-0.55, 0.55)
         fc2_post[:, 1:].uniform_(-0.15, 0.15)
 
-        def run(mode, enabled):
-            with envs.SGLANG_DIAG_ES_MOE_GATE_MODE.override(mode):
-                return fused_experts_impl(
-                    hidden_states,
-                    w13,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    b1=b1,
-                    b2=b2,
-                    inplace=False,
-                    activation="silu",
-                    is_gated=True,
-                    filter_expert=False,
-                    diag_es_token_slots=token_slots,
-                    diag_es_fc1_pre=fc1_pre if "fc1_pre" in enabled else None,
-                    diag_es_fc1_post=fc1_post if "fc1_post" in enabled else None,
-                    diag_es_fc2_pre=fc2_pre if "fc2_pre" in enabled else None,
-                    diag_es_fc2_post=fc2_post if "fc2_post" in enabled else None,
-                )
+        def run(enabled):
+            return fused_experts_impl(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                b1=b1,
+                b2=b2,
+                inplace=False,
+                activation="silu",
+                is_gated=True,
+                filter_expert=False,
+                diag_es_token_slots=token_slots,
+                diag_es_fc1_pre=fc1_pre if "fc1_pre" in enabled else None,
+                diag_es_fc1_post=fc1_post if "fc1_post" in enabled else None,
+                diag_es_fc2_pre=fc2_pre if "fc2_pre" in enabled else None,
+                diag_es_fc2_post=fc2_post if "fc2_post" in enabled else None,
+            )
 
         scenarios = (
             frozenset(("fc1_pre",)),
@@ -296,8 +277,7 @@ class TestDiagEsTritonMoe(CustomTestCase):
             frozenset(("fc1_pre", "fc1_post", "fc2_pre", "fc2_post")),
         )
         for enabled in scenarios:
-            unfused = run("unfused", enabled)
-            fused = run("fused", enabled)
+            actual = run(enabled)
             expected = self._torch_oracle(
                 hidden_states,
                 w13,
@@ -313,9 +293,7 @@ class TestDiagEsTritonMoe(CustomTestCase):
                 b2,
             )
 
-            torch.testing.assert_close(unfused, expected, rtol=0.12, atol=0.03)
-            torch.testing.assert_close(fused, expected, rtol=0.12, atol=0.03)
-            torch.testing.assert_close(fused, unfused, rtol=0, atol=0)
+            torch.testing.assert_close(actual, expected, rtol=0.12, atol=0.03)
 
     def test_unfused_pointwise_route_layout(self):
         torch.manual_seed(20260812)
@@ -429,7 +407,7 @@ class TestDiagEsTritonMoe(CustomTestCase):
 
         torch.testing.assert_close(identity, baseline, rtol=0, atol=0)
 
-    def test_post_delta_cuda_graph_observes_live_slots_and_banks(self):
+    def test_both_delta_cuda_graph_observes_live_slots_and_banks(self):
         torch.manual_seed(20260821)
         num_tokens, hidden_size, intermediate_size = 5, 64, 32
         num_experts, topk, physical_slots = 3, 2, 3
@@ -456,8 +434,18 @@ class TestDiagEsTritonMoe(CustomTestCase):
             dim=-1,
         ).contiguous()
         token_slots = torch.tensor([0, 1, 2, 1, 2], device="cuda", dtype=torch.int32)
+        fc1_pre = torch.zeros(
+            (num_experts, physical_slots, hidden_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
         fc1_post = torch.zeros(
             (num_experts, physical_slots, 2 * intermediate_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        fc2_pre = torch.zeros(
+            (num_experts, physical_slots, intermediate_size),
             device="cuda",
             dtype=torch.float32,
         )
@@ -466,7 +454,9 @@ class TestDiagEsTritonMoe(CustomTestCase):
             device="cuda",
             dtype=torch.float32,
         )
+        fc1_pre[:, 1:].uniform_(-0.1, 0.1)
         fc1_post[:, 1:].uniform_(-0.1, 0.1)
+        fc2_pre[:, 1:].uniform_(-0.1, 0.1)
         fc2_post[:, 1:].uniform_(-0.1, 0.1)
 
         def run():
@@ -482,7 +472,9 @@ class TestDiagEsTritonMoe(CustomTestCase):
                 no_combine=True,
                 filter_expert=False,
                 diag_es_token_slots=token_slots,
+                diag_es_fc1_pre=fc1_pre,
                 diag_es_fc1_post=fc1_post,
+                diag_es_fc2_pre=fc2_pre,
                 diag_es_fc2_post=fc2_post,
             )
 
@@ -500,7 +492,9 @@ class TestDiagEsTritonMoe(CustomTestCase):
         token_slots.copy_(
             torch.tensor([2, 0, 1, 2, 1], device="cuda", dtype=torch.int32)
         )
+        fc1_pre[:, 1:].uniform_(-0.2, 0.2)
         fc1_post[:, 1:].uniform_(-0.2, 0.2)
+        fc2_pre[:, 1:].uniform_(-0.2, 0.2)
         fc2_post[:, 1:].uniform_(-0.2, 0.2)
         graph.replay()
         torch.cuda.synchronize()

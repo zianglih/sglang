@@ -934,7 +934,6 @@ class Req(ReqDllmMixin):
         self.extra_key = extra_key
         self.es_candidate_id = es_candidate_id
         self.es_candidate_slot = 0
-        self.es_effective_model_digest: Optional[str] = None
         # The scheduler flips this only after the resident manager acquire.
         # Requests rejected before that point must not release an unheld ref.
         self.es_candidate_released = True

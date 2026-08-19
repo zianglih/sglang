@@ -336,7 +336,6 @@ def fused_moe_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     add_mask_ptr,
-    diag_es_pre_delta_ptr,
     diag_es_post_delta_ptr,
     diag_es_token_slots_ptr,
     # Matrix dimensions
@@ -362,9 +361,6 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
-    stride_diag_es_pre_ge,
-    stride_diag_es_pre_gs,
-    stride_diag_es_pre_gk,
     stride_diag_es_post_ge,
     stride_diag_es_post_gs,
     stride_diag_es_post_gn,
@@ -393,7 +389,6 @@ def fused_moe_kernel(
     LORA_PRESERVE_BASE: tl.constexpr,
     ROUTER_TOPK: tl.constexpr,
     A_ROUTE_MAJOR: tl.constexpr,
-    APPLY_DIAG_ES_PRE: tl.constexpr,
     APPLY_DIAG_ES_POST: tl.constexpr,
 ):
     """
@@ -471,7 +466,7 @@ def fused_moe_kernel(
             )
         return
 
-    if APPLY_DIAG_ES_PRE or APPLY_DIAG_ES_POST:
+    if APPLY_DIAG_ES_POST:
         original_token = offs_token // ROUTER_TOPK
         diag_es_slot = tl.load(
             diag_es_token_slots_ptr + original_token,
@@ -564,19 +559,6 @@ def fused_moe_kernel(
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k_start),
                 other=0.0,
             )
-
-        if APPLY_DIAG_ES_PRE:
-            diag_es_k = k_start + offs_k
-            diag_es_delta = tl.load(
-                diag_es_pre_delta_ptr
-                + off_experts * stride_diag_es_pre_ge
-                + diag_es_slot[:, None] * stride_diag_es_pre_gs
-                + diag_es_k[None, :] * stride_diag_es_pre_gk,
-                mask=token_mask[:, None] & (diag_es_k[None, :] < K),
-                other=0.0,
-            )
-            a_fp32 = a.to(tl.float32)
-            a = tl.fma(a_fp32, diag_es_delta, a_fp32).to(compute_type)
 
         if b_desc is not None:
             b = (
@@ -792,13 +774,12 @@ def invoke_fused_moe_kernel(
     mask_output: bool = False,
     lora_preserve_base: bool = False,
     a_route_major: bool = False,
-    diag_es_pre_delta: Optional[torch.Tensor] = None,
     diag_es_post_delta: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
-    has_diag_es = diag_es_pre_delta is not None or diag_es_post_delta is not None
+    has_diag_es = diag_es_post_delta is not None
     assert has_diag_es == (diag_es_token_slots is not None)
     if has_diag_es:
         assert A.dtype == torch.bfloat16
@@ -808,13 +789,6 @@ def invoke_fused_moe_kernel(
         assert diag_es_token_slots.is_contiguous()
         assert diag_es_token_slots.device == A.device
         assert router_topk == topk_ids.shape[1]
-    if diag_es_pre_delta is not None:
-        assert diag_es_pre_delta.dtype == torch.float32
-        assert diag_es_pre_delta.ndim == 3
-        assert diag_es_pre_delta.is_contiguous()
-        assert diag_es_pre_delta.device == A.device
-        assert diag_es_pre_delta.shape[0] == B.shape[0]
-        assert diag_es_pre_delta.shape[2] == A.shape[1]
     if diag_es_post_delta is not None:
         assert B.dtype == torch.bfloat16
         assert compute_type == tl.bfloat16
@@ -826,6 +800,7 @@ def invoke_fused_moe_kernel(
         assert diag_es_post_delta.is_contiguous()
         assert diag_es_post_delta.device == A.device
         assert diag_es_post_delta.shape[0] == B.shape[0]
+        assert diag_es_post_delta.shape[1] > 0
         assert diag_es_post_delta.shape[2] == B.shape[1]
 
     if use_fp8_w8a8:
@@ -1004,7 +979,6 @@ def invoke_fused_moe_kernel(
             expert_ids,
             num_tokens_post_padded,
             add_output_mask,
-            diag_es_pre_delta,
             diag_es_post_delta,
             diag_es_token_slots,
             B.shape[1],
@@ -1025,9 +999,6 @@ def invoke_fused_moe_kernel(
             B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
             B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
             B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
-            diag_es_pre_delta.stride(0) if diag_es_pre_delta is not None else 0,
-            diag_es_pre_delta.stride(1) if diag_es_pre_delta is not None else 0,
-            diag_es_pre_delta.stride(2) if diag_es_pre_delta is not None else 0,
             diag_es_post_delta.stride(0) if diag_es_post_delta is not None else 0,
             diag_es_post_delta.stride(1) if diag_es_post_delta is not None else 0,
             diag_es_post_delta.stride(2) if diag_es_post_delta is not None else 0,
@@ -1050,7 +1021,6 @@ def invoke_fused_moe_kernel(
             FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
             ROUTER_TOPK=router_topk,
             A_ROUTE_MAJOR=a_route_major,
-            APPLY_DIAG_ES_PRE=diag_es_pre_delta is not None,
             APPLY_DIAG_ES_POST=diag_es_post_delta is not None,
             **config,
         )

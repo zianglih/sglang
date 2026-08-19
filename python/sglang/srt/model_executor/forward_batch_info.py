@@ -797,6 +797,32 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         if batch.seq_lens_sum is None and seq_lens_cpu is not None:
             batch.seq_lens_sum = int(seq_lens_cpu.sum())
 
+        es_candidate_slots = es_candidate_slots_cpu = None
+        if model_runner.server_args.enable_diag_es:
+            es_candidate_slots_cpu = tuple(
+                req.es_candidate_slot for req in batch.reqs
+            )
+            request_slots = torch.tensor(
+                es_candidate_slots_cpu,
+                dtype=torch.int32,
+                device=model_runner.device,
+            )
+            if batch.forward_mode.is_decode_or_idle():
+                es_candidate_slots = request_slots
+            else:
+                # Keep candidate metadata request-sized on the host. Expand it on
+                # device so long prefills do not build a token-sized Python list.
+                repeat_counts = torch.as_tensor(
+                    batch.extend_lens,
+                    dtype=torch.int64,
+                    device=model_runner.device,
+                )
+                es_candidate_slots = torch.repeat_interleave(
+                    request_slots,
+                    repeat_counts,
+                    output_size=batch.extend_num_tokens,
+                )
+
         ret = cls(
             # Required core inputs
             forward_mode=batch.forward_mode,
@@ -805,20 +831,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             req_pool_indices=batch.req_pool_indices,
             seq_lens=batch.seq_lens,
             out_cache_loc=batch.out_cache_loc,
-            es_candidate_slots=torch.tensor(
-                (
-                    [req.es_candidate_slot for req in batch.reqs]
-                    if batch.forward_mode.is_decode_or_idle()
-                    else [
-                        req.es_candidate_slot
-                        for req, extend_len in zip(batch.reqs, batch.extend_lens)
-                        for _ in range(extend_len)
-                    ]
-                ),
-                dtype=torch.int32,
-                device=model_runner.device,
-            ),
-            es_candidate_slots_cpu=tuple(req.es_candidate_slot for req in batch.reqs),
+            es_candidate_slots=es_candidate_slots,
+            es_candidate_slots_cpu=es_candidate_slots_cpu,
             seq_lens_sum=batch.seq_lens_sum,
             # Inputs aliased by reference from ScheduleBatch
             seq_lens_cpu=seq_lens_cpu,

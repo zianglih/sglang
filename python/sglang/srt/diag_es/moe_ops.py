@@ -1,8 +1,57 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Optional
+
 import torch
 import triton
 import triton.language as tl
+
+if TYPE_CHECKING:
+    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
+
+
+@dataclass(frozen=True, slots=True)
+class MoeDeltaBanks:
+    """Fixed-address MoE delta views for one layer and forward."""
+
+    token_slots: Optional[torch.Tensor] = None
+    fc1_pre: Optional[torch.Tensor] = None
+    fc1_post: Optional[torch.Tensor] = None
+    fc2_pre: Optional[torch.Tensor] = None
+    fc2_post: Optional[torch.Tensor] = None
+
+    @property
+    def has_any(self) -> bool:
+        return any(
+            bank is not None
+            for bank in (self.fc1_pre, self.fc1_post, self.fc2_pre, self.fc2_post)
+        )
+
+    @property
+    def has_pre(self) -> bool:
+        return self.fc1_pre is not None or self.fc2_pre is not None
+
+    @property
+    def has_post(self) -> bool:
+        return self.fc1_post is not None or self.fc2_post is not None
+
+
+def get_moe_delta_banks(moe_runner_config: MoeRunnerConfig) -> MoeDeltaBanks:
+    """Resolve the live token slots and resident banks for one MoE layer."""
+
+    fixed_banks = moe_runner_config.diag_es_delta_banks
+    if fixed_banks is None:
+        return MoeDeltaBanks()
+    assert fixed_banks.token_slots is None
+    if not fixed_banks.has_any:
+        return fixed_banks
+
+    from sglang.srt.model_executor.forward_context import get_forward_context
+
+    token_slots = get_forward_context().es_candidate_slots
+    assert token_slots is not None
+    return replace(fixed_banks, token_slots=token_slots)
 
 
 @triton.jit
@@ -74,8 +123,15 @@ def _launch_expert_route_pre_delta(
     assert topk_ids.dtype == token_slots.dtype == torch.int32
     assert x.device == out.device == delta_bank.device
     assert x.device == topk_ids.device == token_slots.device
+    assert x.shape[1] > 0 and topk_ids.shape[0] > 0 and topk_ids.shape[1] > 0
     assert token_slots.shape[0] == topk_ids.shape[0]
+    assert delta_bank.shape[0] > 0 and delta_bank.shape[1] > 0
     assert delta_bank.shape[2] == width
+    assert out.shape == (topk_ids.numel(), width)
+    if input_route_major:
+        assert x.shape[0] == topk_ids.numel()
+    else:
+        assert x.shape[0] == topk_ids.shape[0]
     _apply_expert_route_pre_delta_kernel[grid](
         x,
         topk_ids,
@@ -102,7 +158,7 @@ def materialize_moe_fc1_pre_input(
     token_slots: torch.Tensor,
     delta_bank: torch.Tensor,
 ) -> torch.Tensor:
-    """Expand token-major states into pre-gated route-major FC1 input."""
+    """Expand token-major states into pre-steered route-major FC1 input."""
 
     out = torch.empty(
         (topk_ids.numel(), hidden_states.shape[1]),
@@ -126,7 +182,7 @@ def apply_moe_fc2_pre_delta_inplace(
     token_slots: torch.Tensor,
     delta_bank: torch.Tensor,
 ) -> torch.Tensor:
-    """Pre-gate the dead post-activation route buffer immediately before FC2."""
+    """Steer the dead post-activation route buffer immediately before FC2."""
 
     _launch_expert_route_pre_delta(
         activations,

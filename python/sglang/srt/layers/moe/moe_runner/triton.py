@@ -117,18 +117,12 @@ class TritonRunnerCore(MoeRunnerCore):
                 "--moe-runner-backend deep_gemm (or flashinfer_trtllm/cutlass)."
             )
 
+        from sglang.srt.diag_es.moe_ops import get_moe_delta_banks
         from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
             _fused_moe_kernel_sequence,
-            get_diag_es_moe_inputs,
         )
 
-        (
-            diag_es_token_slots,
-            diag_es_fc1_pre,
-            diag_es_fc1_post,
-            diag_es_fc2_pre,
-            diag_es_fc2_post,
-        ) = get_diag_es_moe_inputs(self.config)
+        delta_banks = get_moe_delta_banks(self.config)
 
         filter_expert = (
             self.config.num_experts is None
@@ -172,11 +166,7 @@ class TritonRunnerCore(MoeRunnerCore):
             filter_expert=filter_expert,
             hooks=hooks,
             swiglu_limit=self.config.swiglu_limit,
-            diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_pre=diag_es_fc1_pre,
-            diag_es_fc1_post=diag_es_fc1_post,
-            diag_es_fc2_pre=diag_es_fc2_pre,
-            diag_es_fc2_post=diag_es_fc2_post,
+            delta_banks=delta_banks,
         )
 
         return TritonRunnerOutput(hidden_states=out)

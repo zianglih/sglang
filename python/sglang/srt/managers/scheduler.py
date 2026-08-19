@@ -2359,6 +2359,30 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        if recv_req.es_candidate_id is not None and (
+            recv_req.session_params is not None or recv_req.session_id is not None
+        ):
+            req = Req(
+                recv_req.rid,
+                recv_req.input_text,
+                (
+                    recv_req.input_ids
+                    if recv_req.input_embeds is None
+                    else array("q", [1]) * len(recv_req.input_embeds)
+                ),
+                recv_req.sampling_params,
+                vocab_size=self.model_config.vocab_size,
+                es_candidate_id=recv_req.es_candidate_id,
+                http_worker_ipc=recv_req.http_worker_ipc,
+            )
+            req.tokenizer = self.tokenizer
+            req.set_finish_with_abort(
+                "Invalid request: diagonal ES does not support sessions"
+            )
+            self.init_req_max_new_tokens(req)
+            self._add_request_to_queue(req)
+            return
+
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -2497,14 +2521,22 @@ class Scheduler(
 
         if recv_req.es_candidate_id is not None:
             from sglang.srt.diag_es import (
+                DiagESCandidateError,
                 compose_diag_es_extra_key,
                 get_diag_es_manager,
             )
 
-            candidate = get_diag_es_manager().acquire(recv_req.es_candidate_id)
+            try:
+                candidate = get_diag_es_manager().acquire(recv_req.es_candidate_id)
+            except DiagESCandidateError as exc:
+                # Candidate lookup races (unknown or already retiring) are
+                # request-local admission failures, not scheduler failures.
+                req.set_finish_with_abort(str(exc))
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
             req.es_candidate_id = candidate.candidate_id
             req.es_candidate_slot = candidate.resident_slot
-            req.es_effective_model_digest = candidate.effective_model_digest
             req.es_candidate_released = False
             req.extra_key = compose_diag_es_extra_key(
                 req.extra_key, candidate.effective_model_digest

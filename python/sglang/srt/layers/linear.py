@@ -175,12 +175,10 @@ class LinearBase(torch.nn.Module):
         self.params_dtype = params_dtype
         self.quant_config = quant_config
         # Populated only by an explicit model-specific diagonal-ES manifest.
-        self.es_site_id: Optional[str] = None
-        self.es_site_width: Optional[int] = None
         self.es_pre_site_id: Optional[str] = None
-        self.es_pre_site_width: Optional[int] = None
+        self.es_pre_delta_bank: Optional[torch.Tensor] = None
         self.es_post_site_id: Optional[str] = None
-        self.es_post_site_width: Optional[int] = None
+        self.es_post_delta_bank: Optional[torch.Tensor] = None
         if quant_config is None:
             from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 

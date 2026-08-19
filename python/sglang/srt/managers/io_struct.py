@@ -1765,6 +1765,16 @@ class DiagESRegistryReqInput(BaseReq, kw_only=True):
     effective_model_digest: Optional[str] = None
     serialized_deltas: Optional[List[bytes]] = None
 
+    def __post_init__(self) -> None:
+        from sglang.srt.diag_es.protocol import validate_registry_request
+
+        validate_registry_request(
+            action=self.action,
+            candidate_id=self.candidate_id,
+            effective_model_digest=self.effective_model_digest,
+            serialized_deltas=self.serialized_deltas,
+        )
+
 
 class DiagESRegistryReqOutput(BaseReq, kw_only=True):
     success: bool

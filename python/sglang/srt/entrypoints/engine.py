@@ -41,6 +41,7 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Mapping,
     Optional,
     Tuple,
     Union,
@@ -51,7 +52,10 @@ import torch
 import uvloop
 import zmq
 
-from sglang.srt.diag_es.protocol import prepare_register_payload
+from sglang.srt.diag_es.protocol import (
+    prepare_register_payload,
+    validate_effective_model_digest,
+)
 from sglang.srt.elastic_ep.expert_backup_manager import run_expert_backup_manager
 from sglang.srt.entrypoints.engine_info_bootstrap_server import (
     EngineInfoBootstrapServer,
@@ -1433,24 +1437,38 @@ class Engine(EngineScoreMixin, EngineBase):
     def register_diag_es_candidate(
         self,
         candidate_id: str,
-        dense_deltas: Dict[str, torch.Tensor],
-        grouped_deltas: Optional[Dict[str, torch.Tensor]] = None,
+        dense_deltas: Mapping[str, torch.Tensor],
+        grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
         effective_model_digest: Optional[str] = None,
     ) -> Dict[str, Any]:
-        named_deltas, effective_model_digest = prepare_register_payload(
-            dense_deltas,
-            grouped_deltas,
-            effective_model_digest,
+        return self.loop.run_until_complete(
+            self.async_register_diag_es_candidate(
+                candidate_id,
+                dense_deltas,
+                grouped_deltas,
+                effective_model_digest,
+            )
         )
-        obj = DiagESRegistryReqInput(
+
+    def _build_diag_es_register_request(
+        self,
+        candidate_id: str,
+        dense_deltas: Mapping[str, torch.Tensor],
+        grouped_deltas: Optional[Mapping[str, torch.Tensor]],
+        effective_model_digest: Optional[str],
+    ) -> DiagESRegistryReqInput:
+        named_deltas = prepare_register_payload(dense_deltas, grouped_deltas)
+        if effective_model_digest is not None:
+            validate_effective_model_digest(effective_model_digest)
+        return DiagESRegistryReqInput(
             action="register",
             candidate_id=candidate_id,
             effective_model_digest=effective_model_digest,
             serialized_deltas=self._serialize_tensors_per_rank(named_deltas, None),
         )
-        result = self.loop.run_until_complete(
-            self.tokenizer_manager.diag_es_registry(obj)
-        )
+
+    @staticmethod
+    def _unwrap_diag_es_registry_result(result: Any) -> Dict[str, Any]:
         if not result.success:
             raise RuntimeError(result.message)
         return result.status
@@ -1458,62 +1476,39 @@ class Engine(EngineScoreMixin, EngineBase):
     async def async_register_diag_es_candidate(
         self,
         candidate_id: str,
-        dense_deltas: Dict[str, torch.Tensor],
-        grouped_deltas: Optional[Dict[str, torch.Tensor]] = None,
+        dense_deltas: Mapping[str, torch.Tensor],
+        grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
         effective_model_digest: Optional[str] = None,
     ) -> Dict[str, Any]:
-        named_deltas, effective_model_digest = prepare_register_payload(
-            dense_deltas,
-            grouped_deltas,
-            effective_model_digest,
-        )
         result = await self.tokenizer_manager.diag_es_registry(
-            DiagESRegistryReqInput(
-                action="register",
-                candidate_id=candidate_id,
-                effective_model_digest=effective_model_digest,
-                serialized_deltas=self._serialize_tensors_per_rank(named_deltas, None),
+            self._build_diag_es_register_request(
+                candidate_id,
+                dense_deltas,
+                grouped_deltas,
+                effective_model_digest,
             )
         )
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result.status
+        return self._unwrap_diag_es_registry_result(result)
 
     def retire_diag_es_candidate(self, candidate_id: str) -> Dict[str, Any]:
-        result = self.loop.run_until_complete(
-            self.tokenizer_manager.diag_es_registry(
-                DiagESRegistryReqInput(action="retire", candidate_id=candidate_id)
-            )
+        return self.loop.run_until_complete(
+            self.async_retire_diag_es_candidate(candidate_id)
         )
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result.status
 
     async def async_retire_diag_es_candidate(self, candidate_id: str) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_registry(
             DiagESRegistryReqInput(action="retire", candidate_id=candidate_id)
         )
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result.status
+        return self._unwrap_diag_es_registry_result(result)
 
     def get_diag_es_registry_status(self) -> Dict[str, Any]:
-        result = self.loop.run_until_complete(
-            self.tokenizer_manager.diag_es_registry(
-                DiagESRegistryReqInput(action="status")
-            )
-        )
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result.status
+        return self.loop.run_until_complete(self.async_get_diag_es_registry_status())
 
     async def async_get_diag_es_registry_status(self) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_registry(
             DiagESRegistryReqInput(action="status")
         )
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result.status
+        return self._unwrap_diag_es_registry_result(result)
 
     def update_weights_from_disk(
         self,

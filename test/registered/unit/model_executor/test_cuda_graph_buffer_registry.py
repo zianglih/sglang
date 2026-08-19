@@ -666,6 +666,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             max_num_token=8,
             seq_len_fill_value=FILL,
             cache_loc_dtype=torch.int64,
+            enable_diag_es=True,
             share_pool=False,
         )
         for name in (
@@ -776,6 +777,7 @@ class TestBuildDecodeRegistry(unittest.TestCase):
             max_num_token=8,
             seq_len_fill_value=5,
             cache_loc_dtype=torch.int64,
+            enable_diag_es=True,
             source=src,
         )
         # Registry slots share storage with the source's tensors.
@@ -791,6 +793,21 @@ class TestBuildDecodeRegistry(unittest.TestCase):
                 getattr(src, name).data_ptr(),
                 name,
             )
+
+    def test_candidate_slot_is_absent_when_diag_es_is_disabled(self):
+        from sglang.srt.model_executor.cuda_graph_buffer_registry import (
+            build_decode_registry,
+        )
+
+        reg = build_decode_registry(
+            device=torch.device("cpu"),
+            max_bs=4,
+            max_num_token=8,
+            seq_len_fill_value=5,
+            cache_loc_dtype=torch.int64,
+            share_pool=False,
+        )
+        self.assertFalse(reg.has_slot("es_candidate_slots"))
 
     def test_num_token_non_padded_gathered_dp_branch(self):
 
@@ -1067,12 +1084,14 @@ class TestBuildPrefillRegistry(unittest.TestCase):
             hidden_size=4,
             dtype=torch.bfloat16,
             enable_mamba_track=False,
+            enable_diag_es=True,
         )
         reg = build_prefill_registry(
             device=torch.device("cpu"),
             max_bs=2,
             max_num_token=16,
             cache_loc_dtype=torch.int64,
+            enable_diag_es=True,
             source=source,
         )
 
@@ -1082,6 +1101,35 @@ class TestBuildPrefillRegistry(unittest.TestCase):
             reg.get_slot("es_candidate_slots").buffer.data_ptr(),
             source.es_candidate_slots.data_ptr(),
         )
+
+    def test_prefill_candidate_slot_is_absent_when_diag_es_is_disabled(self):
+        from sglang.srt.model_executor.cuda_graph_buffer_registry import (
+            build_prefill_registry,
+        )
+        from sglang.srt.model_executor.runner_utils.buffers import (
+            PrefillInputBuffers,
+        )
+
+        source = PrefillInputBuffers.create(
+            device=torch.device("cpu"),
+            max_bs=2,
+            max_num_tokens=16,
+            cache_loc_dtype=torch.int64,
+            is_multimodal=False,
+            hidden_size=4,
+            dtype=torch.bfloat16,
+            enable_mamba_track=False,
+        )
+        self.assertIsNone(source.es_candidate_slots)
+
+        reg = build_prefill_registry(
+            device=torch.device("cpu"),
+            max_bs=2,
+            max_num_token=16,
+            cache_loc_dtype=torch.int64,
+            source=source,
+        )
+        self.assertFalse(reg.has_slot("es_candidate_slots"))
 
     def test_core_token_slots_zero_tail_and_copy_head(self):
         from sglang.srt.model_executor.cuda_graph_buffer_registry import (
@@ -1094,6 +1142,7 @@ class TestBuildPrefillRegistry(unittest.TestCase):
             max_bs=1,
             max_num_token=16,
             cache_loc_dtype=torch.int64,
+            enable_diag_es=True,
             source=src,
         )
         for name in (

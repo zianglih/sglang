@@ -20,6 +20,7 @@ from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
     support_tensor_descriptor,
 )
 from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+from sglang.srt.diag_es.moe_ops import MoeDeltaBanks, get_moe_delta_banks
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
@@ -92,39 +93,6 @@ if not _is_cuda and not _is_hip and not _is_xpu:
         _has_vllm_ops = False
 
 padding_size = get_moe_padding_size(_use_aiter)
-
-
-def get_diag_es_moe_inputs(
-    moe_runner_config: MoeRunnerConfig,
-) -> tuple[
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-]:
-    if moe_runner_config.es_layer_id is None:
-        return None, None, None, None, None
-
-    from sglang.srt.diag_es import get_diag_es_manager
-    from sglang.srt.model_executor.forward_context import get_forward_context
-
-    layer_id = moe_runner_config.es_layer_id
-    manager = get_diag_es_manager()
-    active_grouped_gates = manager.manifest.grouped_gate_shapes
-
-    def get_active_bank(name: str) -> Optional[torch.Tensor]:
-        if name not in active_grouped_gates:
-            return None
-        return manager.get_expert_delta_bank(layer_id, name)
-
-    return (
-        get_forward_context().es_candidate_slots,
-        get_active_bank("moe_fc1_pre"),
-        get_active_bank("moe_fc1_post"),
-        get_active_bank("moe_fc2_pre"),
-        get_active_bank("moe_fc2_post"),
-    )
 
 
 def _use_moe_sum_reduce_torch_compile(num_tokens: int) -> bool:
@@ -309,13 +277,7 @@ def fused_experts(
     a1_q: Optional[torch.Tensor] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
-    (
-        diag_es_token_slots,
-        diag_es_fc1_pre,
-        diag_es_fc1_post,
-        diag_es_fc2_pre,
-        diag_es_fc2_post,
-    ) = get_diag_es_moe_inputs(moe_runner_config)
+    delta_banks = get_moe_delta_banks(moe_runner_config)
     filter_expert = (
         moe_runner_config.num_experts is None
         or moe_runner_config.num_experts != moe_runner_config.num_local_experts
@@ -352,11 +314,11 @@ def fused_experts(
             swiglu_limit=moe_runner_config.swiglu_limit,
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
-            diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_pre=diag_es_fc1_pre,
-            diag_es_fc1_post=diag_es_fc1_post,
-            diag_es_fc2_pre=diag_es_fc2_pre,
-            diag_es_fc2_post=diag_es_fc2_post,
+            diag_es_token_slots=delta_banks.token_slots,
+            diag_es_fc1_pre=delta_banks.fc1_pre,
+            diag_es_fc1_post=delta_banks.fc1_post,
+            diag_es_fc2_pre=delta_banks.fc2_pre,
+            diag_es_fc2_post=delta_banks.fc2_post,
         )
         return hidden_states
     else:
@@ -391,11 +353,11 @@ def fused_experts(
             swiglu_limit=moe_runner_config.swiglu_limit,
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
-            diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_pre=diag_es_fc1_pre,
-            diag_es_fc1_post=diag_es_fc1_post,
-            diag_es_fc2_pre=diag_es_fc2_pre,
-            diag_es_fc2_post=diag_es_fc2_post,
+            diag_es_token_slots=delta_banks.token_slots,
+            diag_es_fc1_pre=delta_banks.fc1_pre,
+            diag_es_fc1_post=delta_banks.fc1_post,
+            diag_es_fc2_pre=delta_banks.fc2_pre,
+            diag_es_fc2_post=delta_banks.fc2_post,
         )
 
 
@@ -539,11 +501,7 @@ def _fused_moe_kernel_sequence(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
-    diag_es_token_slots: Optional[torch.Tensor] = None,
-    diag_es_fc1_pre: Optional[torch.Tensor] = None,
-    diag_es_fc1_post: Optional[torch.Tensor] = None,
-    diag_es_fc2_pre: Optional[torch.Tensor] = None,
-    diag_es_fc2_post: Optional[torch.Tensor] = None,
+    delta_banks: MoeDeltaBanks = MoeDeltaBanks(),
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -557,37 +515,26 @@ def _fused_moe_kernel_sequence(
     ``num_tokens`` due to 4-row padding). ``hidden_states`` stays bf16 and is
     still used for output dtype/shape and the inplace combine.
 
-    Pre-GEMM diagonal ES supports two experiment arms. ``unfused`` materializes
-    gated route-major FC1 input and gates the dead post-activation buffer in
-    place; ``fused`` multiplies each A tile in the existing expert GEMM kernel.
-    Post-GEMM deltas always run in the GEMM epilogue while its accumulator is
-    FP32, after bias and before router weighting and the existing BF16 store.
+    Pre-GEMM diagonal ES runs in standalone FP32-FMA pointwise kernels and
+    rounds the result once to BF16 before each expert GEMM. Post-GEMM deltas run
+    in the GEMM epilogue while its accumulator is FP32, after bias and before
+    router weighting and the existing BF16 store.
     """
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
-    diag_es_banks = (
-        diag_es_fc1_pre,
-        diag_es_fc1_post,
-        diag_es_fc2_pre,
-        diag_es_fc2_post,
-    )
-    has_diag_es = any(bank is not None for bank in diag_es_banks)
-    if has_diag_es:
-        assert diag_es_token_slots is not None
-    diag_es_pre_mode = None
-    if diag_es_fc1_pre is not None or diag_es_fc2_pre is not None:
-        diag_es_pre_mode = envs.SGLANG_DIAG_ES_MOE_GATE_MODE.get()
-        assert diag_es_pre_mode in ("unfused", "fused")
-        if diag_es_pre_mode == "unfused":
-            # Standalone FC2 pre-gating addresses the activation buffer in
-            # original route order. TMA stores that buffer in expert-sorted,
-            # padded order, so the two layouts cannot be mixed.
-            down_moe_use_tma = False
+    if delta_banks.has_any:
+        assert delta_banks.token_slots is not None
 
-    if diag_es_fc1_post is not None or diag_es_fc2_post is not None:
+    if delta_banks.fc2_pre is not None:
+        # Standalone FC2 pre-steering addresses the activation buffer in
+        # original route order. TMA stores that buffer in expert-sorted,
+        # padded order, so the two layouts cannot be mixed.
+        down_moe_use_tma = False
+
+    if delta_banks.has_post:
         assert hidden_states.dtype == torch.bfloat16
         assert w1.dtype == w2.dtype == torch.bfloat16
         assert not (
@@ -653,20 +600,16 @@ def _fused_moe_kernel_sequence(
 
     fc1_input = a1_q if a1_q is not None else hidden_states
     fc1_a_route_major = False
-    fc1_fused_pre = None
-    if diag_es_fc1_pre is not None:
-        if diag_es_pre_mode == "unfused":
-            from sglang.srt.diag_es.moe_ops import materialize_moe_fc1_pre_input
+    if delta_banks.fc1_pre is not None:
+        from sglang.srt.diag_es.moe_ops import materialize_moe_fc1_pre_input
 
-            fc1_input = materialize_moe_fc1_pre_input(
-                hidden_states,
-                topk_ids,
-                diag_es_token_slots,
-                diag_es_fc1_pre,
-            )
-            fc1_a_route_major = True
-        else:
-            fc1_fused_pre = diag_es_fc1_pre
+        fc1_input = materialize_moe_fc1_pre_input(
+            hidden_states,
+            topk_ids,
+            delta_banks.token_slots,
+            delta_banks.fc1_pre,
+        )
+        fc1_a_route_major = True
 
     invoke_fused_moe_kernel(
         fc1_input,
@@ -695,12 +638,9 @@ def _fused_moe_kernel_sequence(
         filter_expert=filter_expert,
         router_topk=topk,
         a_route_major=fc1_a_route_major,
-        diag_es_pre_delta=fc1_fused_pre,
-        diag_es_post_delta=diag_es_fc1_post,
+        diag_es_post_delta=delta_banks.fc1_post,
         diag_es_token_slots=(
-            diag_es_token_slots
-            if fc1_fused_pre is not None or diag_es_fc1_post is not None
-            else None
+            delta_banks.token_slots if delta_banks.fc1_post is not None else None
         ),
     )
 
@@ -869,14 +809,14 @@ def _fused_moe_kernel_sequence(
 
     del intermediate_cache1
 
-    if diag_es_fc2_pre is not None and diag_es_pre_mode == "unfused":
+    if delta_banks.fc2_pre is not None:
         from sglang.srt.diag_es.moe_ops import apply_moe_fc2_pre_delta_inplace
 
         apply_moe_fc2_pre_delta_inplace(
             intermediate_cache2,
             topk_ids,
-            diag_es_token_slots,
-            diag_es_fc2_pre,
+            delta_banks.token_slots,
+            delta_banks.fc2_pre,
         )
 
     intermediate_cache3 = torch.empty(
@@ -930,13 +870,9 @@ def _fused_moe_kernel_sequence(
         filter_expert=filter_expert,
         fuse_sum_all_reduce=use_fused_moe_sum_all_reduce,
         router_topk=topk,
-        diag_es_pre_delta=(diag_es_fc2_pre if diag_es_pre_mode == "fused" else None),
-        diag_es_post_delta=diag_es_fc2_post,
+        diag_es_post_delta=delta_banks.fc2_post,
         diag_es_token_slots=(
-            diag_es_token_slots
-            if (diag_es_fc2_pre is not None and diag_es_pre_mode == "fused")
-            or diag_es_fc2_post is not None
-            else None
+            delta_banks.token_slots if delta_banks.fc2_post is not None else None
         ),
     )
 
@@ -1141,11 +1077,13 @@ def fused_experts_impl(
         swiglu_limit=swiglu_limit,
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
-        diag_es_token_slots=diag_es_token_slots,
-        diag_es_fc1_pre=diag_es_fc1_pre,
-        diag_es_fc1_post=diag_es_fc1_post,
-        diag_es_fc2_pre=diag_es_fc2_pre,
-        diag_es_fc2_post=diag_es_fc2_post,
+        delta_banks=MoeDeltaBanks(
+            token_slots=diag_es_token_slots,
+            fc1_pre=diag_es_fc1_pre,
+            fc1_post=diag_es_fc1_post,
+            fc2_pre=diag_es_fc2_pre,
+            fc2_post=diag_es_fc2_post,
+        ),
     )
 
 

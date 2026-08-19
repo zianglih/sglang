@@ -1301,10 +1301,6 @@ class Envs:
     # standard dispatcher, and the triton MoE runner; falls back silently
     # otherwise.
     SGLANG_OPT_MOE_QUANT_ONCE = EnvBool(False)
-    # Diagonal-ES experiment arm: explicit route-buffer materialization is the
-    # default; "fused" multiplies gates while loading A tiles in the MoE GEMMs.
-    SGLANG_DIAG_ES_MOE_GATE_MODE = EnvStr("unfused")
-
     # Cache / overlap
     SGLANG_OPT_USE_FUSED_STORE_CACHE = EnvBool(True)
     SGLANG_OPT_USE_JIT_NORM = EnvBool(True)

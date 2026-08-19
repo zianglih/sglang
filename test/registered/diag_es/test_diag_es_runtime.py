@@ -4,126 +4,22 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.srt.diag_es.manager import DiagESManager, compose_diag_es_extra_key
+from sglang.srt.diag_es.manager import (
+    DiagESCandidateRetiringError,
+    DiagESManager,
+    compose_diag_es_extra_key,
+)
 from sglang.srt.diag_es.manifest import (
+    QWEN3_30B_A3B_SCHEMA_ID,
     DenseSite,
     DiagESManifest,
-    Qwen3DiagESManifest,
     compute_effective_model_digest,
-    register_qwen3_30b_a3b_dense_sites,
 )
 from sglang.srt.mem_cache.base_prefix_cache import InsertParams, MatchPrefixParams
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=20, stage="base-b", runner_config="1-gpu-small")
-
-
-class _Linear:
-    def __init__(self, input_size: int, output_size: int):
-        self.input_size = input_size
-        self.output_size = output_size
-        self.es_site_id = None
-        self.es_site_width = None
-        self.es_pre_site_id = None
-        self.es_pre_site_width = None
-        self.es_post_site_id = None
-        self.es_post_site_width = None
-
-
-def _make_model():
-    layers = []
-    for _ in range(48):
-        runner_config = SimpleNamespace(es_layer_id=None)
-        layers.append(
-            SimpleNamespace(
-                self_attn=SimpleNamespace(
-                    qkv_proj=_Linear(2048, 5120),
-                    o_proj=_Linear(4096, 2048),
-                ),
-                mlp=SimpleNamespace(
-                    gate=_Linear(2048, 128),
-                    experts=SimpleNamespace(moe_runner_config=runner_config),
-                ),
-            )
-        )
-    return SimpleNamespace(
-        config=SimpleNamespace(
-            hidden_size=2048,
-            num_experts=128,
-            moe_intermediate_size=768,
-        ),
-        model=SimpleNamespace(layers=layers),
-        lm_head=_Linear(2048, 151936),
-    )
-
-
-@pytest.mark.parametrize(
-    ("placement", "expected_dense", "expected_grouped", "expected_digest"),
-    [
-        (
-            "pre",
-            [("qkv_proj.input", 2048), ("o_proj.input", 4096)],
-            {
-                "moe_fc1_pre": (48, 128, 2048),
-                "moe_fc2_pre": (48, 128, 768),
-            },
-            "3650c468725df70692ae0470aa3769eb97ec91f9a04fe4de1f419c36a017b956",
-        ),
-        (
-            "post",
-            [("qkv_proj.output", 5120), ("o_proj.output", 2048)],
-            {
-                "moe_fc1_post": (48, 128, 1536),
-                "moe_fc2_post": (48, 128, 2048),
-            },
-            "7502d6adee8003103476e4faf4bf9f3bef2ed19bf4a1a8bfd8e5e011da5b3342",
-        ),
-        (
-            "both",
-            [
-                ("qkv_proj.input", 2048),
-                ("qkv_proj.output", 5120),
-                ("o_proj.input", 4096),
-                ("o_proj.output", 2048),
-            ],
-            {
-                "moe_fc1_pre": (48, 128, 2048),
-                "moe_fc2_pre": (48, 128, 768),
-                "moe_fc1_post": (48, 128, 1536),
-                "moe_fc2_post": (48, 128, 2048),
-            },
-            "d63a0480f277675fce4af8646bed81cad5c004002b44e8150a22b8121e6d7e60",
-        ),
-    ],
-)
-def test_qwen_manifest_is_semantic_and_excludes_router(
-    placement, expected_dense, expected_grouped, expected_digest
-):
-    model = _make_model()
-    manifest = register_qwen3_30b_a3b_dense_sites(model, placement=placement)
-
-    assert manifest.placement == placement
-    assert len(manifest.dense_sites) == 48 * len(expected_dense)
-    assert [
-        (site.site_id.removeprefix("model.layers.0.self_attn."), site.width)
-        for site in manifest.dense_sites[: len(expected_dense)]
-    ] == expected_dense
-    assert manifest.grouped_gate_shapes == expected_grouped
-    assert manifest.schema_digest == expected_digest
-    assert model.model.layers[47].mlp.experts.moe_runner_config.es_layer_id == 47
-    assert model.model.layers[0].mlp.gate.es_site_id is None
-    assert model.model.layers[0].mlp.gate.es_post_site_id is None
-    assert model.lm_head.es_pre_site_id is None
-    assert model.lm_head.es_post_site_id is None
-
-
-@pytest.mark.parametrize("placement", ["post", "both"])
-def test_qwen_post_manifest_rejects_tp_greater_than_one(placement):
-    with pytest.raises(ValueError, match="tp_size=1"):
-        register_qwen3_30b_a3b_dense_sites(
-            _make_model(), placement=placement, tp_size=2
-        )
 
 
 def test_effective_digest_hashes_exact_fp32_delta_payload():
@@ -134,14 +30,14 @@ def test_effective_digest_hashes_exact_fp32_delta_payload():
     digest = compute_effective_model_digest(
         model_artifact_id="Qwen/Qwen3-30B-A3B",
         schema_id="qwen3-30b-a3b-diag-es-v2",
-        schema_digest="schema",
+        schema_digest="ab" * 32,
         dense_deltas=dense,
         grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
     assert digest != compute_effective_model_digest(
         model_artifact_id="Qwen/Qwen3-30B-A3B",
         schema_id="qwen3-30b-a3b-diag-es-v2",
-        schema_digest="schema",
+        schema_digest="ab" * 32,
         dense_deltas={"site-a": torch.zeros(2, dtype=torch.float32)},
         grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
@@ -150,7 +46,7 @@ def test_effective_digest_hashes_exact_fp32_delta_payload():
     assert digest != compute_effective_model_digest(
         model_artifact_id="Qwen/Qwen3-30B-A3B",
         schema_id="qwen3-30b-a3b-diag-es-v2",
-        schema_digest="schema",
+        schema_digest="ab" * 32,
         dense_deltas=dense,
         grouped_deltas={"moe_fc1_pre": fc1, "moe_fc2_pre": fc2},
     )
@@ -348,13 +244,10 @@ def test_triton_fp32_delta_cuda_graph_replay_observes_live_bank_and_slots(rows, 
 @pytest.mark.parametrize(
     ("width", "rows"), [(1536, 9), (8960, 9), (2048, 1024), (4096, 1024)]
 )
-def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
-    monkeypatch, width, rows
-):
+def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(width, rows):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
-    from sglang.srt.diag_es import manager as manager_module
     from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
     from sglang.srt.model_executor.forward_context import (
         ForwardContext,
@@ -364,9 +257,10 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
     torch.manual_seed(20260812 + width)
     site_id = "model.layers.0.test_proj.input"
     manifest = DiagESManifest(
-        schema_id="test-dense-diag-es-v1",
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        placement="pre",
         dense_sites=(DenseSite(site_id, width),),
-        grouped_gate_shapes={},
+        grouped_delta_shapes={},
         schema_digest="ab" * 32,
     )
     manager = DiagESManager(
@@ -387,19 +281,15 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
             grouped_deltas={},
         )
         slots.append(registered["resident_slot"])
-    monkeypatch.setattr(manager_module, "_manager", manager)
-
     output_width = 64
     x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((output_width, width), dtype=torch.bfloat16, device="cuda")
     layer = SimpleNamespace(
         weight=weight,
-        es_site_id=site_id,
-        es_site_width=width,
         es_pre_site_id=site_id,
-        es_pre_site_width=width,
+        es_pre_delta_bank=manager.get_dense_delta_bank(site_id),
         es_post_site_id=None,
-        es_post_site_width=None,
+        es_post_delta_bank=None,
     )
     candidate_slot_pattern = torch.tensor(
         [
@@ -464,7 +354,6 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
-    from sglang.srt.diag_es import manager as manager_module
     from sglang.srt.layers.quantization import unquant as unquant_module
     from sglang.srt.layers.quantization.unquant import (
         Bf16GemmBackend,
@@ -480,14 +369,14 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
     pre_site = "model.layers.0.test_proj.input"
     post_site = "model.layers.0.test_proj.output"
     manifest = DiagESManifest(
-        schema_id="test-dense-diag-es-v2",
-        dense_sites=(
-            DenseSite(pre_site, input_width, "pre"),
-            DenseSite(post_site, output_width, "post"),
-        ),
-        grouped_gate_shapes={},
-        schema_digest="cd" * 32,
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
         placement="both",
+        dense_sites=(
+            DenseSite(pre_site, input_width),
+            DenseSite(post_site, output_width),
+        ),
+        grouped_delta_shapes={},
+        schema_digest="cd" * 32,
     )
     manager = DiagESManager(
         manifest=manifest,
@@ -510,7 +399,6 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
             grouped_deltas={},
         )
         resident_slots.append(registered["resident_slot"])
-    monkeypatch.setattr(manager_module, "_manager", manager)
     monkeypatch.setattr(
         unquant_module,
         "_BF16_GEMM_BACKEND",
@@ -526,9 +414,9 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
     layer = SimpleNamespace(
         weight=weight,
         es_pre_site_id=pre_site,
-        es_pre_site_width=input_width,
+        es_pre_delta_bank=manager.get_dense_delta_bank(pre_site),
         es_post_site_id=post_site,
-        es_post_site_width=output_width,
+        es_post_delta_bank=manager.get_dense_delta_bank(post_site),
     )
     candidate_slots = torch.tensor(
         [0, *resident_slots] * 6,
@@ -599,18 +487,20 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
-    manifest = Qwen3DiagESManifest(
+    manifest = DiagESManifest(
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        placement="pre",
         dense_sites=(DenseSite("dense", 4),),
-        num_layers=1,
-        num_experts=2,
-        hidden_size=4,
-        moe_intermediate_size=3,
+        grouped_delta_shapes={
+            "moe_fc1_pre": (1, 2, 4),
+            "moe_fc2_pre": (1, 2, 3),
+        },
         schema_digest="ab" * 32,
     )
     manager = DiagESManager(
         manifest=manifest,
         resident_candidate_slots=1,
-        base_model_revision="test-model",
+        model_artifact_id="test-model",
         device=torch.device("cuda"),
     )
     payload = {
@@ -623,14 +513,13 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
 
     registered = manager.register_candidate(
         candidate_id="candidate-a",
-        effective_model_digest="00" * 32,
         **payload,
     )
-    assert registered["effective_model_digest"] != "00" * 32
+    assert len(registered["effective_model_digest"]) == 64
     slot = registered["resident_slot"]
     manager.acquire("candidate-a")
     assert manager.retire_candidate("candidate-a")["state"] == "RETIRING"
-    with pytest.raises(AssertionError):
+    with pytest.raises(DiagESCandidateRetiringError):
         manager.acquire("candidate-a")
     with pytest.raises(RuntimeError, match="capacity is exhausted"):
         manager.register_candidate(candidate_id="candidate-b", **payload)

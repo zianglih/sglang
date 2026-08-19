@@ -1122,7 +1122,6 @@ class ModelRunner:
                     self.server_args.diag_es_resident_candidate_slots
                 ),
                 model_artifact_id=self.server_args.diag_es_model_artifact_id,
-                tp_size=self.server_args.tp_size,
                 placement=self.server_args.diag_es_placement,
             )
 

@@ -4,7 +4,6 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.diag_es.manager import get_diag_es_manager
 from sglang.srt.model_executor.forward_context import get_forward_context
 
 
@@ -84,22 +83,34 @@ def _launch_dense_delta(
         )
 
 
+def _validate_dense_delta_inputs(
+    x: torch.Tensor,
+    delta_bank: torch.Tensor,
+    candidate_slots: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> None:
+    assert x.ndim == 2 and x.is_contiguous()
+    assert delta_bank.ndim == 2 and delta_bank.is_contiguous()
+    assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
+    assert x.dtype == torch.bfloat16 and delta_bank.dtype == torch.float32
+    assert candidate_slots.dtype == torch.int32
+    assert x.device == delta_bank.device == candidate_slots.device
+    assert x.shape[0] > 0 and x.shape[1] > 0 and delta_bank.shape[0] > 0
+    assert candidate_slots.shape[0] == x.shape[0]
+    assert delta_bank.shape[1] == x.shape[1]
+    if out is not None:
+        assert out.ndim == 2 and out.is_contiguous()
+        assert out.dtype == x.dtype and out.shape == x.shape
+        assert out.device == x.device
+
+
 def apply_dense_delta_out(
     x: torch.Tensor,
     delta_bank: torch.Tensor,
     candidate_slots: torch.Tensor,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    assert x.ndim == 2 and x.is_contiguous()
-    assert delta_bank.ndim == 2 and delta_bank.is_contiguous()
-    assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
-    assert x.dtype == torch.bfloat16 and delta_bank.dtype == torch.float32
-    assert candidate_slots.dtype == torch.int32
-    assert out.ndim == 2 and out.is_contiguous()
-    assert out.dtype == x.dtype and out.shape == x.shape
-    assert x.device == delta_bank.device == candidate_slots.device == out.device
-    assert candidate_slots.shape[0] == x.shape[0]
-    assert delta_bank.shape[1] == x.shape[1]
+    _validate_dense_delta_inputs(x, delta_bank, candidate_slots, out)
     _launch_dense_delta(x, delta_bank, candidate_slots, out)
     return out
 
@@ -107,17 +118,8 @@ def apply_dense_delta_out(
 def apply_dense_delta(
     x: torch.Tensor, delta_bank: torch.Tensor, candidate_slots: torch.Tensor
 ) -> torch.Tensor:
-    # Keep the integration hot path at the same validation cost as the original
-    # standalone launcher.  The caller-owned API performs its own output checks.
-    assert x.ndim == 2 and x.is_contiguous()
-    assert delta_bank.ndim == 2 and delta_bank.is_contiguous()
-    assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
-    assert x.dtype == torch.bfloat16 and delta_bank.dtype == torch.float32
-    assert candidate_slots.dtype == torch.int32
-    assert x.device == delta_bank.device == candidate_slots.device
-    assert candidate_slots.shape[0] == x.shape[0]
-    assert delta_bank.shape[1] == x.shape[1]
-    out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    _validate_dense_delta_inputs(x, delta_bank, candidate_slots)
+    out = torch.empty_like(x)
     _launch_dense_delta(x, delta_bank, candidate_slots, out)
     return out
 
@@ -130,13 +132,12 @@ def get_dense_delta_inputs(
     if position not in ("pre", "post"):
         raise ValueError("dense diagonal-ES position must be pre or post")
     site_id = getattr(layer, f"es_{position}_site_id", None)
-    if site_id is None:
+    delta_bank = getattr(layer, f"es_{position}_delta_bank", None)
+    assert (site_id is None) == (delta_bank is None)
+    if delta_bank is None:
         return None, None
     slots = get_forward_context().es_candidate_slots
     assert slots is not None
-    delta_bank = get_diag_es_manager().get_dense_delta_bank(site_id)
-    expected_width = getattr(layer, f"es_{position}_site_width")
-    assert delta_bank.shape[1] == expected_width
     return delta_bank, slots
 
 
@@ -151,9 +152,3 @@ def get_diag_es_post_inputs(
     layer: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor] | tuple[None, None]:
     return get_dense_delta_inputs(layer, "post")
-
-
-def maybe_apply_diag_es(layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """Compatibility alias for the v1 input-only hook."""
-
-    return maybe_apply_diag_es_pre(layer, x)

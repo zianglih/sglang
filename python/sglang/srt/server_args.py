@@ -3697,6 +3697,7 @@ class ServerArgs:
         from sglang.srt.arg_groups.overrides import materialize_declarations
 
         materialize_declarations(self)
+        self._handle_diag_es_runtime_contract()
 
     def _handle_return_hidden_states_mode(self):
         if self.return_hidden_states_mode not in (None, "last", "full"):
@@ -3712,36 +3713,88 @@ class ServerArgs:
     def _handle_diag_es_identity(self):
         if not self.enable_diag_es:
             return
-        supported = {
-            "qwen3-30b-a3b-diag-es-v2",
-            "qwen2.5-1.5b-instruct-dense-diag-es-v1",
-        }
-        if self.diag_es_schema_id not in supported:
+        if self.diag_es_schema_id != "qwen3-30b-a3b-diag-es-v2":
             raise ValueError(
-                "enable_diag_es requires an explicit supported diag_es_schema_id"
+                "enable_diag_es requires "
+                "diag_es_schema_id='qwen3-30b-a3b-diag-es-v2'"
             )
         if self.diag_es_placement not in ("pre", "post", "both"):
             raise ValueError("diag_es_placement must be pre, post, or both")
         if (
-            self.diag_es_schema_id == "qwen2.5-1.5b-instruct-dense-diag-es-v1"
-            and self.diag_es_placement != "pre"
-        ):
-            raise ValueError("Qwen2 diagonal ES supports pre placement only")
-        if (
-            self.diag_es_schema_id == "qwen3-30b-a3b-diag-es-v2"
-            and self.diag_es_placement in ("post", "both")
-            and self.tp_size != 1
-        ):
-            raise ValueError("Qwen3 diagonal-ES post placement requires tp_size=1")
-        if (
             not isinstance(self.diag_es_model_artifact_id, str)
             or not self.diag_es_model_artifact_id.strip()
+            or "\0" in self.diag_es_model_artifact_id
         ):
             raise ValueError(
-                "enable_diag_es requires a non-empty diag_es_model_artifact_id"
+                "enable_diag_es requires a non-empty diag_es_model_artifact_id "
+                "without NUL bytes"
             )
         if self.diag_es_resident_candidate_slots < 1:
             raise ValueError("diag_es_resident_candidate_slots must be positive")
+
+    def _handle_diag_es_runtime_contract(self):
+        """Validate the final, materialized execution topology for diagonal ES."""
+
+        if not self.enable_diag_es:
+            return
+        view = self._resolved()
+        exact_values = {
+            "device": (view.device, "cuda"),
+            "nnodes": (view.nnodes, 1),
+            "node_rank": (view.node_rank, 0),
+            "tp_size": (view.tp_size, 1),
+            "dp_size": (view.dp_size, 1),
+            "pp_size": (view.pp_size, 1),
+            "ep_size": (view.ep_size, 1),
+            "dcp_size": (view.dcp_size, 1),
+            "attn_cp_size": (view.attn_cp_size, 1),
+            "moe_dp_size": (view.moe_dp_size, 1),
+            "dwdp_size": (view.dwdp_size, 1),
+            "enable_prefill_cp": (view.enable_prefill_cp, False),
+            "enable_prefill_context_parallel": (
+                view.enable_prefill_context_parallel,
+                False,
+            ),
+            "enable_dsa_prefill_context_parallel": (
+                view.enable_dsa_prefill_context_parallel,
+                False,
+            ),
+            "enable_dp_attention": (view.enable_dp_attention, False),
+            "moe_a2a_backend": (view.moe_a2a_backend, "none"),
+            "moe_runner_backend": (view.moe_runner_backend, "triton"),
+            "bf16_gemm_backend": (view.bf16_gemm_backend, "triton"),
+            "attention_backend": (view.attention_backend, "trtllm_mha"),
+            "enable_torch_compile": (view.enable_torch_compile, False),
+            "ep_num_redundant_experts": (view.ep_num_redundant_experts, 0),
+            "enable_eplb": (view.enable_eplb, False),
+            "elastic_ep_backend": (view.elastic_ep_backend, None),
+            "disable_radix_cache": (view.disable_radix_cache, False),
+            "radix_cache_backend": (view.radix_cache_backend, None),
+            "enable_hierarchical_cache": (view.enable_hierarchical_cache, False),
+            "enable_lmcache": (view.enable_lmcache, False),
+            "enable_flexkv": (view.enable_flexkv, False),
+            "speculative_algorithm": (view.speculative_algorithm, None),
+            "disaggregation_mode": (view.disaggregation_mode, "null"),
+            "enable_two_batch_overlap": (view.enable_two_batch_overlap, False),
+        }
+        mismatches = [
+            f"{name}={actual!r} (requires {expected!r})"
+            for name, (actual, expected) in exact_values.items()
+            if actual != expected
+        ]
+        for name in ("decode_attention_backend", "prefill_attention_backend"):
+            actual = getattr(view, name)
+            if actual not in (None, "trtllm_mha"):
+                mismatches.append(
+                    f"{name}={actual!r} (requires None or 'trtllm_mha')"
+                )
+        if view.enable_lora or view.lora_paths:
+            mismatches.append("LoRA is enabled (requires no LoRA adapters)")
+        if mismatches:
+            raise ValueError(
+                "diagonal ES supports only the exact TP1/DP1/PP1/EP1 Triton "
+                "runtime contract: " + ", ".join(mismatches)
+            )
 
     def _handle_model_capability_adjustments(self):
         if parse_connector_type(self.model_path) == ConnectorType.INSTANCE:

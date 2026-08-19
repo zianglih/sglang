@@ -524,6 +524,7 @@ def build_decode_registry(
     require_mlp_tp_gather: bool = False,
     dp_size: int = 1,
     register_global_num_tokens: bool = True,
+    enable_diag_es: bool = False,
     share_pool: bool = True,
     source: Optional[Any] = None,
 ) -> CudaGraphBufferRegistry:
@@ -578,13 +579,6 @@ def build_decode_registry(
             padding_policy=PaddingPolicy.ZERO,
         ),
         GraphSlot(
-            "es_candidate_slots",
-            _tokens,
-            torch.int32,
-            axis="tokens",
-            padding_policy=PaddingPolicy.ZERO,
-        ),
-        GraphSlot(
             "req_pool_indices",
             _bs,
             torch.int64,
@@ -617,6 +611,16 @@ def build_decode_registry(
             padding_policy=PaddingPolicy.ZERO,
         ),
     ]
+    if enable_diag_es:
+        slots.append(
+            GraphSlot(
+                "es_candidate_slots",
+                _tokens,
+                torch.int32,
+                axis="tokens",
+                padding_policy=PaddingPolicy.ZERO,
+            )
+        )
     if enable_mamba_track:
         slots.append(
             GraphSlot(
@@ -818,6 +822,7 @@ def build_prefill_registry(
     require_gathered_buffer: bool = False,
     enable_prefill_cp: bool = False,
     register_input_embeds: bool = True,
+    enable_diag_es: bool = False,
     share_pool: bool = True,
     source: Optional[Any] = None,
 ) -> CudaGraphBufferRegistry:
@@ -878,14 +883,17 @@ def build_prefill_registry(
             axis="tokens",
             padding_policy=PaddingPolicy.ZERO,
         ),
-        GraphSlot(
-            "es_candidate_slots",
-            _tokens,
-            torch.int32,
-            axis="tokens",
-            padding_policy=PaddingPolicy.ZERO,
-        ),
     ]
+    if enable_diag_es:
+        slots.append(
+            GraphSlot(
+                "es_candidate_slots",
+                _tokens,
+                torch.int32,
+                axis="tokens",
+                padding_policy=PaddingPolicy.ZERO,
+            )
+        )
     if is_multimodal:
         slots.append(
             GraphSlot(
@@ -966,6 +974,7 @@ def build_eager_registry(
     encoder_len_fill_value: int = 0,
     encoder_lens_dtype: torch.dtype = torch.int32,
     dp_size: int = 1,
+    enable_diag_es: bool = False,
 ) -> CudaGraphBufferRegistry:
     """One fixed-max input registry for the ``EagerRunner``, serving BOTH eager
     decode and eager prefill.
@@ -997,6 +1006,7 @@ def build_eager_registry(
         require_gathered_buffer=False,
         require_mlp_tp_gather=False,
         dp_size=dp_size,
+        enable_diag_es=enable_diag_es,
         share_pool=True,
         source=None,
     )

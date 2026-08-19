@@ -377,6 +377,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             num_tokens_per_req=self.captured_req_width,
             cache_loc_dtype=self._cache_loc_dtype(),
             enable_mamba_track=enable_mamba_track,
+            enable_diag_es=self.model_runner.server_args.enable_diag_es,
             ne_token_table=(
                 model_runner.ngram_embedding_manager.table
                 if self.use_ngram_embedding
@@ -409,6 +410,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             enable_prefill_cp=self.enable_prefill_cp,
             require_mlp_tp_gather=self.require_mlp_tp_gather,
             dp_size=self.dp_size,
+            enable_diag_es=self.model_runner.server_args.enable_diag_es,
             source=self.buffers,
         )
 
@@ -806,7 +808,11 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         seq_lens_cpu = _slot("seq_lens_cpu")
         out_cache_loc = _slot("out_cache_loc")
         positions = _slot("positions")
-        es_candidate_slots = _slot("es_candidate_slots")
+        es_candidate_slots = (
+            _slot("es_candidate_slots")
+            if registry.has_slot("es_candidate_slots")
+            else None
+        )
         encoder_lens = (
             _slot("encoder_lens") if registry.has_slot("encoder_lens") else None
         )
@@ -1188,9 +1194,13 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                 self._stage_ragged_verify_layout(ragged_layout, graph_size_key)
             self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
-            self.buffers.es_candidate_slots[: self.raw_num_token].copy_(
-                forward_batch.es_candidate_slots
-            )
+            if self.buffers.es_candidate_slots is not None:
+                assert forward_batch.es_candidate_slots is not None
+                self.buffers.es_candidate_slots[: self.raw_num_token].copy_(
+                    forward_batch.es_candidate_slots
+                )
+            else:
+                assert forward_batch.es_candidate_slots is None
             if (
                 not is_ragged
                 and self.model_runner.spec_algorithm.is_dflash_family()

@@ -588,8 +588,10 @@ class BaseRunner(ABC):
             next_token_logits_buffer=next_token_logits_buffer,
             orig_seq_lens=seq_lens,
             out_cache_loc=out_cache_loc,
-            es_candidate_slots=torch.zeros(
-                (num_tokens,), dtype=torch.int32, device=mr.device
+            es_candidate_slots=(
+                torch.zeros((num_tokens,), dtype=torch.int32, device=mr.device)
+                if mr.server_args.enable_diag_es
+                else None
             ),
             seq_lens_sum=seq_lens.sum().item(),
             encoder_lens=encoder_lens,
