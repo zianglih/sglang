@@ -8,8 +8,8 @@ from typing import Any, Literal, Mapping, Optional
 import torch
 
 from sglang.srt.diag_es.manifest import (
-    QWEN3_30B_A3B_SCHEMA_ID,
     QWEN2_5_1_5B_SCHEMA_ID,
+    QWEN3_30B_A3B_SCHEMA_ID,
     DiagESManifest,
     Qwen3DiagESManifest,
     compute_effective_model_digest,
@@ -63,13 +63,9 @@ class DiagESManager:
             and model_artifact_id is not None
             and base_model_revision != model_artifact_id
         ):
-            raise ValueError(
-                "base_model_revision conflicts with model_artifact_id"
-            )
+            raise ValueError("base_model_revision conflicts with model_artifact_id")
         self.model_artifact_id = (
-            model_artifact_id
-            if model_artifact_id is not None
-            else base_model_revision
+            model_artifact_id if model_artifact_id is not None else base_model_revision
         )
         if (
             not isinstance(self.model_artifact_id, str)
@@ -96,9 +92,11 @@ class DiagESManager:
             site.site_id: torch.zeros(
                 (
                     self.physical_slots,
-                    site.input_width // self.tp_size
-                    if self.tp_size > 1 and ".o_proj.input" in site.site_id
-                    else site.input_width,
+                    (
+                        site.input_width // self.tp_size
+                        if self.tp_size > 1 and ".o_proj.input" in site.site_id
+                        else site.input_width
+                    ),
                 ),
                 dtype=torch.float32,
                 device=device,
@@ -110,9 +108,11 @@ class DiagESManager:
                 (
                     *shape[:-1],
                     self.physical_slots,
-                    shape[-1] // self.tp_size
-                    if name == "moe_fc2" and self.tp_size > 1
-                    else shape[-1],
+                    (
+                        shape[-1] // self.tp_size
+                        if name == "moe_fc2" and self.tp_size > 1
+                        else shape[-1]
+                    ),
                 ),
                 dtype=torch.float32,
                 device=device,
@@ -131,7 +131,9 @@ class DiagESManager:
         start = self.tp_rank * width
         return delta[start : start + width].contiguous()
 
-    def get_expert_delta_bank(self, layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
+    def get_expert_delta_bank(
+        self, layer_id: int, kind: ExpertGateKind
+    ) -> torch.Tensor:
         return self._grouped_delta_banks[kind][layer_id]
 
     def get_grouped_delta_bank(self, name: str) -> torch.Tensor:
@@ -158,7 +160,9 @@ class DiagESManager:
         if grouped_deltas is not None and (
             expert_fc1_deltas is not None or expert_fc2_deltas is not None
         ):
-            raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
+            raise ValueError(
+                "grouped_deltas conflict with legacy expert delta arguments"
+            )
         if (expert_fc1_deltas is None) != (expert_fc2_deltas is None):
             raise ValueError("legacy expert delta arguments must be provided together")
         if expert_fc1_deltas is not None:
@@ -213,9 +217,7 @@ class DiagESManager:
         with torch.cuda.stream(stream):
             for site in self.manifest.dense_sites:
                 self._dense_delta_banks[site.site_id][slot].copy_(
-                    self._local_dense_delta(
-                        site.site_id, dense_deltas[site.site_id]
-                    ),
+                    self._local_dense_delta(site.site_id, dense_deltas[site.site_id]),
                     non_blocking=True,
                 )
             for name, delta in grouped_deltas.items():

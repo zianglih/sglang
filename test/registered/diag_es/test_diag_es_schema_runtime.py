@@ -3,15 +3,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from sglang.srt.diag_es.manager import DiagESManager
 from sglang.srt.diag_es.manifest import (
-    DiagESManifest,
-    DenseSite,
-    Qwen3DiagESManifest,
     QWEN2_5_1_5B_SCHEMA_ID,
+    DenseSite,
+    DiagESManifest,
+    Qwen3DiagESManifest,
     compute_effective_model_digest,
     register_qwen2_5_1_5b_dense_sites,
 )
-from sglang.srt.diag_es.manager import DiagESManager
 from sglang.srt.diag_es.protocol import prepare_register_payload
 
 

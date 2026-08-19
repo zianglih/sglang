@@ -32,6 +32,7 @@ class TestTqdmLock(unittest.TestCase):
             delattr(TqdmDefaultWriteLock, "mp_lock")
 
         try:
+
             def record_multiprocessing_rlock():
                 multiprocessing_rlocks.append(True)
                 return threading.RLock()

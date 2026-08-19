@@ -25,7 +25,6 @@ import dataclasses
 import gc
 import logging
 import multiprocessing as mp
-from multiprocessing import resource_sharer
 import os
 import random
 import signal
@@ -34,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+from multiprocessing import resource_sharer
 from typing import (
     Any,
     AsyncIterator,
@@ -51,6 +51,7 @@ import torch
 import uvloop
 import zmq
 
+from sglang.srt.diag_es.protocol import prepare_register_payload
 from sglang.srt.elastic_ep.expert_backup_manager import run_expert_backup_manager
 from sglang.srt.entrypoints.engine_info_bootstrap_server import (
     EngineInfoBootstrapServer,
@@ -90,7 +91,6 @@ from sglang.srt.managers.io_struct import (
     sock_recv,
     sock_send,
 )
-from sglang.srt.diag_es.protocol import prepare_register_payload
 from sglang.srt.managers.multi_tokenizer_mixin import (
     MultiTokenizerRouter,
     run_multi_detokenizer_router_process,

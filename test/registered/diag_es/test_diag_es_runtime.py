@@ -6,8 +6,8 @@ import torch
 
 from sglang.srt.diag_es.manager import DiagESManager, compose_diag_es_extra_key
 from sglang.srt.diag_es.manifest import (
-    DiagESManifest,
     DenseSite,
+    DiagESManifest,
     Qwen3DiagESManifest,
     compute_effective_model_digest,
     register_qwen3_30b_a3b_dense_sites,
@@ -192,9 +192,7 @@ def test_triton_fp32_delta_preserves_signal_lost_by_bf16_multiplier():
         dtype=torch.bfloat16,
         device="cuda",
     )
-    delta_bank = torch.full(
-        (1, x.shape[1]), 0.003, dtype=torch.float32, device="cuda"
-    )
+    delta_bank = torch.full((1, x.shape[1]), 0.003, dtype=torch.float32, device="cuda")
     slots = torch.zeros(1, dtype=torch.int32, device="cuda")
 
     actual = apply_dense_delta(x, delta_bank, slots)
@@ -251,9 +249,7 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(
     rows = 9
     output_width = 64
     x = torch.randn((rows, width), dtype=torch.bfloat16, device="cuda")
-    weight = torch.randn(
-        (output_width, width), dtype=torch.bfloat16, device="cuda"
-    )
+    weight = torch.randn((output_width, width), dtype=torch.bfloat16, device="cuda")
     layer = SimpleNamespace(
         weight=weight,
         es_site_id=site_id,

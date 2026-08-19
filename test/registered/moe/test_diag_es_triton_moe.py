@@ -221,9 +221,9 @@ class TestDiagEsTritonMoe(CustomTestCase):
             else:
                 hidden_fp32 = hidden_states[token].float()
                 delta = fc1_delta[expert, int(token_slots[token])]
-                fc1_expected[route] = torch.addcmul(
-                    hidden_fp32, hidden_fp32, delta
-                ).to(hidden_states.dtype)
+                fc1_expected[route] = torch.addcmul(hidden_fp32, hidden_fp32, delta).to(
+                    hidden_states.dtype
+                )
         torch.testing.assert_close(fc1_actual, fc1_expected, rtol=0, atol=0)
 
         fc2_actual = torch.randn(

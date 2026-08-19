@@ -7,7 +7,6 @@ from typing import Mapping, Optional
 
 import torch
 
-
 QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v1"
 QWEN2_5_1_5B_SCHEMA_ID = "qwen2.5-1.5b-instruct-dense-diag-es-v1"
 
@@ -243,10 +242,10 @@ def compute_effective_model_digest(
         and model_artifact_id is not None
         and base_model_revision != model_artifact_id
     ):
-        raise ValueError(
-            "base_model_revision conflicts with model_artifact_id"
-        )
-    artifact_id = model_artifact_id if model_artifact_id is not None else base_model_revision
+        raise ValueError("base_model_revision conflicts with model_artifact_id")
+    artifact_id = (
+        model_artifact_id if model_artifact_id is not None else base_model_revision
+    )
     if not isinstance(artifact_id, str) or not artifact_id.strip():
         raise ValueError("model_artifact_id must be a non-empty string")
     legacy_codec = (
@@ -273,7 +272,9 @@ def compute_effective_model_digest(
         update_tensor(f"dense:{site_id}", dense_deltas[site_id])
     if legacy_codec:
         if set(grouped_deltas) != {"moe_fc1", "moe_fc2"}:
-            raise ValueError("legacy digest requires moe_fc1 and moe_fc2 grouped deltas")
+            raise ValueError(
+                "legacy digest requires moe_fc1 and moe_fc2 grouped deltas"
+            )
         update_tensor("expert:moe_fc1", grouped_deltas["moe_fc1"])
         update_tensor("expert:moe_fc2", grouped_deltas["moe_fc2"])
     else:

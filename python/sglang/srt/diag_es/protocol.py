@@ -16,15 +16,15 @@ def prepare_register_payload(
     """Normalize generic and legacy Engine register arguments for serialization."""
 
     named_deltas = [
-        (f"dense_delta:{site_id}", delta)
-        for site_id, delta in dense_deltas.items()
+        (f"dense_delta:{site_id}", delta) for site_id, delta in dense_deltas.items()
     ]
     if grouped_deltas is not None:
         if expert_fc1_deltas is not None or expert_fc2_deltas is not None:
-            raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
+            raise ValueError(
+                "grouped_deltas conflict with legacy expert delta arguments"
+            )
         named_deltas.extend(
-            (f"grouped_delta:{name}", delta)
-            for name, delta in grouped_deltas.items()
+            (f"grouped_delta:{name}", delta) for name, delta in grouped_deltas.items()
         )
     elif expert_fc1_deltas is not None or expert_fc2_deltas is not None:
         if not torch.is_tensor(expert_fc1_deltas) or not torch.is_tensor(

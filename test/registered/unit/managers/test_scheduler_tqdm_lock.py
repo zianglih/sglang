@@ -1,10 +1,10 @@
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -32,8 +32,7 @@ class TestSchedulerTqdmLock(unittest.TestCase):
         tqdm_lock_test = (
             repo_root / "test/registered/unit/model_loader/test_tqdm_lock.py"
         )
-        self._run_isolated_probe(
-            f"""
+        self._run_isolated_probe(f"""
             import builtins
             import runpy
             import sys
@@ -68,12 +67,10 @@ class TestSchedulerTqdmLock(unittest.TestCase):
                 for name, module in sys.modules.items()
                 if name == "sgl_kernel" or name.startswith("sgl_kernel.")
             }} == sgl_kernel_modules_before
-            """
-        )
+            """)
 
     def test_entry_installs_process_local_std_tqdm_lock_before_init(self):
-        self._run_isolated_probe(
-            """
+        self._run_isolated_probe("""
             import importlib.abc
             import importlib.machinery
             import sys
@@ -197,8 +194,7 @@ class TestSchedulerTqdmLock(unittest.TestCase):
 
             assert sys.meta_path == meta_path_before
             assert sys.modules == modules_before
-            """
-        )
+            """)
 
 
 if __name__ == "__main__":
