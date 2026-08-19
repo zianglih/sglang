@@ -216,16 +216,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         backend = get_bf16_gemm_backend()
-        if getattr(layer, "es_pre_site_id", None) is not None:
+        if layer.es_pre_delta_bank is not None:
             from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
             x = maybe_apply_diag_es_pre(layer, x)
-
-        has_post_delta = getattr(layer, "es_post_site_id", None) is not None
-        if has_post_delta and not backend.is_triton():
-            raise RuntimeError(
-                "dense diagonal-ES post placement requires the Triton BF16 GEMM backend"
-            )
 
         if use_intel_amx_backend(layer):
             x_shapes = x.shape
@@ -249,7 +243,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 triton_bf16_linear,
             )
 
-            if not has_post_delta:
+            if layer.es_post_delta_bank is None:
                 return triton_bf16_linear(x, layer.weight, bias)
 
             from sglang.srt.diag_es.ops import get_diag_es_post_inputs
@@ -301,23 +295,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         """Run an inference-only BF16 linear into caller-owned storage."""
         backend = get_bf16_gemm_backend()
-        if getattr(layer, "es_pre_site_id", None) is not None:
+        if layer.es_pre_delta_bank is not None:
             from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
             x = maybe_apply_diag_es_pre(layer, x)
-
-        has_post_delta = getattr(layer, "es_post_site_id", None) is not None
-        if has_post_delta and not backend.is_triton():
-            raise RuntimeError(
-                "dense diagonal-ES post placement requires the Triton BF16 GEMM backend"
-            )
 
         if backend.is_triton():
             from sglang.kernels.ops.gemm.triton_bf16_gemm import (
                 triton_bf16_linear_out,
             )
 
-            if not has_post_delta:
+            if layer.es_post_delta_bank is None:
                 return triton_bf16_linear_out(x, layer.weight, output, bias)
 
             from sglang.srt.diag_es.ops import get_diag_es_post_inputs

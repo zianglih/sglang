@@ -151,34 +151,6 @@ def triton_bf16_linear_out(
     n = weight.shape[0]
     output_2d = output.view(m, n)
     apply_post_delta = post_delta_bank is not None
-    if apply_post_delta != (candidate_slots is not None):
-        raise ValueError(
-            "post_delta_bank and candidate_slots must be provided together"
-        )
-    if apply_post_delta:
-        assert post_delta_bank is not None and candidate_slots is not None
-        # The ordinary Triton backend is a trusted hot path. Keep the stricter
-        # contract checks confined to the optional ES epilogue instead of
-        # taxing every dense GEMM (including routers) when post steering is off.
-        assert x.ndim >= 2 and x.is_cuda and x.is_contiguous()
-        assert weight.ndim == 2 and weight.is_cuda and weight.is_contiguous()
-        assert output.is_cuda and output.is_contiguous()
-        assert x.dtype == weight.dtype == output.dtype == torch.bfloat16
-        assert x.device == weight.device == output.device
-        assert weight.shape[1] == k and output.shape == (*x.shape[:-1], n)
-        assert m > 0 and n > 0 and k > 0
-        if bias is not None:
-            assert bias.ndim == 1 and bias.shape[0] == n
-            assert bias.dtype in (torch.bfloat16, torch.float32)
-            assert bias.device == x.device and bias.is_contiguous()
-        assert post_delta_bank.ndim == 2 and post_delta_bank.is_contiguous()
-        assert post_delta_bank.dtype == torch.float32
-        assert post_delta_bank.device == x.device
-        assert post_delta_bank.shape[0] > 0 and post_delta_bank.shape[1] == n
-        assert candidate_slots.ndim == 1 and candidate_slots.is_contiguous()
-        assert candidate_slots.dtype == torch.int32
-        assert candidate_slots.device == x.device
-        assert candidate_slots.shape[0] == m
 
     def grid(meta):
         return (triton.cdiv(m, meta["BLOCK_M"]) * triton.cdiv(n, meta["BLOCK_N"]),)

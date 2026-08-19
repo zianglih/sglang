@@ -21,20 +21,8 @@ class MoeDeltaBanks:
     fc2_pre: Optional[torch.Tensor] = None
     fc2_post: Optional[torch.Tensor] = None
 
-    @property
-    def has_any(self) -> bool:
-        return any(
-            bank is not None
-            for bank in (self.fc1_pre, self.fc1_post, self.fc2_pre, self.fc2_post)
-        )
 
-    @property
-    def has_pre(self) -> bool:
-        return self.fc1_pre is not None or self.fc2_pre is not None
-
-    @property
-    def has_post(self) -> bool:
-        return self.fc1_post is not None or self.fc2_post is not None
+EMPTY_MOE_DELTA_BANKS = MoeDeltaBanks()
 
 
 def get_moe_delta_banks(moe_runner_config: MoeRunnerConfig) -> MoeDeltaBanks:
@@ -42,15 +30,11 @@ def get_moe_delta_banks(moe_runner_config: MoeRunnerConfig) -> MoeDeltaBanks:
 
     fixed_banks = moe_runner_config.diag_es_delta_banks
     if fixed_banks is None:
-        return MoeDeltaBanks()
-    assert fixed_banks.token_slots is None
-    if not fixed_banks.has_any:
-        return fixed_banks
+        return EMPTY_MOE_DELTA_BANKS
 
     from sglang.srt.model_executor.forward_context import get_forward_context
 
     token_slots = get_forward_context().es_candidate_slots
-    assert token_slots is not None
     return replace(fixed_banks, token_slots=token_slots)
 
 
@@ -62,13 +46,7 @@ def _apply_expert_route_pre_delta_kernel(
     delta_ptr,
     out_ptr,
     width: tl.constexpr,
-    stride_xm,
-    stride_xk,
-    stride_ge,
-    stride_gs,
-    stride_gk,
-    stride_om,
-    stride_ok,
+    NUM_SLOTS: tl.constexpr,
     ROUTER_TOPK: tl.constexpr,
     INPUT_ROUTE_MAJOR: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -82,20 +60,19 @@ def _apply_expert_route_pre_delta_kernel(
 
     x_row = route if INPUT_ROUTE_MAJOR else token
     x = tl.load(
-        x_ptr + x_row * stride_xm + cols * stride_xk,
+        x_ptr + x_row * width + cols,
         mask=valid,
         other=0.0,
     )
     delta = tl.load(
-        delta_ptr + expert * stride_ge + slot * stride_gs + cols * stride_gk,
+        delta_ptr + (expert * NUM_SLOTS + slot) * width + cols,
         mask=valid,
         other=0.0,
     )
-    out_dtype = out_ptr.dtype.element_ty
     x_fp32 = x.to(tl.float32)
-    steered = tl.fma(x_fp32, delta, x_fp32).to(out_dtype)
+    steered = tl.fma(x_fp32, delta, x_fp32).to(tl.bfloat16)
     tl.store(
-        out_ptr + route * stride_om + cols * stride_ok,
+        out_ptr + route * width + cols,
         steered,
         mask=cols < width,
     )
@@ -113,25 +90,6 @@ def _launch_expert_route_pre_delta(
     width = x.shape[1]
     block_size = 256
     grid = (topk_ids.numel(), triton.cdiv(width, block_size))
-    assert x.ndim == 2 and x.is_contiguous()
-    assert out.ndim == 2 and out.is_contiguous()
-    assert topk_ids.ndim == 2 and topk_ids.is_contiguous()
-    assert token_slots.ndim == 1 and token_slots.is_contiguous()
-    assert delta_bank.ndim == 3 and delta_bank.is_contiguous()
-    assert x.dtype == out.dtype == torch.bfloat16
-    assert delta_bank.dtype == torch.float32
-    assert topk_ids.dtype == token_slots.dtype == torch.int32
-    assert x.device == out.device == delta_bank.device
-    assert x.device == topk_ids.device == token_slots.device
-    assert x.shape[1] > 0 and topk_ids.shape[0] > 0 and topk_ids.shape[1] > 0
-    assert token_slots.shape[0] == topk_ids.shape[0]
-    assert delta_bank.shape[0] > 0 and delta_bank.shape[1] > 0
-    assert delta_bank.shape[2] == width
-    assert out.shape == (topk_ids.numel(), width)
-    if input_route_major:
-        assert x.shape[0] == topk_ids.numel()
-    else:
-        assert x.shape[0] == topk_ids.shape[0]
     _apply_expert_route_pre_delta_kernel[grid](
         x,
         topk_ids,
@@ -139,13 +97,7 @@ def _launch_expert_route_pre_delta(
         delta_bank,
         out,
         width=width,
-        stride_xm=x.stride(0),
-        stride_xk=x.stride(1),
-        stride_ge=delta_bank.stride(0),
-        stride_gs=delta_bank.stride(1),
-        stride_gk=delta_bank.stride(2),
-        stride_om=out.stride(0),
-        stride_ok=out.stride(1),
+        NUM_SLOTS=delta_bank.shape[1],
         ROUTER_TOPK=topk_ids.shape[1],
         INPUT_ROUTE_MAJOR=input_route_major,
         BLOCK_SIZE=block_size,

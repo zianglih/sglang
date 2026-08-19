@@ -446,9 +446,9 @@ class ModelRunner:
         )
 
         if self.ps.pp_size > 1:
-            assert (
-                self.support_pp
-            ), "Pipeline Parallel is not compatible with this model."
+            assert self.support_pp, (
+                "Pipeline Parallel is not compatible with this model."
+            )
 
         # For weight updates
         self.init_weight_updater()
@@ -1662,7 +1662,7 @@ class ModelRunner:
                 )
                 if self.server_args.enable_diag_es:
                     self.diag_es_manager.note_slots_read(
-                        forward_batch.es_candidate_slots_cpu or ()
+                        forward_batch.es_candidate_slots_cpu
                     )
                 return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
@@ -1727,7 +1727,7 @@ class ModelRunner:
 
             if self.server_args.enable_diag_es:
                 self.diag_es_manager.note_slots_read(
-                    forward_batch.es_candidate_slots_cpu or ()
+                    forward_batch.es_candidate_slots_cpu
                 )
 
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)

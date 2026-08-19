@@ -214,27 +214,13 @@ class BaseTpWorker(ABC):
 
     def diag_es_registry(self, recv_req: DiagESRegistryReqInput):
         from sglang.srt.diag_es import get_diag_es_manager
-        from sglang.srt.diag_es.protocol import (
-            parse_register_payload,
-            validate_registry_request,
-        )
-
-        validate_registry_request(
-            action=recv_req.action,
-            candidate_id=recv_req.candidate_id,
-            effective_model_digest=recv_req.effective_model_digest,
-            serialized_deltas=recv_req.serialized_deltas,
-        )
+        from sglang.srt.diag_es.protocol import parse_register_payload
 
         manager = get_diag_es_manager()
         if recv_req.action == "status":
             return manager.status()
         if recv_req.action == "retire":
             return manager.retire_candidate(recv_req.candidate_id)
-        if recv_req.action != "register":
-            raise ValueError(
-                f"unsupported diagonal-ES registry action: {recv_req.action!r}"
-            )
 
         named_deltas = self._deserialize_own_rank(recv_req.serialized_deltas)
         dense_deltas, grouped_deltas = parse_register_payload(named_deltas)

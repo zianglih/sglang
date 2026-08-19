@@ -4,19 +4,10 @@ from collections.abc import Iterable, Mapping
 
 import torch
 
+from sglang.srt.diag_es.manifest import validate_sha256_digest
+
 _DENSE_PREFIX = "dense_delta:"
 _GROUPED_PREFIX = "grouped_delta:"
-
-
-def validate_effective_model_digest(value: str) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(char not in "0123456789abcdef" for char in value)
-    ):
-        raise ValueError(
-            "effective_model_digest must contain 64 lowercase hex characters"
-        )
 
 
 def _validate_delta_name(name: str, *, kind: str) -> None:
@@ -56,8 +47,7 @@ def validate_registry_request(
             or any(not isinstance(payload, bytes) for payload in serialized_deltas)
         ):
             raise ValueError("register requires serialized diagonal-ES deltas")
-        if effective_model_digest is not None:
-            validate_effective_model_digest(effective_model_digest)
+        validate_sha256_digest("effective_model_digest", effective_model_digest)
         return
     if action == "retire":
         _validate_candidate_id(candidate_id)
@@ -77,19 +67,19 @@ def validate_registry_request(
 
 def prepare_register_payload(
     dense_deltas: Mapping[str, torch.Tensor],
-    grouped_deltas: Mapping[str, torch.Tensor] | None = None,
+    grouped_deltas: Mapping[str, torch.Tensor],
 ) -> list[tuple[str, torch.Tensor]]:
     """Encode the exact named FP32-delta maps for Engine IPC serialization."""
 
     if not isinstance(dense_deltas, Mapping):
         raise TypeError("dense_deltas must be a mapping")
-    if grouped_deltas is not None and not isinstance(grouped_deltas, Mapping):
+    if not isinstance(grouped_deltas, Mapping):
         raise TypeError("grouped_deltas must be a mapping")
     named_deltas: list[tuple[str, torch.Tensor]] = []
     for site_id, delta in dense_deltas.items():
         _validate_delta_name(site_id, kind="dense")
         named_deltas.append((f"{_DENSE_PREFIX}{site_id}", delta))
-    for name, delta in (grouped_deltas or {}).items():
+    for name, delta in grouped_deltas.items():
         _validate_delta_name(name, kind="grouped")
         named_deltas.append((f"{_GROUPED_PREFIX}{name}", delta))
     return named_deltas

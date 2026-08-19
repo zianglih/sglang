@@ -20,7 +20,11 @@ from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
     support_tensor_descriptor,
 )
 from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
-from sglang.srt.diag_es.moe_ops import MoeDeltaBanks, get_moe_delta_banks
+from sglang.srt.diag_es.moe_ops import (
+    EMPTY_MOE_DELTA_BANKS,
+    MoeDeltaBanks,
+    get_moe_delta_banks,
+)
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
@@ -501,7 +505,7 @@ def _fused_moe_kernel_sequence(
     swiglu_limit: Optional[float] = None,
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
-    delta_banks: MoeDeltaBanks = MoeDeltaBanks(),
+    delta_banks: MoeDeltaBanks = EMPTY_MOE_DELTA_BANKS,
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -525,21 +529,11 @@ def _fused_moe_kernel_sequence(
     topk = topk_ids.shape[1]
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
 
-    if delta_banks.has_any:
-        assert delta_banks.token_slots is not None
-
     if delta_banks.fc2_pre is not None:
         # Standalone FC2 pre-steering addresses the activation buffer in
         # original route order. TMA stores that buffer in expert-sorted,
         # padded order, so the two layouts cannot be mixed.
         down_moe_use_tma = False
-
-    if delta_banks.has_post:
-        assert hidden_states.dtype == torch.bfloat16
-        assert w1.dtype == w2.dtype == torch.bfloat16
-        assert not (
-            use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
-        ), "post-accumulator diagonal ES requires unquantized BF16 Triton MoE"
 
     # LoRA hooks consume and update route-major intermediate buffers. The TMA
     # down path keeps those buffers in expert-sorted, block-padded order, which

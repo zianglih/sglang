@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Literal, Mapping
 
 import torch
@@ -19,16 +18,6 @@ class DenseSite:
     site_id: str
     width: int
 
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.site_id, str)
-            or not self.site_id
-            or "\0" in self.site_id
-        ):
-            raise ValueError("dense diagonal-ES site_id must be a non-empty string")
-        if type(self.width) is not int or self.width <= 0:
-            raise ValueError("dense diagonal-ES site width must be positive")
-
 
 @dataclass(frozen=True, slots=True)
 class DiagESManifest:
@@ -37,45 +26,6 @@ class DiagESManifest:
     dense_sites: tuple[DenseSite, ...]
     grouped_delta_shapes: Mapping[str, tuple[int, ...]]
     schema_digest: str
-
-    def __post_init__(self) -> None:
-        if self.schema_id != QWEN3_30B_A3B_SCHEMA_ID:
-            raise ValueError(f"unsupported diagonal-ES schema ID: {self.schema_id!r}")
-        if self.placement not in _SUPPORTED_PLACEMENTS:
-            raise ValueError("diagonal-ES placement must be pre, post, or both")
-        if not isinstance(self.dense_sites, tuple) or any(
-            not isinstance(site, DenseSite) for site in self.dense_sites
-        ):
-            raise TypeError("diagonal-ES dense_sites must be a tuple of DenseSite")
-        dense_ids = [site.site_id for site in self.dense_sites]
-        if len(dense_ids) != len(set(dense_ids)):
-            raise ValueError("diagonal-ES dense site IDs must be unique")
-
-        grouped = dict(self.grouped_delta_shapes)
-        for name, shape in grouped.items():
-            if not isinstance(name, str) or not name or "\0" in name:
-                raise ValueError(
-                    "grouped diagonal-ES delta names must be non-empty strings"
-                )
-            if (
-                not isinstance(shape, tuple)
-                or not shape
-                or any(type(dim) is not int or dim <= 0 for dim in shape)
-            ):
-                raise ValueError(
-                    f"grouped diagonal-ES delta shape for {name!r} must be positive"
-                )
-            grouped[name] = tuple(shape)
-        object.__setattr__(self, "grouped_delta_shapes", MappingProxyType(grouped))
-
-        if (
-            not isinstance(self.schema_digest, str)
-            or len(self.schema_digest) != 64
-            or any(char not in "0123456789abcdef" for char in self.schema_digest)
-        ):
-            raise ValueError(
-                "diagonal-ES schema digest must contain 64 lowercase hex characters"
-            )
 
 
 def _grouped_delta_shapes(
@@ -133,30 +83,6 @@ def _require_attr_value(obj: object, name: str, expected: int) -> None:
         raise ValueError(f"Qwen3 diagonal ES requires {name}={expected}, got {actual}")
 
 
-def _require_bf16_linear(
-    linear: torch.nn.Module,
-    *,
-    path: str,
-    input_size: int,
-    output_size: int,
-) -> None:
-    if getattr(linear, "input_size", None) != input_size:
-        raise ValueError(
-            f"{path}.input_size must be {input_size}, got "
-            f"{getattr(linear, 'input_size', None)}"
-        )
-    if getattr(linear, "output_size", None) != output_size:
-        raise ValueError(
-            f"{path}.output_size must be {output_size}, got "
-            f"{getattr(linear, 'output_size', None)}"
-        )
-    _require_bf16_contiguous_tensor(
-        getattr(linear, "weight", None),
-        path=f"{path}.weight",
-        shape=(output_size, input_size),
-    )
-
-
 def _require_bf16_contiguous_tensor(
     tensor: object, *, path: str, shape: tuple[int, ...]
 ) -> None:
@@ -210,7 +136,6 @@ def register_qwen3_30b_a3b_manifest(
         try:
             qkv = decoder_layer.self_attn.qkv_proj
             out = decoder_layer.self_attn.o_proj
-            router = decoder_layer.mlp.gate
             experts = decoder_layer.mlp.experts
             runner_config = experts.moe_runner_config
         except AttributeError as exc:
@@ -218,65 +143,34 @@ def register_qwen3_30b_a3b_manifest(
                 f"{layer_path} does not match the Qwen3-30B-A3B layer layout"
             ) from exc
 
-        _require_bf16_linear(
-            qkv,
-            path=f"{layer_path}.self_attn.qkv_proj",
-            input_size=2048,
-            output_size=5120,
-        )
-        _require_bf16_linear(
-            out,
-            path=f"{layer_path}.self_attn.o_proj",
-            input_size=4096,
-            output_size=2048,
-        )
-        _require_bf16_contiguous_tensor(
-            getattr(experts, "w13_weight", None),
-            path=f"{layer_path}.mlp.experts.w13_weight",
-            shape=(128, 1536, 2048),
-        )
-        _require_bf16_contiguous_tensor(
-            getattr(experts, "w2_weight", None),
-            path=f"{layer_path}.mlp.experts.w2_weight",
-            shape=(128, 2048, 768),
-        )
-        for obj, name, expected in (
-            (experts, "num_experts", 128),
-            (experts, "num_local_experts", 128),
-            (experts, "hidden_size", 2048),
-            (experts, "intermediate_size_per_partition", 768),
-            (runner_config, "num_experts", 128),
-            (runner_config, "num_local_experts", 128),
-            (runner_config, "hidden_size", 2048),
-            (runner_config, "intermediate_size_per_partition", 768),
-            (runner_config, "layer_id", layer_id),
-            (runner_config, "top_k", 8),
-            (runner_config, "num_fused_shared_experts", 0),
+        for tensor, path, shape in (
+            (qkv.weight, "self_attn.qkv_proj.weight", (5120, 2048)),
+            (out.weight, "self_attn.o_proj.weight", (2048, 4096)),
+            (experts.w13_weight, "mlp.experts.w13_weight", (128, 1536, 2048)),
+            (experts.w2_weight, "mlp.experts.w2_weight", (128, 2048, 768)),
         ):
-            _require_attr_value(obj, name, expected)
+            _require_bf16_contiguous_tensor(
+                tensor, path=f"{layer_path}.{path}", shape=shape
+            )
         if getattr(runner_config, "params_dtype", None) != torch.bfloat16:
             raise ValueError(
                 f"{layer_path}.mlp.experts runner params_dtype must be bfloat16"
             )
 
-        for linear, path in (
-            (qkv, "self_attn.qkv_proj"),
-            (out, "self_attn.o_proj"),
+        for linear, path, input_width, output_width in (
+            (qkv, "self_attn.qkv_proj", 2048, 5120),
+            (out, "self_attn.o_proj", 4096, 2048),
         ):
             linear.es_pre_site_id = None
             linear.es_post_site_id = None
             if placement in ("pre", "both"):
                 site_id = f"{layer_path}.{path}.input"
                 linear.es_pre_site_id = site_id
-                dense_sites.append(DenseSite(site_id, linear.input_size))
+                dense_sites.append(DenseSite(site_id, input_width))
             if placement in ("post", "both"):
                 site_id = f"{layer_path}.{path}.output"
                 linear.es_post_site_id = site_id
-                dense_sites.append(DenseSite(site_id, linear.output_size))
-
-        # Router and LM head remain outside the perturbation schema.
-        router.es_pre_site_id = None
-        router.es_post_site_id = None
+                dense_sites.append(DenseSite(site_id, output_width))
 
     dense_sites_tuple = tuple(dense_sites)
     grouped_shapes = _grouped_delta_shapes(
@@ -300,13 +194,20 @@ def register_qwen3_30b_a3b_manifest(
 
 
 def _validate_digest_identity(
-    name: str, value: str, *, require_hex: bool = False
+    name: str,
+    value: str,
 ) -> None:
     if not isinstance(value, str) or not value.strip() or "\0" in value:
         raise ValueError(f"{name} must be a non-empty string without NUL bytes")
-    if require_hex:
-        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-            raise ValueError(f"{name} must contain 64 lowercase hex characters")
+
+
+def validate_sha256_digest(name: str, value: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{name} must contain 64 lowercase hex characters")
 
 
 def _validate_digest_tensor(name: str, tensor: torch.Tensor) -> torch.Tensor:
@@ -329,19 +230,17 @@ def compute_effective_model_digest(
     schema_id: str,
     schema_digest: str,
     dense_deltas: Mapping[str, torch.Tensor],
-    grouped_deltas: Mapping[str, torch.Tensor] | None = None,
+    grouped_deltas: Mapping[str, torch.Tensor],
 ) -> str:
     """Hash the exact CPU FP32 residual deltas used as the KV namespace."""
 
     _validate_digest_identity("model_artifact_id", model_artifact_id)
     if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
         raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
-    _validate_digest_identity("schema_digest", schema_digest, require_hex=True)
+    validate_sha256_digest("schema_digest", schema_digest)
     if not isinstance(dense_deltas, Mapping):
         raise TypeError("dense_deltas must be a mapping")
-    if grouped_deltas is None:
-        grouped_deltas = {}
-    elif not isinstance(grouped_deltas, Mapping):
+    if not isinstance(grouped_deltas, Mapping):
         raise TypeError("grouped_deltas must be a mapping")
 
     digest = hashlib.sha256()

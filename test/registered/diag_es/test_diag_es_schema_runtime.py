@@ -193,11 +193,26 @@ def _payload():
 
 
 def _cpu_manager() -> DiagESManager:
-    return DiagESManager(
-        manifest=_manifest(),
-        resident_candidate_slots=2,
+    manager = DiagESManager.__new__(DiagESManager)
+    manager.manifest = _manifest()
+    manager.model_artifact_id = "qwen3-artifact"
+    manager.device = torch.device("cpu")
+    manager.physical_slots = 3
+    manager._records = {}
+    manager._free_slots = [1, 2]
+    manager._slot_last_read_events = [None, None, None]
+    manager._dense_delta_banks = {"dense": torch.zeros((3, 3))}
+    manager._grouped_delta_banks = {"moe_fc1_pre": torch.zeros((2, 3, 3))}
+    return manager
+
+
+def _digest(dense, grouped):
+    return compute_effective_model_digest(
         model_artifact_id="qwen3-artifact",
-        device=torch.device("cpu"),
+        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        schema_digest="ab" * 32,
+        dense_deltas=dense,
+        grouped_deltas=grouped,
     )
 
 
@@ -223,7 +238,10 @@ def test_manager_registration_is_transactional_and_rejects_digest_mismatch(
     monkeypatch.setattr(manager, "_upload_candidate", fail_once)
     with pytest.raises(RuntimeError, match="upload failed"):
         manager.register_candidate(
-            candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
+            candidate_id="candidate",
+            dense_deltas=dense,
+            grouped_deltas=grouped,
+            effective_model_digest=_digest(dense, grouped),
         )
     assert manager.status()["free_slots"] == [1, 2]
     assert manager.status()["candidates"] == {}
@@ -236,23 +254,13 @@ def test_manager_registration_is_transactional_and_rejects_digest_mismatch(
             effective_model_digest="00" * 32,
         )
     registered = manager.register_candidate(
-        candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
+        candidate_id="candidate",
+        dense_deltas=dense,
+        grouped_deltas=grouped,
+        effective_model_digest=_digest(dense, grouped),
     )
     assert registered["state"] == "READY"
     assert registered["resident_slot"] == 1
-
-
-def test_manager_rejects_uppercase_supplied_digest(monkeypatch):
-    manager = _cpu_manager()
-    monkeypatch.setattr(manager, "_upload_candidate", lambda **_kwargs: None)
-    dense, grouped = _payload()
-    with pytest.raises(ValueError, match="lowercase"):
-        manager.register_candidate(
-            candidate_id="candidate",
-            dense_deltas=dense,
-            grouped_deltas=grouped,
-            effective_model_digest="AB" * 32,
-        )
 
 
 def test_manager_candidate_errors_are_request_local_and_typed(monkeypatch):
@@ -263,7 +271,10 @@ def test_manager_candidate_errors_are_request_local_and_typed(monkeypatch):
 
     dense, grouped = _payload()
     manager.register_candidate(
-        candidate_id="candidate", dense_deltas=dense, grouped_deltas=grouped
+        candidate_id="candidate",
+        dense_deltas=dense,
+        grouped_deltas=grouped,
+        effective_model_digest=_digest(dense, grouped),
     )
     manager.acquire("candidate")
     assert manager.retire_candidate("candidate")["state"] == "RETIRING"

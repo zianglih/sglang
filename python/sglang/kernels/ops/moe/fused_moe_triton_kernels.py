@@ -779,29 +779,6 @@ def invoke_fused_moe_kernel(
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
-    has_diag_es = diag_es_post_delta is not None
-    assert has_diag_es == (diag_es_token_slots is not None)
-    if has_diag_es:
-        assert A.dtype == torch.bfloat16
-        assert diag_es_token_slots.dtype == torch.int32
-        assert diag_es_token_slots.ndim == 1
-        assert diag_es_token_slots.shape[0] == topk_ids.shape[0]
-        assert diag_es_token_slots.is_contiguous()
-        assert diag_es_token_slots.device == A.device
-        assert router_topk == topk_ids.shape[1]
-    if diag_es_post_delta is not None:
-        assert B.dtype == torch.bfloat16
-        assert compute_type == tl.bfloat16
-        assert not (
-            use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16
-        ), "post-accumulator diagonal ES requires unquantized BF16 Triton MoE"
-        assert diag_es_post_delta.dtype == torch.float32
-        assert diag_es_post_delta.ndim == 3
-        assert diag_es_post_delta.is_contiguous()
-        assert diag_es_post_delta.device == A.device
-        assert diag_es_post_delta.shape[0] == B.shape[0]
-        assert diag_es_post_delta.shape[1] > 0
-        assert diag_es_post_delta.shape[2] == B.shape[1]
 
     if use_fp8_w8a8:
         swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -899,7 +876,6 @@ def invoke_fused_moe_kernel(
         and block_shape is not None
         and block_shape[1] > 0
     ):
-        assert not has_diag_es, "diagonal ES requires the BF16 Triton MoE kernel"
         assert (
             not fuse_sum_all_reduce
         ), "fuse_sum_all_reduce is not supported for GPTQ/AWQ kernels"

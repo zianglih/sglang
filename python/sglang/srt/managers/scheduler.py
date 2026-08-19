@@ -97,6 +97,7 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
+from sglang.srt.diag_es.manager import release_req_candidate
 from sglang.srt.dllm.mixin.scheduler import SchedulerDllmMixin
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -2790,8 +2791,6 @@ class Scheduler(
             and req.priority is not None
             and self.abort_on_priority_when_disabled
         ):
-            from sglang.srt.diag_es.manager import release_req_candidate
-
             release_req_candidate(req)
             abort_req = AbortReq(
                 finished_reason={
@@ -2852,8 +2851,6 @@ class Scheduler(
             ),
             req_to_abort,
         )
-        from sglang.srt.diag_es.manager import release_req_candidate
-
         release_req_candidate(req_to_abort)
         req_to_abort.time_stats.trace_ctx.abort(abort_info={"reason": message})
         return req_to_abort.rid == recv_req.rid
@@ -2881,8 +2878,6 @@ class Scheduler(
                     ),
                     req,
                 )
-                from sglang.srt.diag_es.manager import release_req_candidate
-
                 release_req_candidate(req)
                 deleted_reqs.add(req)
 
@@ -3013,8 +3008,6 @@ class Scheduler(
 
         self.chunked_req = None
         self._pending_chunked_abort_req = None
-        from sglang.srt.diag_es.manager import release_req_candidate
-
         release_req_candidate(req)
         self.ipc_channels.send_to_tokenizer.send_output(AbortReq(rid=req.rid), req)
         logger.debug(f"Abort chunked prefill request. {req.rid=}")
@@ -3358,9 +3351,8 @@ class Scheduler(
                     running_batch.batch_is_full = True
 
             if running_batch.batch_is_full:
-                if (
-                    not self.enable_priority_preemption
-                    or not adder.preempt_to_schedule(req, self.server_args)
+                if not self.enable_priority_preemption or not adder.preempt_to_schedule(
+                    req, self.server_args
                 ):
                     break
 
@@ -3577,8 +3569,6 @@ class Scheduler(
             self.new_token_ratio_tracker.current = new_token_ratio
             for req in reqs_to_abort:
                 abort_reason: FINISH_ABORT = req.to_finish
-                from sglang.srt.diag_es.manager import release_req_candidate
-
                 release_req_candidate(req)
                 self.ipc_channels.send_to_tokenizer.send_output(
                     AbortReq(
@@ -4503,8 +4493,6 @@ class Scheduler(
             # This only works for requests that have not started anything.
             # We still need to send something back to TokenizerManager to clean up the state.
             req = self.waiting_queue.pop(i)
-            from sglang.srt.diag_es.manager import release_req_candidate
-
             release_req_candidate(req)
             if self.enable_hicache_storage:
                 # to release prefetch events associated with the request

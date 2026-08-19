@@ -13,6 +13,7 @@ from typing import (
 
 import torch
 
+from sglang.srt.diag_es.manager import release_req_candidate
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
@@ -103,8 +104,6 @@ class SchedulerBatchResultProcessor:
             req.time_stats.set_decode_prebuilt_finish_time()
             req.update_finish_state()
             if req.finished():
-                from sglang.srt.diag_es.manager import release_req_candidate
-
                 release_req_candidate(req)
                 req.time_stats.set_quick_finish_time()
                 if get_memory().enable_hisparse:
@@ -275,8 +274,6 @@ class SchedulerBatchResultProcessor:
 
                     req.update_finish_state()
                     if req.finished():
-                        from sglang.srt.diag_es.manager import release_req_candidate
-
                         release_req_candidate(req)
                         self._maybe_collect_routed_experts(req)
                         self._maybe_collect_indexer_topk(req)
@@ -1086,8 +1083,6 @@ class SchedulerBatchResultProcessor:
                 release_kv_cache(req, self.tree_cache, is_insert=is_insert)
 
             req.time_stats.set_completion_time()
-            from sglang.srt.diag_es.manager import release_req_candidate
-
             release_req_candidate(req)
 
         self._maybe_collect_customized_info(i, req, logits_output)

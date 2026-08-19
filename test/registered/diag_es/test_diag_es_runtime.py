@@ -22,6 +22,22 @@ from sglang.test.ci.ci_register import register_cuda_ci
 register_cuda_ci(est_time=20, stage="base-b", runner_config="1-gpu-small")
 
 
+def _register(manager, candidate_id, dense_deltas, grouped_deltas):
+    digest = compute_effective_model_digest(
+        model_artifact_id=manager.model_artifact_id,
+        schema_id=manager.manifest.schema_id,
+        schema_digest=manager.manifest.schema_digest,
+        dense_deltas=dense_deltas,
+        grouped_deltas=grouped_deltas,
+    )
+    return manager.register_candidate(
+        candidate_id=candidate_id,
+        dense_deltas=dense_deltas,
+        grouped_deltas=grouped_deltas,
+        effective_model_digest=digest,
+    )
+
+
 def test_effective_digest_hashes_exact_fp32_delta_payload():
     dense = {"site-a": torch.tensor([1e-4, -1e-4], dtype=torch.float32)}
     fc1 = torch.zeros((1, 1, 2), dtype=torch.float32)
@@ -275,10 +291,11 @@ def test_unquantized_linear_apply_and_apply_into_use_dense_delta_hook(width, row
     }
     slots = [0]
     for candidate_id, delta in deltas.items():
-        registered = manager.register_candidate(
-            candidate_id=candidate_id,
-            dense_deltas={site_id: delta},
-            grouped_deltas={},
+        registered = _register(
+            manager,
+            candidate_id,
+            {site_id: delta},
+            {},
         )
         slots.append(registered["resident_slot"])
     output_width = 64
@@ -386,17 +403,19 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
     )
     resident_slots = []
     for candidate in range(2):
-        registered = manager.register_candidate(
-            candidate_id=f"candidate-{candidate}",
-            dense_deltas={
-                pre_site: torch.empty(input_width, dtype=torch.float32).uniform_(
-                    -0.02, 0.02
-                ),
-                post_site: torch.empty(output_width, dtype=torch.float32).uniform_(
-                    -0.03, 0.03
-                ),
-            },
-            grouped_deltas={},
+        dense_deltas = {
+            pre_site: torch.empty(input_width, dtype=torch.float32).uniform_(
+                -0.02, 0.02
+            ),
+            post_site: torch.empty(output_width, dtype=torch.float32).uniform_(
+                -0.03, 0.03
+            ),
+        }
+        registered = _register(
+            manager,
+            f"candidate-{candidate}",
+            dense_deltas,
+            {},
         )
         resident_slots.append(registered["resident_slot"])
     monkeypatch.setattr(
@@ -511,10 +530,7 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
         },
     }
 
-    registered = manager.register_candidate(
-        candidate_id="candidate-a",
-        **payload,
-    )
+    registered = _register(manager, "candidate-a", **payload)
     assert len(registered["effective_model_digest"]) == 64
     slot = registered["resident_slot"]
     manager.acquire("candidate-a")
@@ -522,7 +538,7 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
     with pytest.raises(DiagESCandidateRetiringError):
         manager.acquire("candidate-a")
     with pytest.raises(RuntimeError, match="capacity is exhausted"):
-        manager.register_candidate(candidate_id="candidate-b", **payload)
+        _register(manager, "candidate-b", **payload)
 
     # Existing requests may submit their last read after retirement. The slot
     # is reclaimed only after their ref drops and that read fence completes.
@@ -533,9 +549,4 @@ def test_resident_manager_retire_is_nonblocking_and_backpressures():
     status = manager.status()
     assert "candidate-a" not in status["candidates"]
     assert status["free_slots"] == [slot]
-    assert (
-        manager.register_candidate(candidate_id="candidate-b", **payload)[
-            "resident_slot"
-        ]
-        == slot
-    )
+    assert _register(manager, "candidate-b", **payload)["resident_slot"] == slot

@@ -268,11 +268,8 @@ class DecodeInputBuffers(ForwardInputBuffers):
         ]
 
         if self.es_candidate_slots is not None:
-            assert forward_batch.es_candidate_slots is not None
             dsts.append(self.es_candidate_slots[:raw_num_token])
             srcs.append(forward_batch.es_candidate_slots)
-        else:
-            assert forward_batch.es_candidate_slots is None
 
         if self.ngram_embedding_info is not None:
             ngram_embedding_info = forward_batch.ngram_embedding_info
@@ -448,12 +445,9 @@ class PrefillInputBuffers(ForwardInputBuffers):
         self.positions[:raw_num_tokens].copy_(forward_batch.positions)
         self.out_cache_loc[:raw_num_tokens].copy_(forward_batch.out_cache_loc)
         if self.es_candidate_slots is not None:
-            assert forward_batch.es_candidate_slots is not None
             self.es_candidate_slots[:raw_num_tokens].copy_(
                 forward_batch.es_candidate_slots
             )
-        else:
-            assert forward_batch.es_candidate_slots is None
 
         if self.mamba_track_indices is not None:
             if forward_batch.mamba_track_indices is not None:

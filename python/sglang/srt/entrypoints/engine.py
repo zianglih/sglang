@@ -52,10 +52,7 @@ import torch
 import uvloop
 import zmq
 
-from sglang.srt.diag_es.protocol import (
-    prepare_register_payload,
-    validate_effective_model_digest,
-)
+from sglang.srt.diag_es.protocol import prepare_register_payload
 from sglang.srt.elastic_ep.expert_backup_manager import run_expert_backup_manager
 from sglang.srt.entrypoints.engine_info_bootstrap_server import (
     EngineInfoBootstrapServer,
@@ -1438,8 +1435,8 @@ class Engine(EngineScoreMixin, EngineBase):
         self,
         candidate_id: str,
         dense_deltas: Mapping[str, torch.Tensor],
-        grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
-        effective_model_digest: Optional[str] = None,
+        grouped_deltas: Mapping[str, torch.Tensor],
+        effective_model_digest: str,
     ) -> Dict[str, Any]:
         return self.loop.run_until_complete(
             self.async_register_diag_es_candidate(
@@ -1454,12 +1451,10 @@ class Engine(EngineScoreMixin, EngineBase):
         self,
         candidate_id: str,
         dense_deltas: Mapping[str, torch.Tensor],
-        grouped_deltas: Optional[Mapping[str, torch.Tensor]],
-        effective_model_digest: Optional[str],
+        grouped_deltas: Mapping[str, torch.Tensor],
+        effective_model_digest: str,
     ) -> DiagESRegistryReqInput:
         named_deltas = prepare_register_payload(dense_deltas, grouped_deltas)
-        if effective_model_digest is not None:
-            validate_effective_model_digest(effective_model_digest)
         return DiagESRegistryReqInput(
             action="register",
             candidate_id=candidate_id,
@@ -1477,8 +1472,8 @@ class Engine(EngineScoreMixin, EngineBase):
         self,
         candidate_id: str,
         dense_deltas: Mapping[str, torch.Tensor],
-        grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
-        effective_model_digest: Optional[str] = None,
+        grouped_deltas: Mapping[str, torch.Tensor],
+        effective_model_digest: str,
     ) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_registry(
             self._build_diag_es_register_request(

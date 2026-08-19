@@ -277,9 +277,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         if model_runner.spec_algorithm.is_speculative():
             if self.model_runner.is_draft_worker:
                 # Draft workers can use TARGET_VERIFY mode.
-                if (
-                    not self.model_runner.spec_algorithm.supports_target_verify_for_draft()
-                ):
+                if not self.model_runner.spec_algorithm.supports_target_verify_for_draft():
                     raise RuntimeError("This should not happen")
             self.capture_forward_mode = ForwardMode.TARGET_VERIFY
         elif self.is_dllm:
@@ -423,7 +421,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
                 self.capture()
         except RuntimeError as e:
             raise Exception(
-                f"Capture cuda graph failed: {e}\n" f"{CUDA_GRAPH_CAPTURE_FAILED_MSG}"
+                f"Capture cuda graph failed: {e}\n{CUDA_GRAPH_CAPTURE_FAILED_MSG}"
             )
 
     def _plant_war_read_done_node(self):
@@ -810,7 +808,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         positions = _slot("positions")
         es_candidate_slots = (
             _slot("es_candidate_slots")
-            if registry.has_slot("es_candidate_slots")
+            if self.model_runner.server_args.enable_diag_es
             else None
         )
         encoder_lens = (
@@ -1049,9 +1047,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
 
         # Sanity-check: --debug-cuda-graph requires breakable backend.
         if self.model_runner.server_args.debug_cuda_graph:
-            assert isinstance(
-                self.backend, BreakableCudaGraphBackend
-            ), "Breakable CUDA graph is required for --debug-cuda-graph"
+            assert isinstance(self.backend, BreakableCudaGraphBackend), (
+                "Breakable CUDA graph is required for --debug-cuda-graph"
+            )
 
         forward_batch, attn_backend, pp_proxy_tensors = self.capture_prepare(
             bs, stream_idx=stream_idx, num_tokens=num_tokens
@@ -1195,12 +1193,9 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             self.buffers.input_ids[: self.raw_num_token].copy_(forward_batch.input_ids)
             self.buffers.positions[: self.raw_num_token].copy_(forward_batch.positions)
             if self.buffers.es_candidate_slots is not None:
-                assert forward_batch.es_candidate_slots is not None
                 self.buffers.es_candidate_slots[: self.raw_num_token].copy_(
                     forward_batch.es_candidate_slots
                 )
-            else:
-                assert forward_batch.es_candidate_slots is None
             if (
                 not is_ragged
                 and self.model_runner.spec_algorithm.is_dflash_family()
@@ -1392,7 +1387,6 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             if self.model_runner.is_draft_worker:
                 raise RuntimeError("This should not happen.")
             else:
-
                 capture_mode = (
                     CaptureHiddenMode.NULL
                     if self.model_runner.spec_algorithm.is_standalone()
