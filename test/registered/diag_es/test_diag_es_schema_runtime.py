@@ -101,48 +101,48 @@ def test_qwen2_manifest_rejects_wrong_architecture_shape_or_tp(model, tp_size, m
         register_qwen2_5_1_5b_dense_sites(model, tp_size=tp_size)
 
 
-def test_generic_digest_hashes_empty_grouped_qwen2_payload_with_v2_codec():
-    dense = {"site": torch.ones(3, dtype=torch.bfloat16)}
+def test_generic_digest_hashes_empty_grouped_qwen2_fp32_delta_payload():
+    dense = {"site": torch.zeros(3, dtype=torch.float32)}
     digest = compute_effective_model_digest(
         model_artifact_id="qwen2-local",
         schema_id=QWEN2_5_1_5B_SCHEMA_ID,
         schema_digest="ab" * 32,
-        dense_gates=dense,
-        grouped_gates={},
+        dense_deltas=dense,
+        grouped_deltas={},
     )
     assert len(digest) == 64
     assert digest == compute_effective_model_digest(
         model_artifact_id="qwen2-local",
         schema_id=QWEN2_5_1_5B_SCHEMA_ID,
         schema_digest="ab" * 32,
-        dense_gates=dense,
-        grouped_gates={},
+        dense_deltas=dense,
+        grouped_deltas={},
     )
 
 
 def test_generic_digest_rejects_grouped_and_legacy_expert_conflict():
-    expert = torch.ones((1, 1, 2), dtype=torch.bfloat16)
+    expert = torch.zeros((1, 1, 2), dtype=torch.float32)
     with pytest.raises(ValueError, match="conflict"):
         compute_effective_model_digest(
             base_model_revision="legacy",
             schema_digest="schema",
-            dense_gates={},
-            grouped_gates={"moe_fc1": expert, "moe_fc2": expert},
-            expert_fc1_gates=expert,
-            expert_fc2_gates=expert,
+            dense_deltas={},
+            grouped_deltas={"moe_fc1": expert, "moe_fc2": expert},
+            expert_fc1_deltas=expert,
+            expert_fc2_deltas=expert,
         )
 
 
 def test_digest_rejects_conflicting_legacy_and_generic_artifact_identity():
-    expert = torch.ones((1, 1, 2), dtype=torch.bfloat16)
+    expert = torch.zeros((1, 1, 2), dtype=torch.float32)
     with pytest.raises(ValueError, match="conflict"):
         compute_effective_model_digest(
             base_model_revision="legacy-artifact",
             model_artifact_id="different-artifact",
             schema_digest="schema",
-            dense_gates={},
-            expert_fc1_gates=expert,
-            expert_fc2_gates=expert,
+            dense_deltas={},
+            expert_fc1_deltas=expert,
+            expert_fc2_deltas=expert,
         )
 
 
@@ -215,8 +215,8 @@ def test_dense_manager_accepts_empty_grouped_payload(monkeypatch):
     monkeypatch.setattr(torch.cuda, "stream", lambda _stream: _StreamContext())
     registered = manager.register_candidate(
         candidate_id="candidate",
-        dense_gates={"dense": torch.ones(3, dtype=torch.bfloat16)},
-        grouped_gates={},
+        dense_deltas={"dense": torch.zeros(3, dtype=torch.float32)},
+        grouped_deltas={},
     )
     assert registered["state"] == "READY"
 
@@ -248,23 +248,31 @@ def test_legacy_manager_status_retains_qwen3_fields():
 
 
 def test_register_protocol_serializes_generic_grouped_names():
-    gate = torch.ones(2, dtype=torch.bfloat16)
+    delta = torch.zeros(2, dtype=torch.float32)
     named, digest = prepare_register_payload(
-        {"site": gate}, grouped_gates={"custom": gate}, effective_model_digest="digest"
+        {"site": delta},
+        grouped_deltas={"custom": delta},
+        effective_model_digest="digest",
     )
-    assert dict(named) == {"dense:site": gate, "grouped:custom": gate}
+    assert dict(named) == {
+        "dense_delta:site": delta,
+        "grouped_delta:custom": delta,
+    }
     assert digest == "digest"
 
 
 def test_register_protocol_preserves_legacy_positional_adapter():
-    fc1 = torch.ones(2, dtype=torch.bfloat16)
-    fc2 = torch.ones(3, dtype=torch.bfloat16)
+    fc1 = torch.zeros(2, dtype=torch.float32)
+    fc2 = torch.zeros(3, dtype=torch.float32)
     named, digest = prepare_register_payload({}, fc1, fc2, "legacy-digest")
-    assert dict(named) == {"expert:moe_fc1": fc1, "expert:moe_fc2": fc2}
+    assert dict(named) == {
+        "expert_delta:moe_fc1": fc1,
+        "expert_delta:moe_fc2": fc2,
+    }
     assert digest == "legacy-digest"
 
 
 def test_register_protocol_rejects_grouped_and_expert_keywords():
-    gate = torch.ones(2, dtype=torch.bfloat16)
+    delta = torch.zeros(2, dtype=torch.float32)
     with pytest.raises(ValueError, match="conflict"):
-        prepare_register_payload({}, gate, gate, grouped_gates={})
+        prepare_register_payload({}, delta, delta, grouped_deltas={})

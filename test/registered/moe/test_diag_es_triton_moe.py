@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.diag_es.moe_ops import (
-    apply_moe_fc2_gate_inplace,
+    apply_moe_fc2_delta_inplace,
     materialize_moe_fc1_input,
 )
 from sglang.srt.distributed.parallel_state import (
@@ -59,8 +59,8 @@ class TestDiagEsTritonMoe(CustomTestCase):
         topk_weights,
         topk_ids,
         token_slots,
-        fc1_gate,
-        fc2_gate,
+        fc1_delta,
+        fc2_delta,
     ):
         num_tokens, topk = topk_ids.shape
         intermediate_size = w2.shape[-1]
@@ -74,14 +74,18 @@ class TestDiagEsTritonMoe(CustomTestCase):
             slot = int(token_slots[token])
             for route in range(topk):
                 expert = int(topk_ids[token, route])
-                fc1_input = (hidden_states[token] * fc1_gate[expert, slot]).to(
-                    hidden_states.dtype
-                )
+                hidden_fp32 = hidden_states[token].float()
+                fc1_input = torch.addcmul(
+                    hidden_fp32, hidden_fp32, fc1_delta[expert, slot]
+                ).to(hidden_states.dtype)
                 gate_up = fc1_input @ w13[expert].transpose(0, 1)
                 activated = (
                     F.silu(gate_up[:intermediate_size]) * gate_up[intermediate_size:]
                 ).to(hidden_states.dtype)
-                fc2_input = (activated * fc2_gate[expert, slot]).to(hidden_states.dtype)
+                activated_fp32 = activated.float()
+                fc2_input = torch.addcmul(
+                    activated_fp32, activated_fp32, fc2_delta[expert, slot]
+                ).to(hidden_states.dtype)
                 route_outputs[token, route] = fc2_input @ w2[expert].transpose(0, 1)
 
         return (route_outputs * topk_weights.to(hidden_states.dtype).unsqueeze(-1)).sum(
@@ -144,37 +148,23 @@ class TestDiagEsTritonMoe(CustomTestCase):
             dtype=torch.int32,
         )
 
-        fc1_gate = torch.ones(
+        fc1_delta = torch.zeros(
             (num_experts, physical_slots, hidden_size),
             device="cuda",
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         )
-        fc2_gate = torch.ones(
+        fc2_delta = torch.zeros(
             (num_experts, physical_slots, intermediate_size),
             device="cuda",
-            dtype=torch.bfloat16,
+            dtype=torch.float32,
         )
-        fc1_gate[:, 1:].copy_(
-            (
-                0.65
-                + 0.7
-                * torch.rand(
-                    (num_experts, physical_slots - 1, hidden_size),
-                    device="cuda",
-                    dtype=torch.float32,
-                )
-            ).to(torch.bfloat16)
+        fc1_delta[:, 1:].uniform_(
+            -0.35,
+            0.35,
         )
-        fc2_gate[:, 1:].copy_(
-            (
-                0.45
-                + 1.1
-                * torch.rand(
-                    (num_experts, physical_slots - 1, intermediate_size),
-                    device="cuda",
-                    dtype=torch.float32,
-                )
-            ).to(torch.bfloat16)
+        fc2_delta[:, 1:].uniform_(
+            -0.55,
+            0.55,
         )
 
         def run(mode):
@@ -190,8 +180,8 @@ class TestDiagEsTritonMoe(CustomTestCase):
                     is_gated=True,
                     filter_expert=False,
                     diag_es_token_slots=token_slots,
-                    diag_es_fc1_gate=fc1_gate,
-                    diag_es_fc2_gate=fc2_gate,
+                    diag_es_fc1_delta=fc1_delta,
+                    diag_es_fc2_delta=fc2_delta,
                 )
 
         unfused = run("unfused")
@@ -203,8 +193,8 @@ class TestDiagEsTritonMoe(CustomTestCase):
             topk_weights,
             topk_ids,
             token_slots,
-            fc1_gate,
-            fc2_gate,
+            fc1_delta,
+            fc2_delta,
         )
 
         torch.testing.assert_close(unfused, expected, rtol=0.12, atol=0.02)
@@ -218,10 +208,10 @@ class TestDiagEsTritonMoe(CustomTestCase):
             [[0, 1], [2, -1], [1, 0]], device="cuda", dtype=torch.int32
         )
         token_slots = torch.tensor([0, 2, 1], device="cuda", dtype=torch.int32)
-        fc1_gate = torch.randn((3, 3, 16), device="cuda", dtype=torch.bfloat16)
+        fc1_delta = torch.randn((3, 3, 16), device="cuda", dtype=torch.float32)
 
         fc1_actual = materialize_moe_fc1_input(
-            hidden_states, topk_ids, token_slots, fc1_gate
+            hidden_states, topk_ids, token_slots, fc1_delta
         )
         fc1_expected = torch.empty_like(fc1_actual)
         for route, expert in enumerate(topk_ids.view(-1).tolist()):
@@ -229,26 +219,30 @@ class TestDiagEsTritonMoe(CustomTestCase):
             if expert < 0:
                 fc1_expected[route].zero_()
             else:
-                fc1_expected[route] = (
-                    hidden_states[token] * fc1_gate[expert, int(token_slots[token])]
+                hidden_fp32 = hidden_states[token].float()
+                delta = fc1_delta[expert, int(token_slots[token])]
+                fc1_expected[route] = torch.addcmul(
+                    hidden_fp32, hidden_fp32, delta
                 ).to(hidden_states.dtype)
         torch.testing.assert_close(fc1_actual, fc1_expected, rtol=0, atol=0)
 
         fc2_actual = torch.randn(
             (topk_ids.numel(), 8), device="cuda", dtype=torch.bfloat16
         )
-        fc2_gate = torch.randn((3, 3, 8), device="cuda", dtype=torch.bfloat16)
+        fc2_delta = torch.randn((3, 3, 8), device="cuda", dtype=torch.float32)
         fc2_expected = torch.empty_like(fc2_actual)
         for route, expert in enumerate(topk_ids.view(-1).tolist()):
             token = route // topk_ids.shape[1]
             if expert < 0:
                 fc2_expected[route].zero_()
             else:
-                fc2_expected[route] = (
-                    fc2_actual[route] * fc2_gate[expert, int(token_slots[token])]
+                activation_fp32 = fc2_actual[route].float()
+                delta = fc2_delta[expert, int(token_slots[token])]
+                fc2_expected[route] = torch.addcmul(
+                    activation_fp32, activation_fp32, delta
                 ).to(fc2_actual.dtype)
 
-        apply_moe_fc2_gate_inplace(fc2_actual, topk_ids, token_slots, fc2_gate)
+        apply_moe_fc2_delta_inplace(fc2_actual, topk_ids, token_slots, fc2_delta)
         torch.testing.assert_close(fc2_actual, fc2_expected, rtol=0, atol=0)
 
 

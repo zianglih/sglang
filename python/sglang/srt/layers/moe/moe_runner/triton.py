@@ -122,7 +122,7 @@ class TritonRunnerCore(MoeRunnerCore):
             get_diag_es_moe_inputs,
         )
 
-        diag_es_token_slots, diag_es_fc1_gate, diag_es_fc2_gate = (
+        diag_es_token_slots, diag_es_fc1_delta, diag_es_fc2_delta = (
             get_diag_es_moe_inputs(self.config)
         )
 
@@ -169,8 +169,8 @@ class TritonRunnerCore(MoeRunnerCore):
             hooks=hooks,
             swiglu_limit=self.config.swiglu_limit,
             diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_gate=diag_es_fc1_gate,
-            diag_es_fc2_gate=diag_es_fc2_gate,
+            diag_es_fc1_delta=diag_es_fc1_delta,
+            diag_es_fc2_delta=diag_es_fc2_delta,
         )
 
         return TritonRunnerOutput(hidden_states=out)

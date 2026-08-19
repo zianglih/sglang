@@ -100,14 +100,14 @@ def get_diag_es_moe_inputs(
     if moe_runner_config.es_layer_id is None:
         return None, None, None
 
-    from sglang.srt.diag_es import get_expert_gate_bank
+    from sglang.srt.diag_es import get_expert_delta_bank
     from sglang.srt.model_executor.forward_context import get_forward_context
 
     layer_id = moe_runner_config.es_layer_id
     return (
         get_forward_context().es_candidate_slots,
-        get_expert_gate_bank(layer_id, "moe_fc1"),
-        get_expert_gate_bank(layer_id, "moe_fc2"),
+        get_expert_delta_bank(layer_id, "moe_fc1"),
+        get_expert_delta_bank(layer_id, "moe_fc2"),
     )
 
 
@@ -147,8 +147,8 @@ def inplace_fused_experts(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
-    diag_es_fc1_gate: Optional[torch.Tensor] = None,
-    diag_es_fc2_gate: Optional[torch.Tensor] = None,
+    diag_es_fc1_delta: Optional[torch.Tensor] = None,
+    diag_es_fc2_delta: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -183,8 +183,8 @@ def inplace_fused_experts(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         diag_es_token_slots=diag_es_token_slots,
-        diag_es_fc1_gate=diag_es_fc1_gate,
-        diag_es_fc2_gate=diag_es_fc2_gate,
+        diag_es_fc1_delta=diag_es_fc1_delta,
+        diag_es_fc2_delta=diag_es_fc2_delta,
     )
 
 
@@ -221,8 +221,8 @@ def outplace_fused_experts(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
-    diag_es_fc1_gate: Optional[torch.Tensor] = None,
-    diag_es_fc2_gate: Optional[torch.Tensor] = None,
+    diag_es_fc1_delta: Optional[torch.Tensor] = None,
+    diag_es_fc2_delta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -257,8 +257,8 @@ def outplace_fused_experts(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         diag_es_token_slots=diag_es_token_slots,
-        diag_es_fc1_gate=diag_es_fc1_gate,
-        diag_es_fc2_gate=diag_es_fc2_gate,
+        diag_es_fc1_delta=diag_es_fc1_delta,
+        diag_es_fc2_delta=diag_es_fc2_delta,
     )
 
 
@@ -285,7 +285,7 @@ def fused_experts(
     a1_q: Optional[torch.Tensor] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
-    diag_es_token_slots, diag_es_fc1_gate, diag_es_fc2_gate = get_diag_es_moe_inputs(
+    diag_es_token_slots, diag_es_fc1_delta, diag_es_fc2_delta = get_diag_es_moe_inputs(
         moe_runner_config
     )
     filter_expert = (
@@ -325,8 +325,8 @@ def fused_experts(
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
             diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_gate=diag_es_fc1_gate,
-            diag_es_fc2_gate=diag_es_fc2_gate,
+            diag_es_fc1_delta=diag_es_fc1_delta,
+            diag_es_fc2_delta=diag_es_fc2_delta,
         )
         return hidden_states
     else:
@@ -362,8 +362,8 @@ def fused_experts(
             gate_up_interleaved=moe_runner_config.gate_up_interleaved,
             a1_q=a1_q,
             diag_es_token_slots=diag_es_token_slots,
-            diag_es_fc1_gate=diag_es_fc1_gate,
-            diag_es_fc2_gate=diag_es_fc2_gate,
+            diag_es_fc1_delta=diag_es_fc1_delta,
+            diag_es_fc2_delta=diag_es_fc2_delta,
         )
 
 
@@ -508,8 +508,8 @@ def _fused_moe_kernel_sequence(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
-    diag_es_fc1_gate: Optional[torch.Tensor] = None,
-    diag_es_fc2_gate: Optional[torch.Tensor] = None,
+    diag_es_fc1_delta: Optional[torch.Tensor] = None,
+    diag_es_fc2_delta: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Run the MoE kernel/activation/kernel/combine sequence in a single shot.
 
@@ -589,25 +589,25 @@ def _fused_moe_kernel_sequence(
         dtype=hidden_states.dtype,
     )
 
-    diag_es_gate_mode = None
+    diag_es_delta_mode = None
     fc1_input = a1_q if a1_q is not None else hidden_states
     fc1_a_route_major = False
-    fc1_fused_gate = None
-    if diag_es_fc1_gate is not None:
-        diag_es_gate_mode = envs.SGLANG_DIAG_ES_MOE_GATE_MODE.get()
-        assert diag_es_gate_mode in ("unfused", "fused")
-        if diag_es_gate_mode == "unfused":
+    fc1_fused_delta = None
+    if diag_es_fc1_delta is not None:
+        diag_es_delta_mode = envs.SGLANG_DIAG_ES_MOE_GATE_MODE.get()
+        assert diag_es_delta_mode in ("unfused", "fused")
+        if diag_es_delta_mode == "unfused":
             from sglang.srt.diag_es.moe_ops import materialize_moe_fc1_input
 
             fc1_input = materialize_moe_fc1_input(
                 hidden_states,
                 topk_ids,
                 diag_es_token_slots,
-                diag_es_fc1_gate,
+                diag_es_fc1_delta,
             )
             fc1_a_route_major = True
         else:
-            fc1_fused_gate = diag_es_fc1_gate
+            fc1_fused_delta = diag_es_fc1_delta
 
     invoke_fused_moe_kernel(
         fc1_input,
@@ -636,9 +636,9 @@ def _fused_moe_kernel_sequence(
         filter_expert=filter_expert,
         router_topk=topk,
         a_route_major=fc1_a_route_major,
-        diag_es_gate=fc1_fused_gate,
+        diag_es_delta=fc1_fused_delta,
         diag_es_token_slots=(
-            diag_es_token_slots if diag_es_gate_mode == "fused" else None
+            diag_es_token_slots if diag_es_delta_mode == "fused" else None
         ),
     )
 
@@ -807,14 +807,14 @@ def _fused_moe_kernel_sequence(
 
     del intermediate_cache1
 
-    if diag_es_gate_mode == "unfused":
-        from sglang.srt.diag_es.moe_ops import apply_moe_fc2_gate_inplace
+    if diag_es_delta_mode == "unfused":
+        from sglang.srt.diag_es.moe_ops import apply_moe_fc2_delta_inplace
 
-        apply_moe_fc2_gate_inplace(
+        apply_moe_fc2_delta_inplace(
             intermediate_cache2,
             topk_ids,
             diag_es_token_slots,
-            diag_es_fc2_gate,
+            diag_es_fc2_delta,
         )
 
     intermediate_cache3 = torch.empty(
@@ -868,9 +868,9 @@ def _fused_moe_kernel_sequence(
         filter_expert=filter_expert,
         fuse_sum_all_reduce=use_fused_moe_sum_all_reduce,
         router_topk=topk,
-        diag_es_gate=(diag_es_fc2_gate if diag_es_gate_mode == "fused" else None),
+        diag_es_delta=(diag_es_fc2_delta if diag_es_delta_mode == "fused" else None),
         diag_es_token_slots=(
-            diag_es_token_slots if diag_es_gate_mode == "fused" else None
+            diag_es_token_slots if diag_es_delta_mode == "fused" else None
         ),
     )
 
@@ -994,8 +994,8 @@ def fused_experts_impl(
     gate_up_interleaved: bool = True,
     a1_q: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
-    diag_es_fc1_gate: Optional[torch.Tensor] = None,
-    diag_es_fc2_gate: Optional[torch.Tensor] = None,
+    diag_es_fc1_delta: Optional[torch.Tensor] = None,
+    diag_es_fc2_delta: Optional[torch.Tensor] = None,
 ):
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
@@ -1074,8 +1074,8 @@ def fused_experts_impl(
         gate_up_interleaved=gate_up_interleaved,
         a1_q=a1_q,
         diag_es_token_slots=diag_es_token_slots,
-        diag_es_fc1_gate=diag_es_fc1_gate,
-        diag_es_fc2_gate=diag_es_fc2_gate,
+        diag_es_fc1_delta=diag_es_fc1_delta,
+        diag_es_fc2_delta=diag_es_fc2_delta,
     )
 
 

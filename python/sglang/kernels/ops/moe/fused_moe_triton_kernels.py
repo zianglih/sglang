@@ -336,7 +336,7 @@ def fused_moe_kernel(
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
     add_mask_ptr,
-    diag_es_gate_ptr,
+    diag_es_delta_ptr,
     diag_es_token_slots_ptr,
     # Matrix dimensions
     N,
@@ -562,15 +562,16 @@ def fused_moe_kernel(
 
         if APPLY_DIAG_ES:
             diag_es_k = k_start + offs_k
-            diag_es_gate = tl.load(
-                diag_es_gate_ptr
+            diag_es_delta = tl.load(
+                diag_es_delta_ptr
                 + off_experts * stride_diag_es_ge
                 + diag_es_slot[:, None] * stride_diag_es_gs
                 + diag_es_k[None, :] * stride_diag_es_gk,
                 mask=token_mask[:, None] & (diag_es_k[None, :] < K),
                 other=0.0,
             )
-            a = (a * diag_es_gate).to(compute_type)
+            a_fp32 = a.to(tl.float32)
+            a = tl.fma(a_fp32, diag_es_delta, a_fp32).to(compute_type)
 
         if b_desc is not None:
             b = (
@@ -774,12 +775,15 @@ def invoke_fused_moe_kernel(
     mask_output: bool = False,
     lora_preserve_base: bool = False,
     a_route_major: bool = False,
-    diag_es_gate: Optional[torch.Tensor] = None,
+    diag_es_delta: Optional[torch.Tensor] = None,
     diag_es_token_slots: Optional[torch.Tensor] = None,
 ) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
-    assert (diag_es_gate is None) == (diag_es_token_slots is None)
+    assert (diag_es_delta is None) == (diag_es_token_slots is None)
+    if diag_es_delta is not None:
+        assert A.dtype == torch.bfloat16
+        assert diag_es_delta.dtype == torch.float32
 
     if use_fp8_w8a8:
         swap_ab = should_enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -956,7 +960,7 @@ def invoke_fused_moe_kernel(
             expert_ids,
             num_tokens_post_padded,
             add_output_mask,
-            diag_es_gate,
+            diag_es_delta,
             diag_es_token_slots,
             B.shape[1],
             B.shape[2] - padded_size,
@@ -976,9 +980,9 @@ def invoke_fused_moe_kernel(
             B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
             B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
             B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
-            diag_es_gate.stride(0) if diag_es_gate is not None else 0,
-            diag_es_gate.stride(1) if diag_es_gate is not None else 0,
-            diag_es_gate.stride(2) if diag_es_gate is not None else 0,
+            diag_es_delta.stride(0) if diag_es_delta is not None else 0,
+            diag_es_delta.stride(1) if diag_es_delta is not None else 0,
+            diag_es_delta.stride(2) if diag_es_delta is not None else 0,
             0 if block_shape is None else block_shape[0],
             0 if block_shape is None else block_shape[1],
             MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -998,7 +1002,7 @@ def invoke_fused_moe_kernel(
             FUSE_SUM_ALL_REDUCE=fuse_sum_all_reduce,
             ROUTER_TOPK=router_topk,
             A_ROUTE_MAJOR=a_route_major,
-            APPLY_DIAG_ES=diag_es_gate is not None,
+            APPLY_DIAG_ES=diag_es_delta is not None,
             **config,
         )
 

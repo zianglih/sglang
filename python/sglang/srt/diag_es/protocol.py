@@ -6,37 +6,39 @@ import torch
 
 
 def prepare_register_payload(
-    dense_gates: Mapping[str, torch.Tensor],
-    expert_fc1_gates: Optional[torch.Tensor] = None,
-    expert_fc2_gates: Optional[torch.Tensor] = None,
+    dense_deltas: Mapping[str, torch.Tensor],
+    expert_fc1_deltas: Optional[torch.Tensor] = None,
+    expert_fc2_deltas: Optional[torch.Tensor] = None,
     effective_model_digest: Optional[str] = None,
     *,
-    grouped_gates: Optional[Mapping[str, torch.Tensor]] = None,
+    grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
 ) -> tuple[list[tuple[str, torch.Tensor]], Optional[str]]:
     """Normalize generic and legacy Engine register arguments for serialization."""
 
-    named_gates = [
-        (f"dense:{site_id}", gate) for site_id, gate in dense_gates.items()
+    named_deltas = [
+        (f"dense_delta:{site_id}", delta)
+        for site_id, delta in dense_deltas.items()
     ]
-    if grouped_gates is not None:
-        if expert_fc1_gates is not None or expert_fc2_gates is not None:
-            raise ValueError("grouped_gates conflict with legacy expert gate arguments")
-        named_gates.extend(
-            (f"grouped:{name}", gate) for name, gate in grouped_gates.items()
+    if grouped_deltas is not None:
+        if expert_fc1_deltas is not None or expert_fc2_deltas is not None:
+            raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
+        named_deltas.extend(
+            (f"grouped_delta:{name}", delta)
+            for name, delta in grouped_deltas.items()
         )
-    elif expert_fc1_gates is not None or expert_fc2_gates is not None:
-        if not torch.is_tensor(expert_fc1_gates) or not torch.is_tensor(
-            expert_fc2_gates
+    elif expert_fc1_deltas is not None or expert_fc2_deltas is not None:
+        if not torch.is_tensor(expert_fc1_deltas) or not torch.is_tensor(
+            expert_fc2_deltas
         ):
-            raise ValueError("legacy expert gate arguments must be provided together")
-        named_gates.extend(
+            raise ValueError("legacy expert delta arguments must be provided together")
+        named_deltas.extend(
             (
-                ("expert:moe_fc1", expert_fc1_gates),
-                ("expert:moe_fc2", expert_fc2_gates),
+                ("expert_delta:moe_fc1", expert_fc1_deltas),
+                ("expert_delta:moe_fc2", expert_fc2_deltas),
             )
         )
     if effective_model_digest is not None and not isinstance(
         effective_model_digest, str
     ):
         raise ValueError("effective_model_digest must be a string")
-    return named_gates, effective_model_digest
+    return named_deltas, effective_model_digest

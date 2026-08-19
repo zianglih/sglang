@@ -1763,7 +1763,7 @@ class DiagESRegistryReqInput(BaseReq, kw_only=True):
     action: Literal["register", "retire", "status"]
     candidate_id: Optional[str] = None
     effective_model_digest: Optional[str] = None
-    serialized_gates: Optional[List[bytes]] = None
+    serialized_deltas: Optional[List[bytes]] = None
 
 
 class DiagESRegistryReqOutput(BaseReq, kw_only=True):

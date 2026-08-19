@@ -218,26 +218,26 @@ def compute_effective_model_digest(
     model_artifact_id: Optional[str] = None,
     schema_id: Optional[str] = None,
     schema_digest: str,
-    dense_gates: Mapping[str, torch.Tensor],
-    grouped_gates: Optional[Mapping[str, torch.Tensor]] = None,
-    expert_fc1_gates: Optional[torch.Tensor] = None,
-    expert_fc2_gates: Optional[torch.Tensor] = None,
+    dense_deltas: Mapping[str, torch.Tensor],
+    grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
+    expert_fc1_deltas: Optional[torch.Tensor] = None,
+    expert_fc2_deltas: Optional[torch.Tensor] = None,
 ) -> str:
-    """Hash the actual logical BF16 gate payload used as the KV namespace."""
+    """Hash the exact FP32 residual deltas used as the KV namespace."""
 
-    if grouped_gates is not None and (
-        expert_fc1_gates is not None or expert_fc2_gates is not None
+    if grouped_deltas is not None and (
+        expert_fc1_deltas is not None or expert_fc2_deltas is not None
     ):
-        raise ValueError("grouped_gates conflict with legacy expert gate arguments")
-    if (expert_fc1_gates is None) != (expert_fc2_gates is None):
-        raise ValueError("legacy expert gate arguments must be provided together")
-    legacy_adapter = expert_fc1_gates is not None
+        raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
+    if (expert_fc1_deltas is None) != (expert_fc2_deltas is None):
+        raise ValueError("legacy expert delta arguments must be provided together")
+    legacy_adapter = expert_fc1_deltas is not None
     if legacy_adapter:
-        grouped_gates = {
-            "moe_fc1": expert_fc1_gates,
-            "moe_fc2": expert_fc2_gates,
+        grouped_deltas = {
+            "moe_fc1": expert_fc1_deltas,
+            "moe_fc2": expert_fc2_deltas,
         }
-    grouped_gates = dict(grouped_gates or {})
+    grouped_deltas = dict(grouped_deltas or {})
     if (
         base_model_revision is not None
         and model_artifact_id is not None
@@ -256,31 +256,27 @@ def compute_effective_model_digest(
     )
 
     digest = hashlib.sha256()
-    digest.update(
-        b"diag-es-effective-model-v1\0"
-        if legacy_codec
-        else b"diag-es-effective-model-v2\0"
-    )
+    digest.update(b"diag-es-effective-model-fp32-delta-v3\0")
     digest.update(artifact_id.encode())
     digest.update(b"\0")
     digest.update(schema_digest.encode())
 
     def update_tensor(name: str, tensor: torch.Tensor) -> None:
-        value = tensor.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
+        value = tensor.detach().to(device="cpu", dtype=torch.float32).contiguous()
         digest.update(name.encode())
         digest.update(b"\0")
         digest.update(str(tuple(value.shape)).encode())
-        digest.update(b"\0bf16\0")
+        digest.update(b"\0fp32-delta\0")
         digest.update(value.view(torch.uint8).numpy().tobytes())
 
-    for site_id in sorted(dense_gates):
-        update_tensor(f"dense:{site_id}", dense_gates[site_id])
+    for site_id in sorted(dense_deltas):
+        update_tensor(f"dense:{site_id}", dense_deltas[site_id])
     if legacy_codec:
-        if set(grouped_gates) != {"moe_fc1", "moe_fc2"}:
-            raise ValueError("legacy digest requires moe_fc1 and moe_fc2 grouped gates")
-        update_tensor("expert:moe_fc1", grouped_gates["moe_fc1"])
-        update_tensor("expert:moe_fc2", grouped_gates["moe_fc2"])
+        if set(grouped_deltas) != {"moe_fc1", "moe_fc2"}:
+            raise ValueError("legacy digest requires moe_fc1 and moe_fc2 grouped deltas")
+        update_tensor("expert:moe_fc1", grouped_deltas["moe_fc1"])
+        update_tensor("expert:moe_fc2", grouped_deltas["moe_fc2"])
     else:
-        for gate_name in sorted(grouped_gates):
-            update_tensor(f"grouped:{gate_name}", grouped_gates[gate_name])
+        for delta_name in sorted(grouped_deltas):
+            update_tensor(f"grouped:{delta_name}", grouped_deltas[delta_name])
     return digest.hexdigest()

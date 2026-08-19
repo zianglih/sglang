@@ -1433,25 +1433,25 @@ class Engine(EngineScoreMixin, EngineBase):
     def register_diag_es_candidate(
         self,
         candidate_id: str,
-        dense_gates: Dict[str, torch.Tensor],
-        expert_fc1_gates: Optional[torch.Tensor] = None,
-        expert_fc2_gates: Optional[torch.Tensor] = None,
+        dense_deltas: Dict[str, torch.Tensor],
+        expert_fc1_deltas: Optional[torch.Tensor] = None,
+        expert_fc2_deltas: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
         *,
-        grouped_gates: Optional[Dict[str, torch.Tensor]] = None,
+        grouped_deltas: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
-        named_gates, effective_model_digest = prepare_register_payload(
-            dense_gates,
-            expert_fc1_gates,
-            expert_fc2_gates,
+        named_deltas, effective_model_digest = prepare_register_payload(
+            dense_deltas,
+            expert_fc1_deltas,
+            expert_fc2_deltas,
             effective_model_digest,
-            grouped_gates=grouped_gates,
+            grouped_deltas=grouped_deltas,
         )
         obj = DiagESRegistryReqInput(
             action="register",
             candidate_id=candidate_id,
             effective_model_digest=effective_model_digest,
-            serialized_gates=self._serialize_tensors_per_rank(named_gates, None),
+            serialized_deltas=self._serialize_tensors_per_rank(named_deltas, None),
         )
         result = self.loop.run_until_complete(
             self.tokenizer_manager.diag_es_registry(obj)
@@ -1463,26 +1463,26 @@ class Engine(EngineScoreMixin, EngineBase):
     async def async_register_diag_es_candidate(
         self,
         candidate_id: str,
-        dense_gates: Dict[str, torch.Tensor],
-        expert_fc1_gates: Optional[torch.Tensor] = None,
-        expert_fc2_gates: Optional[torch.Tensor] = None,
+        dense_deltas: Dict[str, torch.Tensor],
+        expert_fc1_deltas: Optional[torch.Tensor] = None,
+        expert_fc2_deltas: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
         *,
-        grouped_gates: Optional[Dict[str, torch.Tensor]] = None,
+        grouped_deltas: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
-        named_gates, effective_model_digest = prepare_register_payload(
-            dense_gates,
-            expert_fc1_gates,
-            expert_fc2_gates,
+        named_deltas, effective_model_digest = prepare_register_payload(
+            dense_deltas,
+            expert_fc1_deltas,
+            expert_fc2_deltas,
             effective_model_digest,
-            grouped_gates=grouped_gates,
+            grouped_deltas=grouped_deltas,
         )
         result = await self.tokenizer_manager.diag_es_registry(
             DiagESRegistryReqInput(
                 action="register",
                 candidate_id=candidate_id,
                 effective_model_digest=effective_model_digest,
-                serialized_gates=self._serialize_tensors_per_rank(named_gates, None),
+                serialized_deltas=self._serialize_tensors_per_rank(named_deltas, None),
             )
         )
         if not result.success:

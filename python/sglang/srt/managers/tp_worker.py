@@ -221,25 +221,25 @@ class BaseTpWorker(ABC):
         if recv_req.action == "retire":
             return manager.retire_candidate(recv_req.candidate_id)
 
-        named_gates = dict(self._deserialize_own_rank(recv_req.serialized_gates))
-        dense_gates = {
-            name.removeprefix("dense:"): tensor
-            for name, tensor in named_gates.items()
-            if name.startswith("dense:")
+        named_deltas = dict(self._deserialize_own_rank(recv_req.serialized_deltas))
+        dense_deltas = {
+            name.removeprefix("dense_delta:"): tensor
+            for name, tensor in named_deltas.items()
+            if name.startswith("dense_delta:")
         }
-        grouped_gates = {
-            name.removeprefix("grouped:"): tensor
-            for name, tensor in named_gates.items()
-            if name.startswith("grouped:")
+        grouped_deltas = {
+            name.removeprefix("grouped_delta:"): tensor
+            for name, tensor in named_deltas.items()
+            if name.startswith("grouped_delta:")
         }
-        expert_fc1_gates = named_gates.get("expert:moe_fc1")
-        expert_fc2_gates = named_gates.get("expert:moe_fc2")
+        expert_fc1_deltas = named_deltas.get("expert_delta:moe_fc1")
+        expert_fc2_deltas = named_deltas.get("expert_delta:moe_fc2")
         return manager.register_candidate(
             candidate_id=recv_req.candidate_id,
-            dense_gates=dense_gates,
-            grouped_gates=grouped_gates or None,
-            expert_fc1_gates=expert_fc1_gates,
-            expert_fc2_gates=expert_fc2_gates,
+            dense_deltas=dense_deltas,
+            grouped_deltas=grouped_deltas or None,
+            expert_fc1_deltas=expert_fc1_deltas,
+            expert_fc2_deltas=expert_fc2_deltas,
             effective_model_digest=recv_req.effective_model_digest,
         )
 

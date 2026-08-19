@@ -92,21 +92,21 @@ class DiagESManager:
             None for _ in range(self.physical_slots)
         ]
 
-        self._dense_gate_banks = {
-            site.site_id: torch.ones(
+        self._dense_delta_banks = {
+            site.site_id: torch.zeros(
                 (
                     self.physical_slots,
                     site.input_width // self.tp_size
                     if self.tp_size > 1 and ".o_proj.input" in site.site_id
                     else site.input_width,
                 ),
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
                 device=device,
             )
             for site in manifest.dense_sites
         }
-        self._grouped_gate_banks = {
-            name: torch.ones(
+        self._grouped_delta_banks = {
+            name: torch.zeros(
                 (
                     *shape[:-1],
                     self.physical_slots,
@@ -114,87 +114,87 @@ class DiagESManager:
                     if name == "moe_fc2" and self.tp_size > 1
                     else shape[-1],
                 ),
-                dtype=torch.bfloat16,
+                dtype=torch.float32,
                 device=device,
             )
             for name, shape in manifest.grouped_gate_shapes.items()
         }
 
-    def get_dense_gate_bank(self, site_id: str) -> torch.Tensor:
-        return self._dense_gate_banks[site_id]
+    def get_dense_delta_bank(self, site_id: str) -> torch.Tensor:
+        return self._dense_delta_banks[site_id]
 
-    def _local_dense_gate(self, site_id: str, gate: torch.Tensor) -> torch.Tensor:
+    def _local_dense_delta(self, site_id: str, delta: torch.Tensor) -> torch.Tensor:
         if self.tp_size == 1 or ".o_proj.input" not in site_id:
-            return gate
-        assert gate.shape[0] % self.tp_size == 0
-        width = gate.shape[0] // self.tp_size
+            return delta
+        assert delta.shape[0] % self.tp_size == 0
+        width = delta.shape[0] // self.tp_size
         start = self.tp_rank * width
-        return gate[start : start + width].contiguous()
+        return delta[start : start + width].contiguous()
 
-    def get_expert_gate_bank(self, layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
-        return self._grouped_gate_banks[kind][layer_id]
+    def get_expert_delta_bank(self, layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
+        return self._grouped_delta_banks[kind][layer_id]
 
-    def get_grouped_gate_bank(self, name: str) -> torch.Tensor:
-        return self._grouped_gate_banks[name]
+    def get_grouped_delta_bank(self, name: str) -> torch.Tensor:
+        return self._grouped_delta_banks[name]
 
-    def _local_grouped_gate(self, name: str, gate: torch.Tensor) -> torch.Tensor:
+    def _local_grouped_delta(self, name: str, delta: torch.Tensor) -> torch.Tensor:
         if name != "moe_fc2" or self.tp_size == 1:
-            return gate
-        assert gate.shape[-1] % self.tp_size == 0
-        width = gate.shape[-1] // self.tp_size
+            return delta
+        assert delta.shape[-1] % self.tp_size == 0
+        width = delta.shape[-1] // self.tp_size
         start = self.tp_rank * width
-        return gate[..., start : start + width].contiguous()
+        return delta[..., start : start + width].contiguous()
 
     def register_candidate(
         self,
         *,
         candidate_id: str,
-        dense_gates: Mapping[str, torch.Tensor],
-        grouped_gates: Optional[Mapping[str, torch.Tensor]] = None,
-        expert_fc1_gates: Optional[torch.Tensor] = None,
-        expert_fc2_gates: Optional[torch.Tensor] = None,
+        dense_deltas: Mapping[str, torch.Tensor],
+        grouped_deltas: Optional[Mapping[str, torch.Tensor]] = None,
+        expert_fc1_deltas: Optional[torch.Tensor] = None,
+        expert_fc2_deltas: Optional[torch.Tensor] = None,
         effective_model_digest: Optional[str] = None,
     ) -> dict[str, Any]:
-        if grouped_gates is not None and (
-            expert_fc1_gates is not None or expert_fc2_gates is not None
+        if grouped_deltas is not None and (
+            expert_fc1_deltas is not None or expert_fc2_deltas is not None
         ):
-            raise ValueError("grouped_gates conflict with legacy expert gate arguments")
-        if (expert_fc1_gates is None) != (expert_fc2_gates is None):
-            raise ValueError("legacy expert gate arguments must be provided together")
-        if expert_fc1_gates is not None:
-            grouped_gates = {
-                "moe_fc1": expert_fc1_gates,
-                "moe_fc2": expert_fc2_gates,
+            raise ValueError("grouped_deltas conflict with legacy expert delta arguments")
+        if (expert_fc1_deltas is None) != (expert_fc2_deltas is None):
+            raise ValueError("legacy expert delta arguments must be provided together")
+        if expert_fc1_deltas is not None:
+            grouped_deltas = {
+                "moe_fc1": expert_fc1_deltas,
+                "moe_fc2": expert_fc2_deltas,
             }
-        grouped_gates = dict(grouped_gates or {})
+        grouped_deltas = dict(grouped_deltas or {})
         expected_dense_sites = {
             site.site_id: site.input_width for site in self.manifest.dense_sites
         }
-        assert set(dense_gates) == set(expected_dense_sites)
+        assert set(dense_deltas) == set(expected_dense_sites)
         for site_id, width in expected_dense_sites.items():
-            gate = dense_gates[site_id]
-            assert gate.device.type == "cpu"
-            assert gate.dtype == torch.bfloat16
-            assert gate.is_contiguous()
-            assert tuple(gate.shape) == (width,)
-        assert set(grouped_gates) == set(self.manifest.grouped_gate_shapes)
+            delta = dense_deltas[site_id]
+            assert delta.device.type == "cpu"
+            assert delta.dtype == torch.float32
+            assert delta.is_contiguous()
+            assert tuple(delta.shape) == (width,)
+        assert set(grouped_deltas) == set(self.manifest.grouped_gate_shapes)
         for name, shape in self.manifest.grouped_gate_shapes.items():
-            gate = grouped_gates[name]
-            assert gate.device.type == "cpu"
-            assert gate.dtype == torch.bfloat16
-            assert gate.is_contiguous()
-            assert tuple(gate.shape) == tuple(shape)
+            delta = grouped_deltas[name]
+            assert delta.device.type == "cpu"
+            assert delta.dtype == torch.float32
+            assert delta.is_contiguous()
+            assert tuple(delta.shape) == tuple(shape)
 
         # The optional caller value is audit metadata only.  The server owns
-        # the cache identity and always derives it from the BF16 payload that
-        # passed the exact target-shape contract above.
+        # the cache identity and always derives it from the FP32 delta payload
+        # that passed the exact target-shape contract above.
         _ = effective_model_digest
         actual_digest = compute_effective_model_digest(
             model_artifact_id=self.model_artifact_id,
             schema_id=self.manifest.schema_id,
             schema_digest=self.manifest.schema_digest,
-            dense_gates=dense_gates,
-            grouped_gates=grouped_gates,
+            dense_deltas=dense_deltas,
+            grouped_deltas=grouped_deltas,
         )
         with self._lock:
             self._reclaim_retired_locked()
@@ -212,15 +212,15 @@ class DiagESManager:
         stream = torch.cuda.Stream(device=self.device)
         with torch.cuda.stream(stream):
             for site in self.manifest.dense_sites:
-                self._dense_gate_banks[site.site_id][slot].copy_(
-                    self._local_dense_gate(
-                        site.site_id, dense_gates[site.site_id]
+                self._dense_delta_banks[site.site_id][slot].copy_(
+                    self._local_dense_delta(
+                        site.site_id, dense_deltas[site.site_id]
                     ),
                     non_blocking=True,
                 )
-            for name, gate in grouped_gates.items():
-                self._grouped_gate_banks[name][..., slot, :].copy_(
-                    self._local_grouped_gate(name, gate), non_blocking=True
+            for name, delta in grouped_deltas.items():
+                self._grouped_delta_banks[name][..., slot, :].copy_(
+                    self._local_grouped_delta(name, delta), non_blocking=True
                 )
         stream.synchronize()
 
@@ -409,12 +409,12 @@ def get_diag_es_manager() -> DiagESManager:
     return _manager
 
 
-def get_expert_gate_bank(layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
-    return get_diag_es_manager().get_expert_gate_bank(layer_id, kind)
+def get_expert_delta_bank(layer_id: int, kind: ExpertGateKind) -> torch.Tensor:
+    return get_diag_es_manager().get_expert_delta_bank(layer_id, kind)
 
 
-def get_grouped_gate_bank(name: str) -> torch.Tensor:
-    return get_diag_es_manager().get_grouped_gate_bank(name)
+def get_grouped_delta_bank(name: str) -> torch.Tensor:
+    return get_diag_es_manager().get_grouped_delta_bank(name)
 
 
 def release_req_candidate(req: Any) -> None:
