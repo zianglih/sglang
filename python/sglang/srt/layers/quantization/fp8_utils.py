@@ -1172,6 +1172,9 @@ def triton_w8a8_block_fp8_linear(
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
+    *,
+    post_delta_bank: Optional[torch.Tensor] = None,
+    candidate_slots: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert input_scale is None
     input_2d = input.view(-1, input.shape[-1])
@@ -1181,9 +1184,17 @@ def triton_w8a8_block_fp8_linear(
         input_2d, block_size[1], column_major_scales=False
     )
     output = w8a8_block_fp8_matmul_triton(
-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input_2d.dtype
+        q_input,
+        weight,
+        x_scale,
+        weight_scale,
+        block_size,
+        output_dtype=input_2d.dtype,
+        bias=bias if post_delta_bank is not None else None,
+        post_delta_bank=post_delta_bank,
+        candidate_slots=candidate_slots,
     )
-    if bias is not None:
+    if bias is not None and post_delta_bank is None:
         output += bias
     return output.to(dtype=input_2d.dtype).view(*output_shape)
 

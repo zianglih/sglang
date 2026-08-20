@@ -929,6 +929,9 @@ def _w8a8_block_fp8_matmul(
     C,
     As,
     Bs,
+    bias,
+    post_delta,
+    candidate_slots,
     # Shape for matmul
     M,
     N,
@@ -947,12 +950,16 @@ def _w8a8_block_fp8_matmul(
     stride_As_k,
     stride_Bs_k,
     stride_Bs_n,
+    stride_delta_s,
+    stride_delta_n,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     needs_masking: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    APPLY_POST_DELTA: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and store the result in output
@@ -999,6 +1006,28 @@ def _w8a8_block_fp8_matmul(
         As_ptrs += scale_step_k * stride_As_k
         Bs_ptrs += scale_step_k * stride_Bs_k
 
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    if HAS_BIAS:
+        bias_values = tl.load(bias + offs_cn, mask=offs_cn < N, other=0.0)
+        accumulator += bias_values[None, :]
+
+    if APPLY_POST_DELTA:
+        row_mask = offs_cm < M
+        slots = tl.load(candidate_slots + offs_cm, mask=row_mask, other=0)
+        delta_ptrs = (
+            post_delta
+            + slots[:, None] * stride_delta_s
+            + offs_cn[None, :] * stride_delta_n
+        )
+        delta = tl.load(delta_ptrs, mask=c_mask, other=0.0)
+        # A and B are DeepSeek-style E4M3 values dequantized with FP32
+        # 1x128/128x128 scales into this FP32 accumulator. Apply the residual
+        # here so the result is rounded only once by the output store.
+        accumulator = tl.fma(accumulator, delta, accumulator)
+
     if C.dtype.element_ty == tl.bfloat16:
         c = accumulator.to(tl.bfloat16)
     elif C.dtype.element_ty == tl.float16:
@@ -1006,10 +1035,7 @@ def _w8a8_block_fp8_matmul(
     else:
         c = accumulator.to(tl.float32)
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = C + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -1021,6 +1047,9 @@ def _w8a8_block_fp8_matmul_unrolledx4(
     C,
     As,
     Bs,
+    bias,
+    post_delta,
+    candidate_slots,
     # Shape for matmul
     M,
     N,
@@ -1039,12 +1068,16 @@ def _w8a8_block_fp8_matmul_unrolledx4(
     stride_As_k,
     stride_Bs_k,
     stride_Bs_n,
+    stride_delta_s,
+    stride_delta_n,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     needs_masking: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    APPLY_POST_DELTA: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and store the result in output
@@ -1176,6 +1209,25 @@ def _w8a8_block_fp8_matmul_unrolledx4(
         As_ptrs += scale_step_k * stride_As_k
         Bs_ptrs += scale_step_k * stride_Bs_k
 
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    if HAS_BIAS:
+        bias_values = tl.load(bias + offs_cn, mask=offs_cn < N, other=0.0)
+        accumulator += bias_values[None, :]
+
+    if APPLY_POST_DELTA:
+        row_mask = offs_cm < M
+        slots = tl.load(candidate_slots + offs_cm, mask=row_mask, other=0)
+        delta_ptrs = (
+            post_delta
+            + slots[:, None] * stride_delta_s
+            + offs_cn[None, :] * stride_delta_n
+        )
+        delta = tl.load(delta_ptrs, mask=c_mask, other=0.0)
+        accumulator = tl.fma(accumulator, delta, accumulator)
+
     if C.dtype.element_ty == tl.bfloat16:
         c = accumulator.to(tl.bfloat16)
     elif C.dtype.element_ty == tl.float16:
@@ -1183,10 +1235,7 @@ def _w8a8_block_fp8_matmul_unrolledx4(
     else:
         c = accumulator.to(tl.float32)
 
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = C + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
@@ -1370,6 +1419,9 @@ def w8a8_block_fp8_matmul_triton(
     Bs: torch.Tensor,
     block_size: List[int],
     output_dtype: torch.dtype = torch.float16,
+    bias: Optional[torch.Tensor] = None,
+    post_delta_bank: Optional[torch.Tensor] = None,
+    candidate_slots: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise quantization.
 
@@ -1382,13 +1434,22 @@ def w8a8_block_fp8_matmul_triton(
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should be 2-dim, e.g., [128, 128].
-        output_dytpe: The dtype of the returned tensor.
+        output_dtype: The dtype of the returned tensor.
+        bias: Optional affine bias, fused before ``post_delta_bank``.
+        post_delta_bank: Optional FP32 residuals with shape ``[slots, N]``.
+        candidate_slots: Per-row indices into ``post_delta_bank``.
 
     Returns:
         torch.Tensor: The result of matmul.
     """
 
     M, N, K, C = prepare_block_fp8_matmul_inputs(A, B, As, Bs, block_size, output_dtype)
+
+    apply_post_delta = post_delta_bank is not None
+    if apply_post_delta != (candidate_slots is not None):
+        raise ValueError(
+            "post_delta_bank and candidate_slots must be provided together"
+        )
 
     block_n, block_k = block_size
 
@@ -1424,6 +1485,9 @@ def w8a8_block_fp8_matmul_triton(
         C,
         As,
         Bs,
+        bias if bias is not None else A,
+        post_delta_bank if post_delta_bank is not None else A,
+        candidate_slots if candidate_slots is not None else A,
         M,
         N,
         K,
@@ -1439,8 +1503,12 @@ def w8a8_block_fp8_matmul_triton(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        post_delta_bank.stride(0) if post_delta_bank is not None else 0,
+        post_delta_bank.stride(1) if post_delta_bank is not None else 0,
         **config,
         needs_masking=needs_masking,
+        HAS_BIAS=bias is not None,
+        APPLY_POST_DELTA=apply_post_delta,
     )
 
     return C

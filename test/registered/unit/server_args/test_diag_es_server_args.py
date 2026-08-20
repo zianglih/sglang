@@ -28,6 +28,8 @@ def _runtime_view(**overrides):
         "moe_a2a_backend": "none",
         "moe_runner_backend": "triton",
         "bf16_gemm_backend": "triton",
+        "fp8_gemm_runner_backend": "auto",
+        "quantization": None,
         "attention_backend": "trtllm_mha",
         "decode_attention_backend": None,
         "prefill_attention_backend": None,
@@ -50,13 +52,41 @@ def _runtime_view(**overrides):
     return SimpleNamespace(**values)
 
 
-def _validate_runtime(view):
-    subject = SimpleNamespace(enable_diag_es=True, _resolved=lambda: view)
+def _validate_runtime(view, *, placement="pre"):
+    subject = SimpleNamespace(
+        enable_diag_es=True,
+        diag_es_placement=placement,
+        _resolved=lambda: view,
+    )
     ServerArgs._handle_diag_es_runtime_contract(subject)
 
 
 def test_diag_es_accepts_only_the_exact_runtime_contract():
     _validate_runtime(_runtime_view())
+
+
+def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
+    _validate_runtime(
+        _runtime_view(quantization="fp8", fp8_gemm_runner_backend="triton"),
+        placement="post",
+    )
+    with pytest.raises(ValueError, match="block-FP8 requires 'post'"):
+        _validate_runtime(
+            _runtime_view(quantization="fp8", fp8_gemm_runner_backend="triton"),
+            placement="pre",
+        )
+    with pytest.raises(ValueError, match="block-FP8 requires 'triton'"):
+        _validate_runtime(
+            _runtime_view(quantization="fp8", fp8_gemm_runner_backend="auto"),
+            placement="post",
+        )
+    with pytest.raises(ValueError, match="requires None or 'fp8'"):
+        _validate_runtime(
+            _runtime_view(
+                quantization="mxfp8", fp8_gemm_runner_backend="triton"
+            ),
+            placement="post",
+        )
 
 
 @pytest.mark.parametrize(

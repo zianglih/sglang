@@ -3738,6 +3738,7 @@ class ServerArgs:
         if not self.enable_diag_es:
             return
         view = self._resolved()
+        quantization = view.quantization
         exact_values = {
             "device": (view.device, "cuda"),
             "nnodes": (view.nnodes, 1),
@@ -3782,6 +3783,23 @@ class ServerArgs:
             for name, (actual, expected) in exact_values.items()
             if actual != expected
         ]
+        if quantization is None:
+            pass
+        elif quantization == "fp8":
+            if self.diag_es_placement != "post":
+                mismatches.append(
+                    f"diag_es_placement={self.diag_es_placement!r} "
+                    "(block-FP8 requires 'post')"
+                )
+            if view.fp8_gemm_runner_backend != "triton":
+                mismatches.append(
+                    f"fp8_gemm_runner_backend={view.fp8_gemm_runner_backend!r} "
+                    "(block-FP8 requires 'triton')"
+                )
+        else:
+            mismatches.append(
+                f"quantization={quantization!r} (requires None or 'fp8')"
+            )
         for name in ("decode_attention_backend", "prefill_attention_backend"):
             actual = getattr(view, name)
             if actual not in (None, "trtllm_mha"):

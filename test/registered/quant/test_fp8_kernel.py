@@ -5,6 +5,7 @@ import torch
 from sglang.kernels.ops.quantization.fp8_kernel import (
     per_token_group_quant_fp8,
     w8a8_block_fp8_matmul,
+    w8a8_block_fp8_matmul_triton,
 )
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
@@ -139,6 +140,105 @@ class TestW8A8BlockFP8Matmul(TestFP8Base):
             output_dtype=self.output_type,
         )
         torch.testing.assert_close(C, C_gt, atol=0.5, rtol=1e-4)
+
+    def test_w8a8_block_fp8_matmul_post_delta(self):
+        if not _is_cuda or torch.cuda.get_device_capability()[0] < 9:
+            return
+
+        A, A_quant, A_scale = self._make_A(
+            M=self.M, K=self.K, group_size=self.group_size, out_dtype=self.quant_type
+        )
+        _, B_quant, B_scale = self._make_B(
+            K=self.K, N=self.N, group_size=self.group_size, out_dtype=self.quant_type
+        )
+        del A
+
+        common = dict(
+            A=A_quant,
+            B=B_quant.T.contiguous(),
+            As=A_scale,
+            Bs=B_scale.T.contiguous(),
+            block_size=[128, 128],
+        )
+        native = w8a8_block_fp8_matmul_triton(
+            **common, output_dtype=self.output_type
+        )
+        slots = torch.arange(self.M, device=device, dtype=torch.int32) % 3
+        zero_delta = torch.zeros(
+            (3, self.N), device=device, dtype=torch.float32
+        )
+        identity = w8a8_block_fp8_matmul_triton(
+            **common,
+            output_dtype=self.output_type,
+            post_delta_bank=zero_delta,
+            candidate_slots=slots,
+        )
+        torch.testing.assert_close(identity, native, rtol=0, atol=0)
+
+        torch.manual_seed(19)
+        bias = torch.randn(self.N, device=device, dtype=torch.bfloat16) / 10
+        delta = torch.randn((3, self.N), device=device, dtype=torch.float32) / 100
+        accumulator = w8a8_block_fp8_matmul_triton(
+            **common, output_dtype=torch.float32, bias=bias
+        )
+        actual = w8a8_block_fp8_matmul_triton(
+            **common,
+            output_dtype=self.output_type,
+            bias=bias,
+            post_delta_bank=delta,
+            candidate_slots=slots,
+        )
+        expected = torch.addcmul(accumulator, accumulator, delta[slots]).to(
+            self.output_type
+        )
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-2)
+
+        for graph_m in (1, 17, 128):
+            graph_a = A_quant[:graph_m].clone()
+            graph_as = A_scale[:graph_m].clone()
+            graph_slots = slots[:graph_m].clone()
+            graph_delta = delta.clone()
+            graph_common = {
+                **common,
+                "A": graph_a,
+                "As": graph_as,
+            }
+
+            # Production warms every graph bucket before capture.
+            w8a8_block_fp8_matmul_triton(
+                **graph_common,
+                output_dtype=self.output_type,
+                bias=bias,
+                post_delta_bank=graph_delta,
+                candidate_slots=graph_slots,
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = w8a8_block_fp8_matmul_triton(
+                    **graph_common,
+                    output_dtype=self.output_type,
+                    bias=bias,
+                    post_delta_bank=graph_delta,
+                    candidate_slots=graph_slots,
+                )
+
+            graph_a.copy_((-graph_a.float()).to(graph_a.dtype))
+            graph_slots.copy_((graph_slots + 1) % 3)
+            graph_delta.mul_(0.5)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            graph_accumulator = w8a8_block_fp8_matmul_triton(
+                **graph_common, output_dtype=torch.float32, bias=bias
+            )
+            expected = torch.addcmul(
+                graph_accumulator,
+                graph_accumulator,
+                graph_delta[graph_slots],
+            ).to(self.output_type)
+            torch.testing.assert_close(captured, expected, rtol=2e-3, atol=2e-2)
 
 
 if __name__ == "__main__":

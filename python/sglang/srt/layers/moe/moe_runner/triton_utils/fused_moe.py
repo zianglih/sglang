@@ -522,7 +522,9 @@ def _fused_moe_kernel_sequence(
     Pre-GEMM diagonal ES runs in standalone FP32-FMA pointwise kernels and
     rounds the result once to BF16 before each expert GEMM. Post-GEMM deltas run
     in the GEMM epilogue while its accumulator is FP32, after bias and before
-    router weighting and the existing BF16 store.
+    router weighting and the existing BF16 store. DeepSeek-style block FP8 uses
+    post placement only; its FP32 1x128 activation and 128x128 weight scales are
+    applied during accumulation before this shared epilogue.
     """
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape

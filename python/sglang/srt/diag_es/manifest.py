@@ -83,17 +83,55 @@ def _require_attr_value(obj: object, name: str, expected: int) -> None:
         raise ValueError(f"Qwen3 diagonal ES requires {name}={expected}, got {actual}")
 
 
-def _require_bf16_contiguous_tensor(
-    tensor: object, *, path: str, shape: tuple[int, ...]
+def _require_contiguous_tensor(
+    tensor: object,
+    *,
+    path: str,
+    shape: tuple[int, ...],
+    dtype: torch.dtype,
 ) -> None:
     if not torch.is_tensor(tensor):
         raise TypeError(f"{path} must be a tensor")
-    if tensor.dtype != torch.bfloat16:
-        raise ValueError(f"{path} must be bfloat16")
+    if tensor.dtype != dtype:
+        raise ValueError(f"{path} must have dtype {dtype}")
     if tuple(tensor.shape) != shape:
         raise ValueError(f"{path} must have shape {shape}, got {tuple(tensor.shape)}")
     if not tensor.is_contiguous():
         raise ValueError(f"{path} must be contiguous")
+
+
+def _is_deepseek_block_fp8_model(
+    model: torch.nn.Module, *, placement: DiagESPlacement
+) -> bool:
+    quant_config = getattr(model, "quant_config", None)
+    if quant_config is None:
+        return False
+    if placement != "post":
+        raise ValueError("block-FP8 diagonal ES supports post placement only")
+    expected = {
+        "is_checkpoint_fp8_serialized": True,
+        "activation_scheme": "dynamic",
+        "weight_block_size": [128, 128],
+        "use_mxfp8": False,
+        "is_fp4_experts": False,
+    }
+    mismatches = [
+        f"{name}={getattr(quant_config, name, None)!r} (requires {value!r})"
+        for name, value in expected.items()
+        if getattr(quant_config, name, None) != value
+    ]
+    if quant_config.__class__.__name__ != "Fp8Config":
+        mismatches.append(
+            f"quant_config={quant_config.__class__.__name__!r} (requires 'Fp8Config')"
+        )
+    if mismatches:
+        raise ValueError(
+            "block-FP8 diagonal ES requires serialized DeepSeek-style E4M3 "
+            "weights with FP32 128x128 scales and dynamic FP32 1x128 "
+            "activation scales: "
+            + ", ".join(mismatches)
+        )
+    return True
 
 
 def register_qwen3_30b_a3b_manifest(
@@ -107,8 +145,7 @@ def register_qwen3_30b_a3b_manifest(
         raise ValueError("diagonal-ES placement must be pre, post, or both")
     if model.__class__.__name__ != "Qwen3MoeForCausalLM":
         raise TypeError("Qwen3 diagonal ES requires Qwen3MoeForCausalLM")
-    if getattr(model, "quant_config", None) is not None:
-        raise ValueError("Qwen3 diagonal ES requires unquantized BF16 weights")
+    block_fp8 = _is_deepseek_block_fp8_model(model, placement=placement)
     if not hasattr(model, "config") or not hasattr(model, "model"):
         raise TypeError("Qwen3 diagonal ES requires a loaded Qwen3 MoE model")
 
@@ -143,15 +180,61 @@ def register_qwen3_30b_a3b_manifest(
                 f"{layer_path} does not match the Qwen3-30B-A3B layer layout"
             ) from exc
 
+        weight_dtype = torch.float8_e4m3fn if block_fp8 else torch.bfloat16
         for tensor, path, shape in (
             (qkv.weight, "self_attn.qkv_proj.weight", (5120, 2048)),
             (out.weight, "self_attn.o_proj.weight", (2048, 4096)),
             (experts.w13_weight, "mlp.experts.w13_weight", (128, 1536, 2048)),
             (experts.w2_weight, "mlp.experts.w2_weight", (128, 2048, 768)),
         ):
-            _require_bf16_contiguous_tensor(
-                tensor, path=f"{layer_path}.{path}", shape=shape
+            _require_contiguous_tensor(
+                tensor,
+                path=f"{layer_path}.{path}",
+                shape=shape,
+                dtype=weight_dtype,
             )
+        if block_fp8:
+            for tensor, path, shape in (
+                (
+                    qkv.weight_scale_inv,
+                    "self_attn.qkv_proj.weight_scale_inv",
+                    (40, 16),
+                ),
+                (
+                    out.weight_scale_inv,
+                    "self_attn.o_proj.weight_scale_inv",
+                    (16, 32),
+                ),
+                (
+                    experts.w13_weight_scale_inv,
+                    "mlp.experts.w13_weight_scale_inv",
+                    (128, 12, 16),
+                ),
+                (
+                    experts.w2_weight_scale_inv,
+                    "mlp.experts.w2_weight_scale_inv",
+                    (128, 16, 6),
+                ),
+            ):
+                _require_contiguous_tensor(
+                    tensor,
+                    path=f"{layer_path}.{path}",
+                    shape=shape,
+                    dtype=torch.float32,
+                )
+            if any(
+                value is not None
+                for value in (
+                    getattr(qkv, "input_scale", None),
+                    getattr(out, "input_scale", None),
+                    getattr(experts, "w13_input_scale", None),
+                    getattr(experts, "w2_input_scale", None),
+                )
+            ):
+                raise ValueError(
+                    f"{layer_path} block-FP8 activations must use dynamic "
+                    "per-token-group scales"
+                )
         if getattr(runner_config, "params_dtype", None) != torch.bfloat16:
             raise ValueError(
                 f"{layer_path}.mlp.experts runner params_dtype must be bfloat16"

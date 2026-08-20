@@ -27,22 +27,45 @@ register_cpu_ci(est_time=2, suite="base-a-test-cpu")
 
 
 class _Linear:
-    def __init__(self, input_size: int, output_size: int, *, dtype=torch.bfloat16):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        dtype=torch.bfloat16,
+        block_fp8=False,
+    ):
         self.input_size = input_size
         self.output_size = output_size
         self.weight = torch.empty((output_size, input_size), dtype=dtype, device="meta")
         self.es_pre_site_id = None
         self.es_post_site_id = None
+        if block_fp8:
+            self.weight_scale_inv = torch.empty(
+                (output_size // 128, input_size // 128),
+                dtype=torch.float32,
+                device="meta",
+            )
+            self.input_scale = None
 
 
 class _Experts:
-    def __init__(self, layer_id: int, *, dtype=torch.bfloat16):
+    def __init__(self, layer_id: int, *, dtype=torch.bfloat16, block_fp8=False):
         self.num_experts = 128
         self.num_local_experts = 128
         self.hidden_size = 2048
         self.intermediate_size_per_partition = 768
         self.w13_weight = torch.empty((128, 1536, 2048), dtype=dtype, device="meta")
         self.w2_weight = torch.empty((128, 2048, 768), dtype=dtype, device="meta")
+        if block_fp8:
+            self.w13_weight_scale_inv = torch.empty(
+                (128, 12, 16), dtype=torch.float32, device="meta"
+            )
+            self.w2_weight_scale_inv = torch.empty(
+                (128, 16, 6), dtype=torch.float32, device="meta"
+            )
+            self.w13_input_scale = None
+            self.w2_input_scale = None
         self.moe_runner_config = SimpleNamespace(
             num_experts=128,
             num_local_experts=128,
@@ -51,13 +74,30 @@ class _Experts:
             layer_id=layer_id,
             top_k=8,
             num_fused_shared_experts=0,
-            params_dtype=dtype,
+            params_dtype=torch.bfloat16 if block_fp8 else dtype,
         )
 
 
+class Fp8Config:
+    is_checkpoint_fp8_serialized = True
+    activation_scheme = "dynamic"
+    weight_block_size = [128, 128]
+    use_mxfp8 = False
+    is_fp4_experts = False
+
+
 class Qwen3MoeForCausalLM:
-    def __init__(self, *, num_layers=48, hidden_size=2048, dtype=torch.bfloat16):
-        self.quant_config = None
+    def __init__(
+        self,
+        *,
+        num_layers=48,
+        hidden_size=2048,
+        dtype=torch.bfloat16,
+        block_fp8=False,
+    ):
+        self.quant_config = Fp8Config() if block_fp8 else None
+        if block_fp8:
+            dtype = torch.float8_e4m3fn
         self.config = SimpleNamespace(
             num_hidden_layers=num_layers,
             hidden_size=hidden_size,
@@ -72,12 +112,18 @@ class Qwen3MoeForCausalLM:
             layers=[
                 SimpleNamespace(
                     self_attn=SimpleNamespace(
-                        qkv_proj=_Linear(2048, 5120, dtype=dtype),
-                        o_proj=_Linear(4096, 2048, dtype=dtype),
+                        qkv_proj=_Linear(
+                            2048, 5120, dtype=dtype, block_fp8=block_fp8
+                        ),
+                        o_proj=_Linear(
+                            4096, 2048, dtype=dtype, block_fp8=block_fp8
+                        ),
                     ),
                     mlp=SimpleNamespace(
                         gate=_Linear(2048, 128, dtype=dtype),
-                        experts=_Experts(layer_id, dtype=dtype),
+                        experts=_Experts(
+                            layer_id, dtype=dtype, block_fp8=block_fp8
+                        ),
                     ),
                 )
                 for layer_id in range(num_layers)
@@ -143,12 +189,36 @@ def test_qwen3_v2_manifest_exact_contract(
     assert not hasattr(model.model.layers[0].self_attn.qkv_proj, "es_pre_site_width")
 
 
+def test_qwen3_v2_manifest_accepts_only_post_deepseek_block_fp8():
+    model = Qwen3MoeForCausalLM(block_fp8=True)
+    manifest = register_qwen3_30b_a3b_manifest(model, placement="post")
+    assert manifest.schema_digest == (
+        "7502d6adee8003103476e4faf4bf9f3bef2ed19bf4a1a8bfd8e5e011da5b3342"
+    )
+    with pytest.raises(ValueError, match="supports post placement only"):
+        register_qwen3_30b_a3b_manifest(model, placement="pre")
+
+
+def test_qwen3_v2_manifest_rejects_mxfp8_and_non_fp32_block_scales():
+    model = Qwen3MoeForCausalLM(block_fp8=True)
+    model.quant_config.use_mxfp8 = True
+    with pytest.raises(ValueError, match="use_mxfp8=True"):
+        register_qwen3_30b_a3b_manifest(model, placement="post")
+
+    model = Qwen3MoeForCausalLM(block_fp8=True)
+    model.model.layers[0].self_attn.qkv_proj.weight_scale_inv = torch.empty(
+        (40, 16), dtype=torch.uint8, device="meta"
+    )
+    with pytest.raises(ValueError, match="must have dtype torch.float32"):
+        register_qwen3_30b_a3b_manifest(model, placement="post")
+
+
 @pytest.mark.parametrize(
     ("model", "match"),
     [
         (Qwen3MoeForCausalLM(num_layers=47), "num_hidden_layers"),
         (Qwen3MoeForCausalLM(hidden_size=1024), "hidden_size"),
-        (Qwen3MoeForCausalLM(dtype=torch.float16), "bfloat16"),
+        (Qwen3MoeForCausalLM(dtype=torch.float16), "torch.bfloat16"),
         (SimpleNamespace(), "Qwen3MoeForCausalLM"),
     ],
 )

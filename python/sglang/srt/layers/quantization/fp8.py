@@ -65,6 +65,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     normalize_e4m3fn_to_e4m3fnuz,
     requant_block_scale_ue8m0_for_deepgemm,
     resolve_mxfp8_dense_gemm_backend,
+    triton_w8a8_block_fp8_linear,
 )
 from sglang.srt.layers.quantization.kv_cache import BaseKVCacheMethod
 from sglang.srt.layers.quantization.marlin_utils_fp8 import prepare_fp8_layer_for_marlin
@@ -960,6 +961,22 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        post_delta_bank = layer.es_post_delta_bank
+        if post_delta_bank is not None:
+            from sglang.srt.diag_es.ops import get_diag_es_post_inputs
+
+            post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
+            return triton_w8a8_block_fp8_linear(
+                input=x,
+                weight=layer.weight,
+                block_size=self.weight_block_size,
+                weight_scale=layer.weight_scale_inv,
+                input_scale=None,
+                bias=bias,
+                post_delta_bank=post_delta_bank,
+                candidate_slots=candidate_slots,
+            )
+
         if self.use_marlin:
             return torch.ops.sglang.apply_fp8_marlin_linear(
                 input=x,

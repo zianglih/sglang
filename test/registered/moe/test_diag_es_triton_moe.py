@@ -5,6 +5,9 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
+from sglang.kernels.ops.quantization.fp8_kernel import (
+    sglang_per_token_group_quant_fp8,
+)
 from sglang.srt.diag_es.moe_ops import (
     MoeDeltaBanks,
     apply_moe_fc2_pre_delta_inplace,
@@ -24,7 +27,26 @@ from sglang.srt.server_args import ServerArgs, set_global_server_args_for_schedu
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import CustomTestCase, find_available_port
 
-register_cuda_ci(est_time=15, stage="base-b", runner_config="1-gpu-small")
+register_cuda_ci(est_time=30, stage="base-b", runner_config="1-gpu-small")
+
+
+def _quantize_block_fp8(weight: torch.Tensor, block_size: int = 128):
+    """Quantize [E, N, K] with DeepSeek-style FP32 128x128 scales."""
+
+    num_experts, n, k = weight.shape
+    blocks = weight.float().view(
+        num_experts,
+        n // block_size,
+        block_size,
+        k // block_size,
+        block_size,
+    )
+    scales = blocks.abs().amax(dim=(2, 4), keepdim=True).clamp_min(1e-6) / 448.0
+    quantized = (blocks / scales).clamp(-448, 448).reshape_as(weight)
+    return (
+        quantized.to(torch.float8_e4m3fn).contiguous(),
+        scales.squeeze(4).squeeze(2).contiguous(),
+    )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "Diag ES Triton MoE needs CUDA")
@@ -406,6 +428,100 @@ class TestDiagEsTritonMoe(CustomTestCase):
         )
 
         torch.testing.assert_close(identity, baseline, rtol=0, atol=0)
+
+    def test_block_fp8_post_only_uses_fp32_scales_and_preserves_zero_identity(self):
+        torch.manual_seed(20260822)
+        num_tokens, hidden_size, intermediate_size = 7, 256, 128
+        num_experts, physical_slots = 3, 4
+        hidden_states = torch.randn(
+            (num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16
+        )
+        _, activation_scale = sglang_per_token_group_quant_fp8(hidden_states, 128)
+        self.assertEqual(activation_scale.dtype, torch.float32)
+        self.assertEqual(tuple(activation_scale.shape), (num_tokens, 2))
+        w13, w13_scale = _quantize_block_fp8(
+            torch.randn(
+                (num_experts, 2 * intermediate_size, hidden_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.04
+        )
+        w2, w2_scale = _quantize_block_fp8(
+            torch.randn(
+                (num_experts, hidden_size, intermediate_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.04
+        )
+        self.assertEqual(w13_scale.dtype, torch.float32)
+        self.assertEqual(w2_scale.dtype, torch.float32)
+        self.assertEqual(tuple(w13_scale.shape), (num_experts, 2, 2))
+        self.assertEqual(tuple(w2_scale.shape), (num_experts, 2, 1))
+
+        topk_ids = torch.tensor(
+            [[0], [1], [2], [1], [0], [2], [1]],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        topk_weights = torch.rand(
+            (num_tokens, 1), device="cuda", dtype=torch.float32
+        ).contiguous()
+        token_slots = torch.tensor(
+            [0, 1, 2, 3, 1, 2, 0], device="cuda", dtype=torch.int32
+        )
+        fc1_post = torch.zeros(
+            (num_experts, physical_slots, 2 * intermediate_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        fc2_post = torch.zeros(
+            (num_experts, physical_slots, hidden_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
+
+        def run(fc1_delta=None, fc2_delta=None):
+            return fused_experts_impl(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation="silu",
+                is_gated=True,
+                use_fp8_w8a8=True,
+                w1_scale=w13_scale,
+                w2_scale=w2_scale,
+                block_shape=[128, 128],
+                filter_expert=False,
+                diag_es_token_slots=token_slots,
+                diag_es_fc1_post=fc1_delta,
+                diag_es_fc2_post=fc2_delta,
+            )
+
+        baseline = run()
+        identity = run(fc1_post, fc2_post)
+        torch.testing.assert_close(identity, baseline, rtol=0, atol=0)
+
+        # Exercise the gate-up epilogue independently. MoE rows do not mix, so
+        # changing one resident slot must leave every other token bit-identical.
+        fc1_post[:, 2].fill_(0.25)
+        gate_up_steered = run(fc1_delta=fc1_post)
+        unaffected = token_slots != 2
+        affected = token_slots == 2
+        torch.testing.assert_close(
+            gate_up_steered[unaffected], baseline[unaffected], rtol=0, atol=0
+        )
+        self.assertFalse(torch.equal(gate_up_steered[affected], baseline[affected]))
+
+        # Delta=1 doubles the FP32 FC2 accumulator before router weighting and
+        # BF16 conversion, so the top-k=1 output must be exactly 2x baseline.
+        fc2_post.fill_(1.0)
+        doubled = run(fc2_delta=fc2_post)
+        torch.testing.assert_close(doubled, baseline * 2, rtol=0, atol=0)
 
     def test_both_delta_cuda_graph_observes_live_slots_and_banks(self):
         torch.manual_seed(20260821)

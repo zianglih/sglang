@@ -15,6 +15,48 @@ from sglang.test.test_utils import CustomTestCase
 register_cuda_ci(est_time=12, stage="base-b", runner_config="1-gpu-large")
 
 
+class TestFp8DiagESDenseDispatch(unittest.TestCase):
+    @staticmethod
+    def _method_and_layer():
+        import sglang.srt.layers.quantization.fp8 as native_fp8
+
+        method = native_fp8.Fp8LinearMethod.__new__(native_fp8.Fp8LinearMethod)
+        method.use_marlin = False
+        method.use_mxfp8 = False
+        method.block_quant = True
+        method.weight_block_size = [128, 128]
+
+        layer = SimpleNamespace(
+            es_pre_delta_bank=None,
+            es_post_delta_bank=torch.empty((2, 128), dtype=torch.float32),
+            weight=torch.empty((128, 128), dtype=torch.float8_e4m3fn),
+            weight_scale_inv=torch.empty((1, 1), dtype=torch.float32),
+        )
+        return native_fp8, method, layer
+
+    def test_post_delta_is_forwarded_only_to_triton_block_fp8(self):
+        native_fp8, method, layer = self._method_and_layer()
+        x = torch.empty((4, 128), dtype=torch.bfloat16)
+        slots = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+        expected = torch.empty((4, 128), dtype=torch.bfloat16)
+
+        with patch.object(
+            native_fp8, "triton_w8a8_block_fp8_linear", return_value=expected
+        ) as triton_linear, patch(
+            "sglang.srt.diag_es.ops.get_diag_es_post_inputs",
+            return_value=(layer.es_post_delta_bank, slots),
+        ):
+            actual = method.apply(layer, x)
+
+        self.assertIs(actual, expected)
+        self.assertIs(
+            triton_linear.call_args.kwargs["post_delta_bank"],
+            layer.es_post_delta_bank,
+        )
+        self.assertIs(triton_linear.call_args.kwargs["candidate_slots"], slots)
+        self.assertIsNone(triton_linear.call_args.kwargs["input_scale"])
+
+
 class TestInverseTransformScaleUe8m0(CustomTestCase):
     def test_round_trip(self):
         for _ in range(100):

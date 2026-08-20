@@ -625,6 +625,9 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (diag_es_n[None, :] < N),
             other=0.0,
         )
+        # For DeepSeek-style block FP8, the 1x128 activation and 128x128
+        # weight scales have already been applied to this FP32 accumulator.
+        # Steering here adds no FP8/UE8M0 conversion or requantization.
         accumulator = tl.fma(accumulator, diag_es_delta, accumulator)
 
     if MUL_ROUTED_WEIGHT:
