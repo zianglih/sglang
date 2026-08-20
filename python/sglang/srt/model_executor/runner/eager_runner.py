@@ -135,7 +135,7 @@ class EagerRunner(BaseRunner):
                 torch.int64 if torch.device(mr.device).type == "cpu" else torch.int32
             ),
             dp_size=sa.dp_size,
-            enable_diag_es=sa.enable_diag_es,
+            enable_diag_es=mr.diag_es_enabled,
         )
         # Eager has no capture step, so warm up here (run-once via mr._kernel_warmed_up).
         self.warmup()

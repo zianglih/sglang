@@ -375,7 +375,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             num_tokens_per_req=self.captured_req_width,
             cache_loc_dtype=self._cache_loc_dtype(),
             enable_mamba_track=enable_mamba_track,
-            enable_diag_es=self.model_runner.server_args.enable_diag_es,
+            enable_diag_es=self.model_runner.diag_es_enabled,
             ne_token_table=(
                 model_runner.ngram_embedding_manager.table
                 if self.use_ngram_embedding
@@ -408,7 +408,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
             enable_prefill_cp=self.enable_prefill_cp,
             require_mlp_tp_gather=self.require_mlp_tp_gather,
             dp_size=self.dp_size,
-            enable_diag_es=self.model_runner.server_args.enable_diag_es,
+            enable_diag_es=self.model_runner.diag_es_enabled,
             source=self.buffers,
         )
 
@@ -807,9 +807,7 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
         out_cache_loc = _slot("out_cache_loc")
         positions = _slot("positions")
         es_candidate_slots = (
-            _slot("es_candidate_slots")
-            if self.model_runner.server_args.enable_diag_es
-            else None
+            _slot("es_candidate_slots") if self.model_runner.diag_es_enabled else None
         )
         encoder_lens = (
             _slot("encoder_lens") if registry.has_slot("encoder_lens") else None

@@ -303,7 +303,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             hidden_size=self.model_runner.model_config.hidden_size,
             dtype=self.model_runner.dtype,
             enable_mamba_track=self.mamba_track_enabled,
-            enable_diag_es=self.model_runner.server_args.enable_diag_es,
+            enable_diag_es=self.model_runner.diag_es_enabled,
         )
         self.buffers.share_buffers()
         # Token-axis FB-shared slot registry adopting PrefillInputBuffers
@@ -323,7 +323,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
             enable_prefill_cp=(
                 is_dsa_enable_prefill_cp() or is_mla_prefill_cp_enabled()
             ),
-            enable_diag_es=self.model_runner.server_args.enable_diag_es,
+            enable_diag_es=self.model_runner.diag_es_enabled,
             source=self.buffers,
         )
 
@@ -1246,7 +1246,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
                 out_cache_loc=_slot("out_cache_loc"),
                 es_candidate_slots=(
                     _slot("es_candidate_slots")
-                    if self.model_runner.server_args.enable_diag_es
+                    if self.model_runner.diag_es_enabled
                     else None
                 ),
                 seq_lens_sum=num_tokens,
@@ -1477,9 +1477,7 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
         positions = _slot("positions")
         out_cache_loc = _slot("out_cache_loc")
         es_candidate_slots = (
-            _slot("es_candidate_slots")
-            if self.model_runner.server_args.enable_diag_es
-            else None
+            _slot("es_candidate_slots") if self.model_runner.diag_es_enabled else None
         )
         mrope_positions = (
             _slot("mrope_positions")

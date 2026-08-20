@@ -33,6 +33,10 @@ from sglang.srt.configs.model_config import (
 )
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.debug_utils.dumper import dumper
+from sglang.srt.diag_es.roles import (
+    get_diag_es_placement,
+    is_diag_es_enabled,
+)
 from sglang.srt.distributed import bootstrap
 from sglang.srt.distributed.device_communicators.mooncake_transfer_engine import (
     maybe_init_shared_mooncake_transfer_engine,
@@ -313,6 +317,9 @@ class ModelRunner:
         self.dist_port = nccl_port
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
+        self.diag_es_enabled = is_diag_es_enabled(
+            server_args, is_draft_worker=is_draft_worker
+        )
         self.draft_attention_backend = resolve_draft_attention_backend(
             draft_attention_backend=draft_attention_backend,
             server_args=server_args,
@@ -1112,7 +1119,7 @@ class ModelRunner:
 
         self.maybe_precompile_model_kernels_after_loading()
 
-        if self.server_args.enable_diag_es:
+        if self.diag_es_enabled:
             from sglang.srt.diag_es import register_diag_es_model
 
             self.diag_es_manager = register_diag_es_model(
@@ -1122,7 +1129,9 @@ class ModelRunner:
                     self.server_args.diag_es_resident_candidate_slots
                 ),
                 model_artifact_id=self.server_args.diag_es_model_artifact_id,
-                placement=self.server_args.diag_es_placement,
+                placement=get_diag_es_placement(
+                    self.server_args, is_draft_worker=self.is_draft_worker
+                ),
             )
 
         # Register model for layerwise NVTX profiling if enabled
@@ -1660,7 +1669,7 @@ class ModelRunner:
                     forward_batch,
                     pp_proxy_tensors=pp_proxy_tensors,
                 )
-                if self.server_args.enable_diag_es:
+                if self.diag_es_enabled:
                     self.diag_es_manager.note_slots_read(
                         forward_batch.es_candidate_slots_cpu
                     )
@@ -1725,7 +1734,7 @@ class ModelRunner:
             ):
                 forward_batch.post_forward_mlp_sync_batch(ret)
 
-            if self.server_args.enable_diag_es:
+            if self.diag_es_enabled:
                 self.diag_es_manager.note_slots_read(
                     forward_batch.es_candidate_slots_cpu
                 )

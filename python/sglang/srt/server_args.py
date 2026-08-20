@@ -3372,21 +3372,21 @@ class ServerArgs:
         "Allow saving memory using release_memory_occupation and resume_memory_occupation",
         NS("exec.features"),
     ] = False
-    enable_diag_es: A[
-        bool,
-        "Enable the explicit-schema activation-side diagonal ES runtime.",
-        NS("exec.features"),
-    ] = False
     diag_es_schema_id: A[
         Optional[str],
-        "Exact diagonal-ES site schema ID; required when diagonal ES is enabled.",
+        "Exact diagonal-ES site schema ID; required when target steering is enabled.",
         NS("exec.features"),
     ] = None
-    diag_es_placement: A[
-        str,
-        "Immutable diagonal-ES linear placement: pre, post, or both.",
+    diag_es_target_placement: A[
+        Literal["off", "pre", "post", "both"],
+        "Target-model reward-maximizing diagonal-ES placement: off, pre, post, or both.",
         NS("exec.features"),
-    ] = "pre"
+    ] = "off"
+    diag_es_mtp_placement: A[
+        Literal["off", "pre", "post", "both"],
+        "MTP-drafter diagonal-ES placement reserved for a future acceptance-rate objective. Non-off modes are not yet implemented.",
+        NS("exec.features"),
+    ] = "off"
     diag_es_model_artifact_id: A[
         Optional[str],
         "Stable model artifact identity used by diagonal-ES cache digests.",
@@ -3711,22 +3711,44 @@ class ServerArgs:
             self.enable_return_hidden_states = True
 
     def _handle_diag_es_identity(self):
-        if not self.enable_diag_es:
+        supported = ("off", "pre", "post", "both")
+        if self.diag_es_target_placement not in supported:
+            raise ValueError(
+                "diag_es_target_placement must be off, pre, post, or both"
+            )
+        if self.diag_es_mtp_placement not in supported:
+            raise ValueError("diag_es_mtp_placement must be off, pre, post, or both")
+        if self.diag_es_mtp_placement != "off":
+            raise NotImplementedError(
+                "MTP diagonal-ES steering for an acceptance-rate objective is "
+                "interface-only and not implemented; "
+                "diag_es_mtp_placement must remain 'off'"
+            )
+        if self.diag_es_target_placement == "off":
             return
+        requested_speculative_algorithm = (
+            self.speculative_algorithm.upper()
+            if isinstance(self.speculative_algorithm, str)
+            else None
+        )
+        if requested_speculative_algorithm not in (None, "NEXTN"):
+            raise ValueError(
+                "target diagonal ES supports only --speculative-algorithm "
+                "NEXTN; other speculative algorithms are not supported"
+            )
         if self.diag_es_schema_id != "qwen3-30b-a3b-diag-es-v2":
             raise ValueError(
-                "enable_diag_es requires "
+                "target diagonal ES requires "
                 "diag_es_schema_id='qwen3-30b-a3b-diag-es-v2'"
             )
-        if self.diag_es_placement not in ("pre", "post", "both"):
-            raise ValueError("diag_es_placement must be pre, post, or both")
         if (
             not isinstance(self.diag_es_model_artifact_id, str)
             or not self.diag_es_model_artifact_id.strip()
             or "\0" in self.diag_es_model_artifact_id
         ):
             raise ValueError(
-                "enable_diag_es requires a non-empty diag_es_model_artifact_id "
+                "target diagonal ES requires a non-empty "
+                "diag_es_model_artifact_id "
                 "without NUL bytes"
             )
         if self.diag_es_resident_candidate_slots < 1:
@@ -3735,7 +3757,7 @@ class ServerArgs:
     def _handle_diag_es_runtime_contract(self):
         """Validate the final, materialized execution topology for diagonal ES."""
 
-        if not self.enable_diag_es:
+        if self.diag_es_target_placement == "off":
             return
         view = self._resolved()
         quantization = view.quantization
@@ -3774,7 +3796,6 @@ class ServerArgs:
             "enable_hierarchical_cache": (view.enable_hierarchical_cache, False),
             "enable_lmcache": (view.enable_lmcache, False),
             "enable_flexkv": (view.enable_flexkv, False),
-            "speculative_algorithm": (view.speculative_algorithm, None),
             "disaggregation_mode": (view.disaggregation_mode, "null"),
             "enable_two_batch_overlap": (view.enable_two_batch_overlap, False),
         }
@@ -3783,12 +3804,20 @@ class ServerArgs:
             for name, (actual, expected) in exact_values.items()
             if actual != expected
         ]
+        # NEXTN is canonicalized to EAGLE by the speculative-decoding hook.
+        # The pre-resolution identity check rejects a user-requested EAGLE.
+        if view.speculative_algorithm not in (None, "EAGLE"):
+            mismatches.append(
+                f"speculative_algorithm={view.speculative_algorithm!r} "
+                "(requires None or NEXTN resolved as 'EAGLE')"
+            )
         if quantization is None:
             pass
         elif quantization == "fp8":
-            if self.diag_es_placement != "post":
+            if self.diag_es_target_placement != "post":
                 mismatches.append(
-                    f"diag_es_placement={self.diag_es_placement!r} "
+                    "diag_es_target_placement="
+                    f"{self.diag_es_target_placement!r} "
                     "(block-FP8 requires 'post')"
                 )
             if view.fp8_gemm_runner_backend != "triton":

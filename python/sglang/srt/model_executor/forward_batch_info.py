@@ -95,6 +95,54 @@ def _elastic_should_preserve_local_token_counts(
     return uneven_token_count
 
 
+def _build_diag_es_candidate_slots(
+    batch: ScheduleBatch, model_runner: ModelRunner
+) -> tuple[Optional[torch.Tensor], Optional[tuple[int, ...]]]:
+    """Build token-row target slots without creating draft-worker ES state."""
+
+    if not model_runner.diag_es_enabled:
+        return None, None
+
+    request_slots_cpu = tuple(req.es_candidate_slot for req in batch.reqs)
+    request_slots = torch.tensor(
+        request_slots_cpu,
+        dtype=torch.int32,
+        device=model_runner.device,
+    )
+    if batch.forward_mode.is_decode_or_idle():
+        return request_slots, request_slots_cpu
+
+    # Target verification is a fixed-width extend whose live rows are the
+    # root/draft verification window, not ScheduleBatch.extend_lens left by an
+    # earlier phase.
+    repeat_counts = (
+        torch.full(
+            (len(batch.reqs),),
+            batch.spec_info.num_tokens_per_req,
+            dtype=torch.int64,
+            device=model_runner.device,
+        )
+        if batch.forward_mode.is_target_verify()
+        else torch.as_tensor(
+            batch.extend_lens,
+            dtype=torch.int64,
+            device=model_runner.device,
+        )
+    )
+    return (
+        torch.repeat_interleave(
+            request_slots,
+            repeat_counts,
+            output_size=(
+                len(batch.input_ids)
+                if batch.forward_mode.is_target_verify()
+                else batch.extend_num_tokens
+            ),
+        ),
+        request_slots_cpu,
+    )
+
+
 class ForwardMode(IntEnum):
     # Extend a sequence. The KV cache of the beginning part of the sequence is already computed (e.g., system prompt).
     # It is also called "prefill" in common terminology.
@@ -797,31 +845,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
         if batch.seq_lens_sum is None and seq_lens_cpu is not None:
             batch.seq_lens_sum = int(seq_lens_cpu.sum())
 
-        es_candidate_slots = es_candidate_slots_cpu = None
-        if model_runner.server_args.enable_diag_es:
-            es_candidate_slots_cpu = tuple(
-                req.es_candidate_slot for req in batch.reqs
-            )
-            request_slots = torch.tensor(
-                es_candidate_slots_cpu,
-                dtype=torch.int32,
-                device=model_runner.device,
-            )
-            if batch.forward_mode.is_decode_or_idle():
-                es_candidate_slots = request_slots
-            else:
-                # Keep candidate metadata request-sized on the host. Expand it on
-                # device so long prefills do not build a token-sized Python list.
-                repeat_counts = torch.as_tensor(
-                    batch.extend_lens,
-                    dtype=torch.int64,
-                    device=model_runner.device,
-                )
-                es_candidate_slots = torch.repeat_interleave(
-                    request_slots,
-                    repeat_counts,
-                    output_size=batch.extend_num_tokens,
-                )
+        es_candidate_slots, es_candidate_slots_cpu = _build_diag_es_candidate_slots(
+            batch, model_runner
+        )
 
         ret = cls(
             # Required core inputs

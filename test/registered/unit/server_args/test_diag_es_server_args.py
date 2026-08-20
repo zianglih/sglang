@@ -54,8 +54,7 @@ def _runtime_view(**overrides):
 
 def _validate_runtime(view, *, placement="pre"):
     subject = SimpleNamespace(
-        enable_diag_es=True,
-        diag_es_placement=placement,
+        diag_es_target_placement=placement,
         _resolved=lambda: view,
     )
     ServerArgs._handle_diag_es_runtime_contract(subject)
@@ -63,6 +62,14 @@ def _validate_runtime(view, *, placement="pre"):
 
 def test_diag_es_accepts_only_the_exact_runtime_contract():
     _validate_runtime(_runtime_view())
+
+
+def test_target_diag_es_may_coexist_with_clean_mtp():
+    # The speculative hook canonicalizes an admitted NEXTN request to EAGLE
+    # before the final runtime-contract validation.
+    _validate_runtime(_runtime_view(speculative_algorithm="EAGLE"))
+    with pytest.raises(ValueError, match="NEXTN resolved as 'EAGLE'"):
+        _validate_runtime(_runtime_view(speculative_algorithm="EAGLE3"))
 
 
 def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
@@ -107,3 +114,68 @@ def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
 def test_diag_es_rejects_runtime_contract_drift(field, value):
     with pytest.raises(ValueError, match="diagonal ES supports only"):
         _validate_runtime(_runtime_view(**{field: value}))
+
+
+def _validate_identity(**overrides):
+    values = {
+        "diag_es_target_placement": "off",
+        "diag_es_mtp_placement": "off",
+        "diag_es_schema_id": None,
+        "diag_es_model_artifact_id": None,
+        "diag_es_resident_candidate_slots": 0,
+        "speculative_algorithm": None,
+    }
+    values.update(overrides)
+    ServerArgs._handle_diag_es_identity(SimpleNamespace(**values))
+
+
+def test_diag_es_identity_is_role_scoped():
+    args = ServerArgs(model_path="dummy")
+    assert args.diag_es_target_placement == "off"
+    assert args.diag_es_mtp_placement == "off"
+    _validate_identity()
+    _validate_identity(
+        diag_es_target_placement="pre",
+        diag_es_schema_id="qwen3-30b-a3b-diag-es-v2",
+        diag_es_model_artifact_id="artifact",
+        diag_es_resident_candidate_slots=1,
+        speculative_algorithm="NEXTN",
+    )
+    _validate_identity(
+        diag_es_target_placement="pre",
+        diag_es_schema_id="qwen3-30b-a3b-diag-es-v2",
+        diag_es_model_artifact_id="artifact",
+        diag_es_resident_candidate_slots=1,
+        speculative_algorithm="nextn",
+    )
+
+    with pytest.raises(ValueError, match="only --speculative-algorithm NEXTN"):
+        _validate_identity(
+            diag_es_target_placement="pre", speculative_algorithm="EAGLE"
+        )
+
+
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+def test_mtp_diag_es_interface_fails_closed(placement):
+    with pytest.raises(NotImplementedError, match="interface-only"):
+        _validate_identity(diag_es_mtp_placement=placement)
+
+
+def test_invalid_role_placement_is_rejected():
+    with pytest.raises(ValueError, match="diag_es_target_placement"):
+        _validate_identity(diag_es_target_placement="invalid")
+    with pytest.raises(ValueError, match="diag_es_mtp_placement"):
+        _validate_identity(diag_es_mtp_placement="invalid")
+
+
+def test_diag_es_runner_role_helpers():
+    from sglang.srt.diag_es import get_diag_es_placement, is_diag_es_enabled
+
+    args = SimpleNamespace(
+        diag_es_target_placement="both",
+        diag_es_mtp_placement="off",
+    )
+    assert get_diag_es_placement(args, is_draft_worker=False) == "both"
+    assert get_diag_es_placement(args, is_draft_worker=True) is None
+    assert is_diag_es_enabled(args, is_draft_worker=False)
+    assert not is_diag_es_enabled(args, is_draft_worker=True)

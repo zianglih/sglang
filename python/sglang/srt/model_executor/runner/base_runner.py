@@ -590,7 +590,7 @@ class BaseRunner(ABC):
             out_cache_loc=out_cache_loc,
             es_candidate_slots=(
                 torch.zeros((num_tokens,), dtype=torch.int32, device=mr.device)
-                if mr.server_args.enable_diag_es
+                if mr.diag_es_enabled
                 else None
             ),
             seq_lens_sum=seq_lens.sum().item(),
