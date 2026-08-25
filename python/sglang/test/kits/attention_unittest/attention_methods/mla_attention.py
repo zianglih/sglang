@@ -238,6 +238,7 @@ class MockMLAModelRunner(ModelRunner):
         self.prefill_attention_backend_str = case.backend
         self.decode_attention_backend_str = case.backend
         self.draft_attention_backend = None
+        self.diag_es_enabled = False
         self.gpu_id = 0
         self.canary_manager = None
         self.page_size = case.page_size
