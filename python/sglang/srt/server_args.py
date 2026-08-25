@@ -3745,11 +3745,11 @@ class ServerArgs:
                 )
             if (
                 self.diag_es_mtp_schema_id
-                != "joyai-llm-flash-mtp-diag-es-v1"
+                != "joyai-llm-flash-mtp-diag-es-v2"
             ):
                 raise ValueError(
                     "MTP diagonal ES requires "
-                    "diag_es_mtp_schema_id='joyai-llm-flash-mtp-diag-es-v1'"
+                    "diag_es_mtp_schema_id='joyai-llm-flash-mtp-diag-es-v2'"
                 )
             if (
                 not isinstance(self.diag_es_mtp_model_artifact_id, str)
@@ -3908,12 +3908,18 @@ class ServerArgs:
             "moe_a2a_backend": (view.moe_a2a_backend, "none"),
             "bf16_gemm_backend": (view.bf16_gemm_backend, "triton"),
             "quantization": (view.quantization, None),
+            "attention_backend": (view.attention_backend, "flashinfer"),
+            "decode_attention_backend": (view.decode_attention_backend, None),
+            "prefill_attention_backend": (view.prefill_attention_backend, None),
             "enable_torch_compile": (view.enable_torch_compile, False),
             "disable_overlap_schedule": (view.disable_overlap_schedule, True),
             "speculative_algorithm": (view.speculative_algorithm, "EAGLE"),
-            "speculative_eagle_topk": (view.speculative_eagle_topk, 1),
             "speculative_adaptive": (view.speculative_adaptive, False),
             "enable_multi_layer_eagle": (view.enable_multi_layer_eagle, False),
+            "radix_cache_backend": (view.radix_cache_backend, None),
+            "enable_hierarchical_cache": (view.enable_hierarchical_cache, False),
+            "enable_lmcache": (view.enable_lmcache, False),
+            "enable_flexkv": (view.enable_flexkv, False),
             "disaggregation_mode": (view.disaggregation_mode, "null"),
             "enable_two_batch_overlap": (view.enable_two_batch_overlap, False),
         }
@@ -3931,6 +3937,19 @@ class ServerArgs:
             mismatches.append(
                 "speculative_num_draft_tokens must equal speculative_num_steps + 1"
             )
+        effective_decode_backend = (
+            view.decode_attention_backend or view.attention_backend
+        )
+        page_tree_backends = ("flashinfer", "fa3", "triton")
+        if (
+            view.speculative_eagle_topk > 1
+            and view.page_size > 1
+            and effective_decode_backend not in page_tree_backends
+        ):
+            mismatches.append(
+                "topk>1 with page_size>1 requires draft decode attention backend "
+                f"in {page_tree_backends}, got {effective_decode_backend!r}"
+            )
         if view.max_running_requests is None or view.max_running_requests > (
             self.diag_es_mtp_max_sessions
         ):
@@ -3943,7 +3962,8 @@ class ServerArgs:
         if mismatches:
             raise ValueError(
                 "MTP diagonal ES supports only the local TP1/DP1 "
-                "JoyAI Triton BF16 runtime contract: " + ", ".join(mismatches)
+                "JoyAI BF16 FlashInfer-attention/Triton-GEMM runtime contract: "
+                + ", ".join(mismatches)
             )
 
     def _handle_model_capability_adjustments(self):

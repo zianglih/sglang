@@ -5,7 +5,7 @@ import math
 import struct
 import time
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -13,6 +13,7 @@ from sglang.srt.diag_es.manifest import DiagESManifest
 
 MTP_RNG_VERSION = "numpy-philox-site-v1"
 MTP_MAX_PENDING_EVENTS = 1_000_000
+MTPCandidateSchedule = Literal["contiguous", "round_robin"]
 
 
 class DiagESMTPSessionError(RuntimeError):
@@ -60,6 +61,7 @@ class DiagESMTPSessionConfig:
     reward_zscore_epsilon: float = 1e-8
     max_update_rms_ratio: float = 10.0
     max_update_abs_max_ratio: float = 100.0
+    candidate_schedule: MTPCandidateSchedule = "contiguous"
 
     def __post_init__(self) -> None:
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
@@ -74,8 +76,13 @@ class DiagESMTPSessionConfig:
             raise ValueError(
                 "MTP diagonal ES supports only estimator='population_zscore'"
             )
+        if self.candidate_schedule not in ("contiguous", "round_robin"):
+            raise ValueError(
+                "MTP diagonal-ES candidate_schedule must be 'contiguous' or "
+                "'round_robin'"
+            )
         for name, value, allow_zero in (
-            ("sigma", self.sigma, False),
+            ("sigma", self.sigma, True),
             ("learning_rate", self.learning_rate, True),
             ("reward_zscore_epsilon", self.reward_zscore_epsilon, False),
             ("max_update_rms_ratio", self.max_update_rms_ratio, False),
@@ -84,6 +91,10 @@ class DiagESMTPSessionConfig:
             if not math.isfinite(value) or (value < 0 if allow_zero else value <= 0):
                 relation = "non-negative" if allow_zero else "positive"
                 raise ValueError(f"MTP diagonal-ES {name} must be finite and {relation}")
+        if self.sigma == 0.0 and self.learning_rate != 0.0:
+            raise ValueError(
+                "MTP diagonal-ES sigma may be zero only when learning_rate is zero"
+            )
 
 
 @dataclass(slots=True)
@@ -110,6 +121,10 @@ class _MTPSessionState:
     latest_attempt_perturbation_seed: int | None = None
     active_rid: str | None = None
     last_released_rid: str | None = None
+    round_robin_accept_sums: list[int] = field(default_factory=list)
+    round_robin_attempt_counts: list[int] = field(default_factory=list)
+    theta_stats: dict[str, Any] = field(default_factory=dict)
+    effective_delta_stats: dict[str, Any] = field(default_factory=dict)
 
     @property
     def perturbation_seed(self) -> int:
@@ -118,8 +133,110 @@ class _MTPSessionState:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _MTPAcceptanceBatchReservation:
+    nonce: int
+    start_event_id: int
+    acceptance_event_count: int
+    expects_kv_replay: bool
+    attempts: tuple[tuple[str, str, int], ...]
+
+
 def _zeros_like_map(values: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {name: torch.zeros_like(value) for name, value in values.items()}
+
+
+def _delta_stats(values: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+    """Summarize CPU delta tensors without reading their resident GPU banks."""
+
+    per_site: dict[str, dict[str, int | float]] = {}
+    total_count = 0
+    total_nonfinite = 0
+    total_scale_nonfinite = 0
+    total_sum_sq = 0.0
+    aggregate_min = math.inf
+    aggregate_max = -math.inf
+    aggregate_min_scale = math.inf
+    aggregate_max_scale = -math.inf
+
+    for name, value in values.items():
+        if value.device.type != "cpu":
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES stats require CPU tensor {name!r}, got {value.device}"
+            )
+        flat = value.detach().numpy().reshape(-1)
+        count = flat.size
+        finite = np.isfinite(flat)
+        nonfinite = count - int(np.count_nonzero(finite))
+        scales = np.add(flat, np.float32(1.0), dtype=np.float32)
+        finite_scales_mask = np.isfinite(scales)
+        scale_nonfinite = count - int(np.count_nonzero(finite_scales_mask))
+        finite_values = flat if nonfinite == 0 else flat[finite]
+        if finite_values.size == 0:
+            value_min = value_max = value_rms = value_abs_max = math.nan
+        else:
+            value_min = float(np.min(finite_values))
+            value_max = float(np.max(finite_values))
+            value_sum_sq = float(
+                np.square(finite_values, dtype=np.float64).sum(dtype=np.float64)
+            )
+            value_rms = math.sqrt(value_sum_sq / finite_values.size)
+            value_abs_max = max(abs(value_min), abs(value_max))
+        finite_scales = (
+            scales if scale_nonfinite == 0 else scales[finite_scales_mask]
+        )
+        if finite_scales.size == 0:
+            min_scale = max_scale = math.nan
+        else:
+            min_scale = float(np.min(finite_scales))
+            max_scale = float(np.max(finite_scales))
+        per_site[name] = {
+            "count": count,
+            "nonfinite_count": nonfinite,
+            "scale_nonfinite_count": scale_nonfinite,
+            "rms": value_rms,
+            "absmax": value_abs_max,
+            "min": value_min,
+            "max": value_max,
+            "min_scale": min_scale,
+            "max_scale": max_scale,
+        }
+        total_count += count
+        total_nonfinite += nonfinite
+        total_scale_nonfinite += scale_nonfinite
+        total_sum_sq += 0.0 if finite_values.size == 0 else value_sum_sq
+        if finite_values.size:
+            aggregate_min = min(aggregate_min, value_min)
+            aggregate_max = max(aggregate_max, value_max)
+        if finite_scales.size:
+            aggregate_min_scale = min(aggregate_min_scale, min_scale)
+            aggregate_max_scale = max(aggregate_max_scale, max_scale)
+
+    finite_count = total_count - total_nonfinite
+    aggregate = {
+        "count": total_count,
+        "nonfinite_count": total_nonfinite,
+        "scale_nonfinite_count": total_scale_nonfinite,
+        "rms": (math.sqrt(total_sum_sq / finite_count) if finite_count else math.nan),
+        "absmax": (
+            max(abs(aggregate_min), abs(aggregate_max)) if finite_count else math.nan
+        ),
+        "min": aggregate_min if finite_count else math.nan,
+        "max": aggregate_max if finite_count else math.nan,
+        "min_scale": aggregate_min_scale if finite_count else math.nan,
+        "max_scale": aggregate_max_scale if finite_count else math.nan,
+    }
+    return {"aggregate": aggregate, "per_site": per_site}
+
+
+def _require_finite_delta_stats(stats: Mapping[str, Any], *, name: str) -> None:
+    aggregate = stats["aggregate"]
+    if aggregate["nonfinite_count"] or aggregate["scale_nonfinite_count"]:
+        raise DiagESMTPSessionError(
+            f"MTP diagonal-ES {name} has non-finite values: "
+            f"delta={aggregate['nonfinite_count']}, "
+            f"scale={aggregate['scale_nonfinite_count']}"
+        )
 
 
 class DiagESMTPSessionManager:
@@ -169,6 +286,13 @@ class DiagESMTPSessionManager:
         }
         self._events: list[dict[str, Any]] = []
         self._next_event_id = 1
+        self._kv_replay_batch_count = 0
+        self._kv_replay_transitioned_requests = 0
+        self._kv_replayed_rows = 0
+        self._kv_replay_enqueue_time_ms = 0.0
+        self._next_acceptance_batch_nonce = 1
+        self._active_acceptance_batch: _MTPAcceptanceBatchReservation | None = None
+        self._active_acceptance_batch_cursor = 0
 
     def get_dense_delta_bank(self, site_id: str) -> torch.Tensor:
         return self._dense_delta_banks[site_id]
@@ -213,20 +337,51 @@ class DiagESMTPSessionManager:
         if event is not None:
             event.synchronize()
 
-    def _upload_candidate(self, state: _MTPSessionState) -> None:
-        self._wait_for_slot(state.resident_slot)
-        seed = state.perturbation_seed
-        noise_dense = self._candidate_noise(seed)
-        state.current_noise_dense = noise_dense
-        with torch.cuda.stream(self._upload_stream):
-            for site in self.manifest.dense_sites:
-                candidate = state.theta_dense[site.site_id].add(
+    def _materialize_candidate(
+        self, state: _MTPSessionState
+    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        if state.config.sigma == 0.0:
+            # A sigma=0/LR=0 arm is an exact identity control. Do not materialize
+            # Philox noise merely because its population bookkeeping advances.
+            noise_dense = _zeros_like_map(state.theta_dense)
+            candidate_dense = {
+                site.site_id: state.theta_dense[site.site_id].clone()
+                for site in self.manifest.dense_sites
+            }
+        else:
+            noise_dense = self._candidate_noise(state.perturbation_seed)
+            candidate_dense = {
+                site.site_id: state.theta_dense[site.site_id].add(
                     noise_dense[site.site_id], alpha=state.config.sigma
                 )
+                for site in self.manifest.dense_sites
+            }
+        return noise_dense, candidate_dense
+
+    def _upload_candidate(self, state: _MTPSessionState) -> None:
+        if state.config.sigma == 0.0:
+            raise DiagESMTPSessionError(
+                "MTP identity controls must not enter the candidate upload path"
+            )
+        self._wait_for_slot(state.resident_slot)
+        noise_dense, candidate_dense = self._materialize_candidate(state)
+        effective_delta_stats = _delta_stats(candidate_dense)
+        _require_finite_delta_stats(
+            effective_delta_stats, name="effective candidate delta"
+        )
+        with torch.cuda.stream(self._upload_stream):
+            for site in self.manifest.dense_sites:
                 self._dense_delta_banks[site.site_id][state.resident_slot].copy_(
-                    candidate, non_blocking=True
+                    candidate_dense[site.site_id], non_blocking=True
                 )
         self._upload_stream.synchronize()
+        state.current_noise_dense = noise_dense
+        state.effective_delta_stats = effective_delta_stats
+
+    @staticmethod
+    def _initialize_identity_candidate(state: _MTPSessionState) -> None:
+        state.current_noise_dense = _zeros_like_map(state.theta_dense)
+        state.effective_delta_stats = state.theta_stats
 
     def _emit(self, event: str, state: _MTPSessionState, **fields: Any) -> None:
         self._reserve_event_capacity(1)
@@ -249,6 +404,151 @@ class DiagESMTPSessionManager:
                 f"limit of {self.max_pending_events}; drain events before "
                 "continuing inference"
             )
+
+    def _validate_acceptance(
+        self, *, session_id: str, rid: str, accepted_drafts: int
+    ) -> _MTPSessionState:
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES session {session_id!r} is not registered"
+            )
+        if state.active_rid != rid:
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES session {session_id!r} is not bound to request "
+                f"{rid!r}"
+            )
+        if (
+            not isinstance(accepted_drafts, int)
+            or isinstance(accepted_drafts, bool)
+            or accepted_drafts < 0
+            or accepted_drafts > self.max_correct_drafts
+        ):
+            raise ValueError(
+                "accepted_drafts must be an integer in "
+                f"[0, {self.max_correct_drafts}], got {accepted_drafts!r}"
+            )
+        return state
+
+    @staticmethod
+    def _acceptance_event_plan(state: _MTPSessionState) -> tuple[int, bool]:
+        if state.config.candidate_schedule == "round_robin":
+            counts = state.round_robin_attempt_counts
+            if len(counts) != state.config.population_size:
+                raise DiagESMTPSessionError(
+                    "MTP diagonal-ES round-robin accounting does not match the "
+                    f"population size {state.config.population_size}"
+                )
+            attempt_count = counts[state.population_index] + 1
+            completing_candidate = (
+                attempt_count == state.config.attempts_per_candidate
+            )
+            if attempt_count > state.config.attempts_per_candidate:
+                raise DiagESMTPSessionError(
+                    "MTP diagonal-ES round-robin attempt count exceeded its limit"
+                )
+            completing_population = (
+                completing_candidate
+                and state.population_index + 1 == state.config.population_size
+            )
+            # Round-robin advances to a different population member after every
+            # attempt. Sigma-zero controls are the sole effective-identity case.
+            changes_candidate = state.config.sigma != 0.0
+        else:
+            completing_candidate = (
+                state.candidate_attempts + 1
+                == state.config.attempts_per_candidate
+            )
+            completing_population = (
+                completing_candidate
+                and state.population_index + 1 == state.config.population_size
+            )
+            changes_candidate = (
+                state.config.sigma != 0.0 and completing_candidate
+            )
+        return (
+            1 + int(completing_candidate) + int(completing_population),
+            changes_candidate,
+        )
+
+    def preflight_acceptance_batch(
+        self, attempts: Sequence[tuple[str, str, int]]
+    ) -> _MTPAcceptanceBatchReservation:
+        """Reserve a synchronous verify batch's events before any state change."""
+
+        if self._active_acceptance_batch is not None:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch reservation is already active"
+            )
+        normalized = tuple(attempts)
+        if not normalized:
+            raise ValueError("MTP diagonal-ES acceptance preflight requires attempts")
+        if len({session_id for session_id, _, _ in normalized}) != len(normalized):
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch contains a duplicate session"
+            )
+
+        acceptance_event_count = 0
+        expects_kv_replay = False
+        for session_id, rid, accepted_drafts in normalized:
+            state = self._validate_acceptance(
+                session_id=session_id,
+                rid=rid,
+                accepted_drafts=accepted_drafts,
+            )
+            event_count, changes_candidate = self._acceptance_event_plan(state)
+            acceptance_event_count += event_count
+            expects_kv_replay |= changes_candidate
+
+        self._reserve_event_capacity(
+            acceptance_event_count + int(expects_kv_replay)
+        )
+        reservation = _MTPAcceptanceBatchReservation(
+            nonce=self._next_acceptance_batch_nonce,
+            start_event_id=self._next_event_id,
+            acceptance_event_count=acceptance_event_count,
+            expects_kv_replay=expects_kv_replay,
+            attempts=normalized,
+        )
+        self._next_acceptance_batch_nonce += 1
+        self._active_acceptance_batch = reservation
+        self._active_acceptance_batch_cursor = 0
+        return reservation
+
+    def _validate_acceptance_batch_progress(
+        self,
+        reservation: _MTPAcceptanceBatchReservation,
+        *,
+        expects_kv_replay: bool,
+    ) -> None:
+        if self._active_acceptance_batch is not reservation:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch reservation is not active"
+            )
+        if reservation.expects_kv_replay != expects_kv_replay:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch replay prediction mismatched"
+            )
+        if self._active_acceptance_batch_cursor != len(reservation.attempts):
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch did not consume every attempt"
+            )
+        expected_next_event_id = (
+            reservation.start_event_id + reservation.acceptance_event_count
+        )
+        if self._next_event_id != expected_next_event_id:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES acceptance batch event ordering was interrupted"
+            )
+
+    def finish_acceptance_batch(
+        self, reservation: _MTPAcceptanceBatchReservation
+    ) -> None:
+        self._validate_acceptance_batch_progress(
+            reservation, expects_kv_replay=False
+        )
+        self._active_acceptance_batch = None
+        self._active_acceptance_batch_cursor = 0
 
     def register_session(
         self, *, session_id: str, config: DiagESMTPSessionConfig
@@ -275,13 +575,21 @@ class DiagESMTPSessionManager:
             theta_dense=theta_dense,
             noise_sum_dense=_zeros_like_map(theta_dense),
             rewarded_noise_sum_dense=_zeros_like_map(theta_dense),
+            round_robin_accept_sums=[0] * config.population_size,
+            round_robin_attempt_counts=[0] * config.population_size,
+            theta_stats=_delta_stats(theta_dense),
         )
-        try:
-            self._upload_candidate(state)
-        except BaseException:
-            self._free_slots.append(slot)
-            self._free_slots.sort()
-            raise
+        if config.sigma == 0.0:
+            # Banks are allocated as exact zeros and retired slots are zeroed
+            # before reuse. Identity controls therefore need no upload/sync.
+            self._initialize_identity_candidate(state)
+        else:
+            try:
+                self._upload_candidate(state)
+            except BaseException:
+                self._free_slots.append(slot)
+                self._free_slots.sort()
+                raise
         self._sessions[session_id] = state
         self._emit(
             "session_registered",
@@ -358,6 +666,49 @@ class DiagESMTPSessionManager:
                 self._slot_last_read_events[slot] = event
             event.record(stream)
 
+    def record_kv_replay(
+        self,
+        *,
+        acceptance_batch_reservation: _MTPAcceptanceBatchReservation,
+        session_ids: list[str],
+        request_rows: list[int],
+        replayed_rows: int,
+        enqueue_time_ms: float,
+    ) -> None:
+        """Append one ordered aggregate event for a candidate-switch replay."""
+
+        if len(session_ids) != len(request_rows) or not session_ids:
+            raise ValueError("MTP draft-KV replay telemetry has invalid request rows")
+        if replayed_rows != sum(request_rows) or replayed_rows < 0:
+            raise ValueError("MTP draft-KV replay telemetry row total is inconsistent")
+        if not math.isfinite(enqueue_time_ms) or enqueue_time_ms < 0:
+            raise ValueError("MTP draft-KV replay telemetry enqueue time is invalid")
+        self._validate_acceptance_batch_progress(
+            acceptance_batch_reservation, expects_kv_replay=True
+        )
+        self._kv_replay_batch_count += 1
+        self._kv_replay_transitioned_requests += len(session_ids)
+        self._kv_replayed_rows += replayed_rows
+        self._kv_replay_enqueue_time_ms += enqueue_time_ms
+        self._events.append(
+            {
+                "event_id": self._next_event_id,
+                "timestamp": time.time(),
+                "monotonic_timestamp_ns": time.monotonic_ns(),
+                "event": "draft_kv_prefix_replay",
+                "session_id": None,
+                "event_scope": "global_batch",
+                "session_ids": list(session_ids),
+                "request_replayed_rows": dict(zip(session_ids, request_rows)),
+                "transitioned_request_count": len(session_ids),
+                "replayed_rows": replayed_rows,
+                "enqueue_time_ms": enqueue_time_ms,
+            }
+        )
+        self._next_event_id += 1
+        self._active_acceptance_batch = None
+        self._active_acceptance_batch_cursor = 0
+
     @staticmethod
     def _accumulate_noise(
         state: _MTPSessionState, candidate_reward: float
@@ -411,14 +762,22 @@ class DiagESMTPSessionManager:
         sum_sq = sum(float(value.double().square().sum()) for value in all_updates)
         update_rms = math.sqrt(sum_sq / count)
         update_abs_max = max(float(value.abs().max()) for value in all_updates)
+        if state.config.sigma == 0.0:
+            # The only valid sigma-zero arm also has LR=0, hence an exact zero
+            # staged update. Keep safety telemetry finite without dividing by 0.
+            update_rms_ratio = 0.0 if update_rms == 0.0 else math.inf
+            update_abs_max_ratio = 0.0 if update_abs_max == 0.0 else math.inf
+        else:
+            update_rms_ratio = update_rms / state.config.sigma
+            update_abs_max_ratio = update_abs_max / state.config.sigma
         stats = {
             "candidate_rewards": rewards.tolist(),
             "candidate_reward_mean": reward_mean,
             "candidate_reward_std": reward_std,
             "update_rms": update_rms,
             "update_abs_max": update_abs_max,
-            "update_rms_ratio": update_rms / state.config.sigma,
-            "update_abs_max_ratio": update_abs_max / state.config.sigma,
+            "update_rms_ratio": update_rms_ratio,
+            "update_abs_max_ratio": update_abs_max_ratio,
             "update_nonfinite_count": nonfinite,
         }
         reasons = []
@@ -439,7 +798,200 @@ class DiagESMTPSessionManager:
             raise DiagESMTPUpdateRejected(reasons, stats)
         return dense, stats
 
+    def _finish_population_update(
+        self, *, state: _MTPSessionState, rid: str
+    ) -> dict[str, Any]:
+        source_version = state.theta_version
+        try:
+            dense_update, stats = self._stage_update(state)
+            if state.config.sigma == 0.0:
+                if any(
+                    int(torch.count_nonzero(value)) != 0
+                    for value in dense_update.values()
+                ):
+                    raise DiagESMTPSessionError(
+                        "MTP identity control produced a nonzero update"
+                    )
+                next_theta = None
+                next_theta_stats = state.theta_stats
+            else:
+                next_theta = {
+                    name: state.theta_dense[name].add(update)
+                    for name, update in dense_update.items()
+                }
+                next_theta_stats = _delta_stats(next_theta)
+                try:
+                    _require_finite_delta_stats(next_theta_stats, name="proposed theta")
+                except DiagESMTPSessionError as exc:
+                    reasons = [str(exc)]
+                    stats = {
+                        **stats,
+                        "proposed_theta_stats": next_theta_stats,
+                        "update_rejection_reasons": reasons,
+                    }
+                    raise DiagESMTPUpdateRejected(reasons, stats) from exc
+        except DiagESMTPUpdateRejected as exc:
+            state.rejected_updates += 1
+            self._emit(
+                "update_rejected",
+                state,
+                rid=rid,
+                theta_version=source_version,
+                next_theta_version=source_version + 1,
+                theta_stats=state.theta_stats,
+                **exc.stats,
+            )
+        else:
+            if next_theta is not None:
+                for name, value in next_theta.items():
+                    state.theta_dense[name].copy_(value)
+            state.theta_stats = next_theta_stats
+            state.committed_updates += 1
+            self._emit(
+                "update_committed",
+                state,
+                rid=rid,
+                theta_version=source_version,
+                next_theta_version=source_version + 1,
+                learning_rate=state.config.learning_rate,
+                sigma=state.config.sigma,
+                theta_stats=state.theta_stats,
+                **stats,
+            )
+
+        state.theta_version += 1
+        state.population_index = 0
+        state.candidate_rewards.clear()
+        state.candidate_attempts = 0
+        state.candidate_accept_sum = 0
+        state.round_robin_accept_sums = [0] * state.config.population_size
+        state.round_robin_attempt_counts = [0] * state.config.population_size
+        self._clear_accumulators(state)
+        if state.config.sigma != 0.0:
+            self._upload_candidate(state)
+        return self._session_status(state)
+
+    @staticmethod
+    def _prepare_round_robin_tracking(state: _MTPSessionState) -> None:
+        population_size = state.config.population_size
+        if not state.round_robin_accept_sums and not state.round_robin_attempt_counts:
+            state.round_robin_accept_sums = [0] * population_size
+            state.round_robin_attempt_counts = [0] * population_size
+        if (
+            len(state.round_robin_accept_sums) != population_size
+            or len(state.round_robin_attempt_counts) != population_size
+        ):
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES round-robin accounting does not match the "
+                f"population size {population_size}"
+            )
+
+    def _record_acceptance_round_robin(
+        self,
+        *,
+        state: _MTPSessionState,
+        rid: str,
+        accepted_drafts: int,
+    ) -> dict[str, Any]:
+        self._prepare_round_robin_tracking(state)
+        population_index = state.population_index
+        attempt_count = state.round_robin_attempt_counts[population_index] + 1
+        completing_candidate = attempt_count == state.config.attempts_per_candidate
+        completing_population = (
+            completing_candidate
+            and population_index + 1 == state.config.population_size
+        )
+        self._reserve_event_capacity(
+            1 + int(completing_candidate) + int(completing_population)
+        )
+
+        state.round_robin_attempt_counts[population_index] = attempt_count
+        state.round_robin_accept_sums[population_index] += accepted_drafts
+        state.candidate_attempts = attempt_count
+        state.candidate_accept_sum = state.round_robin_accept_sums[population_index]
+        state.total_attempts += 1
+        state.latest_accept_length = accepted_drafts + 1
+        state.latest_accepted_drafts = accepted_drafts
+        state.latest_attempt_theta_version = state.theta_version
+        state.latest_attempt_population_index = population_index
+        state.latest_attempt_perturbation_seed = state.perturbation_seed
+        self._emit(
+            "verify_attempt",
+            state,
+            rid=rid,
+            theta_version=state.theta_version,
+            population_index=population_index,
+            perturbation_seed=state.perturbation_seed,
+            attempt_index=attempt_count,
+            accepted_drafts=accepted_drafts,
+            accept_length=accepted_drafts + 1,
+            total_attempts=state.total_attempts,
+        )
+
+        if completing_candidate:
+            candidate_reward = (
+                state.round_robin_accept_sums[population_index]
+                / state.config.attempts_per_candidate
+            )
+            state.candidate_rewards.append(candidate_reward)
+            self._accumulate_noise(state, candidate_reward)
+            self._emit(
+                "candidate_completed",
+                state,
+                rid=rid,
+                theta_version=state.theta_version,
+                population_index=population_index,
+                perturbation_seed=state.perturbation_seed,
+                attempts=attempt_count,
+                candidate_reward_mean=candidate_reward,
+                candidate_rewards=list(state.candidate_rewards),
+                effective_delta_stats_aggregate=state.effective_delta_stats.get(
+                    "aggregate", {}
+                ),
+            )
+
+        if completing_population:
+            return self._finish_population_update(state=state, rid=rid)
+
+        state.population_index = (population_index + 1) % state.config.population_size
+        state.candidate_attempts = state.round_robin_attempt_counts[
+            state.population_index
+        ]
+        state.candidate_accept_sum = state.round_robin_accept_sums[
+            state.population_index
+        ]
+        if state.config.sigma != 0.0:
+            self._upload_candidate(state)
+        return self._session_status(state)
+
     def record_acceptance(
+        self,
+        *,
+        session_id: str,
+        rid: str,
+        accepted_drafts: int,
+    ) -> dict[str, Any]:
+        reservation = getattr(self, "_active_acceptance_batch", None)
+        if reservation is not None:
+            cursor = self._active_acceptance_batch_cursor
+            if cursor >= len(reservation.attempts) or reservation.attempts[cursor] != (
+                session_id,
+                rid,
+                accepted_drafts,
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP diagonal-ES acceptance call does not match its batch preflight"
+                )
+        result = self._record_acceptance(
+            session_id=session_id,
+            rid=rid,
+            accepted_drafts=accepted_drafts,
+        )
+        if reservation is not None:
+            self._active_acceptance_batch_cursor += 1
+        return result
+
+    def _record_acceptance(
         self,
         *,
         session_id: str,
@@ -465,6 +1017,13 @@ class DiagESMTPSessionManager:
             raise ValueError(
                 "accepted_drafts must be an integer in "
                 f"[0, {self.max_correct_drafts}], got {accepted_drafts!r}"
+            )
+
+        if state.config.candidate_schedule == "round_robin":
+            return self._record_acceptance_round_robin(
+                state=state,
+                rid=rid,
+                accepted_drafts=accepted_drafts,
             )
 
         completing_candidate = (
@@ -516,49 +1075,20 @@ class DiagESMTPSessionManager:
             attempts=state.candidate_attempts,
             candidate_reward_mean=candidate_reward,
             candidate_rewards=list(state.candidate_rewards),
+            effective_delta_stats_aggregate=state.effective_delta_stats.get(
+                "aggregate", {}
+            ),
         )
         state.candidate_attempts = 0
         state.candidate_accept_sum = 0
 
         if state.population_index + 1 < state.config.population_size:
             state.population_index += 1
-            self._upload_candidate(state)
+            if state.config.sigma != 0.0:
+                self._upload_candidate(state)
             return self._session_status(state)
 
-        source_version = state.theta_version
-        try:
-            dense_update, stats = self._stage_update(state)
-        except DiagESMTPUpdateRejected as exc:
-            state.rejected_updates += 1
-            self._emit(
-                "update_rejected",
-                state,
-                rid=rid,
-                theta_version=source_version,
-                next_theta_version=source_version + 1,
-                **exc.stats,
-            )
-        else:
-            for name, update in dense_update.items():
-                state.theta_dense[name].add_(update)
-            state.committed_updates += 1
-            self._emit(
-                "update_committed",
-                state,
-                rid=rid,
-                theta_version=source_version,
-                next_theta_version=source_version + 1,
-                learning_rate=state.config.learning_rate,
-                sigma=state.config.sigma,
-                **stats,
-            )
-
-        state.theta_version += 1
-        state.population_index = 0
-        state.candidate_rewards.clear()
-        self._clear_accumulators(state)
-        self._upload_candidate(state)
-        return self._session_status(state)
+        return self._finish_population_update(state=state, rid=rid)
 
     def drain_events(self, session_id: str | None = None) -> dict[str, Any]:
         if session_id is None:
@@ -566,6 +1096,12 @@ class DiagESMTPSessionManager:
             self._events = []
         else:
             self._validate_session_id(session_id)
+            if any(event["session_id"] is None for event in self._events):
+                raise DiagESMTPSessionError(
+                    "MTP draft-KV replay telemetry is a global batch event; "
+                    "drain events without a session_id before using a "
+                    "session-scoped drain"
+                )
             events = [e for e in self._events if e["session_id"] == session_id]
             self._events = [e for e in self._events if e["session_id"] != session_id]
         return {"events": events, "next_event_id": self._next_event_id}
@@ -604,6 +1140,14 @@ class DiagESMTPSessionManager:
                 for site in self.manifest.dense_sites
             },
             "pending_event_count": len(self._events),
+            "draft_kv_replay": {
+                "batch_count": self._kv_replay_batch_count,
+                "transitioned_request_count": (
+                    self._kv_replay_transitioned_requests
+                ),
+                "replayed_rows": self._kv_replayed_rows,
+                "enqueue_time_ms": self._kv_replay_enqueue_time_ms,
+            },
             "sessions": {
                 name: self._session_status(state)
                 for name, state in self._sessions.items()
@@ -624,6 +1168,7 @@ class DiagESMTPSessionManager:
             "sigma": config.sigma,
             "learning_rate": config.learning_rate,
             "attempts_per_candidate": config.attempts_per_candidate,
+            "candidate_schedule": config.candidate_schedule,
             "estimator": config.estimator,
             "reward_zscore_epsilon": config.reward_zscore_epsilon,
             "max_update_rms_ratio": config.max_update_rms_ratio,
@@ -633,6 +1178,11 @@ class DiagESMTPSessionManager:
             "population_index": state.population_index,
             "candidate_index": state.population_index,
             "perturbation_seed": state.perturbation_seed,
+            "effective_candidate_key": (
+                "identity"
+                if config.sigma == 0.0
+                else f"theta={state.theta_version}:seed={state.perturbation_seed}"
+            ),
             "candidate_attempts": state.candidate_attempts,
             "candidate_reward_sum": state.candidate_accept_sum,
             "candidate_reward_mean": (
@@ -653,4 +1203,16 @@ class DiagESMTPSessionManager:
             ),
             "committed_updates": state.committed_updates,
             "rejected_updates": state.rejected_updates,
+            "theta_stats": state.theta_stats,
+            "effective_delta_stats": state.effective_delta_stats,
+            **(
+                {
+                    "round_robin_attempt_counts": list(
+                        state.round_robin_attempt_counts
+                    ),
+                    "round_robin_accept_sums": list(state.round_robin_accept_sums),
+                }
+                if config.candidate_schedule == "round_robin"
+                else {}
+            ),
         }

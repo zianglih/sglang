@@ -41,6 +41,7 @@ from typing import (
     Dict,
     Iterator,
     List,
+    Literal,
     Mapping,
     Optional,
     Tuple,
@@ -1528,6 +1529,7 @@ class Engine(EngineScoreMixin, EngineBase):
         reward_zscore_epsilon: float = 1e-8,
         max_update_rms_ratio: float = 10.0,
         max_update_abs_max_ratio: float = 100.0,
+        candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous",
     ) -> Dict[str, Any]:
         return self.loop.run_until_complete(
             self.async_register_diag_es_mtp_session(
@@ -1541,6 +1543,7 @@ class Engine(EngineScoreMixin, EngineBase):
                 reward_zscore_epsilon=reward_zscore_epsilon,
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
+                candidate_schedule=candidate_schedule,
             )
         )
 
@@ -1556,6 +1559,7 @@ class Engine(EngineScoreMixin, EngineBase):
         reward_zscore_epsilon: float = 1e-8,
         max_update_rms_ratio: float = 10.0,
         max_update_abs_max_ratio: float = 100.0,
+        candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous",
     ) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_mtp_session(
             DiagESMTPSessionReqInput(
@@ -1570,6 +1574,7 @@ class Engine(EngineScoreMixin, EngineBase):
                 reward_zscore_epsilon=reward_zscore_epsilon,
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
+                candidate_schedule=candidate_schedule,
             )
         )
         return self._unwrap_diag_es_mtp_result(result)

@@ -153,6 +153,7 @@ class BaseSpecWorker(ABC):
         # clean speculative serving to one predictable branch: no request scan
         # and no diagonal-ES runtime import when MTP steering is disabled.
         self._diag_es_mtp_enabled = False
+        self._diag_es_mtp_requires_kv_replay = False
 
     @property
     def hicache_draft_plan(self) -> HiCacheDraftPlan:
@@ -228,7 +229,7 @@ class BaseSpecWorker(ABC):
         Default returns target only; subclasses extend with draft backends."""
         return (self.target_worker.model_runner.attn_backend,)
 
-    def _record_diag_es_mtp_feedback(self, batch, batch_output) -> None:
+    def _record_diag_es_mtp_feedback(self, batch, batch_output):
         """Switch MTP candidates after verify and before the next draft extend.
 
         The draft extend constructs state for the next proposal. Delaying this
@@ -237,14 +238,14 @@ class BaseSpecWorker(ABC):
         """
 
         if not self._diag_es_mtp_enabled:
-            return
+            return None
         session_reqs = [
             req
             for req in batch.reqs
             if getattr(req, "diag_es_mtp_session_id", None) is not None
         ]
         if not session_reqs:
-            return
+            return None
         if batch_output.accept_lens is None:
             raise RuntimeError("MTP diagonal ES verify output is missing accept_lens")
 
@@ -257,14 +258,48 @@ class BaseSpecWorker(ABC):
         from sglang.srt.diag_es import get_diag_es_mtp_manager
 
         manager = get_diag_es_mtp_manager()
+        acceptance_batch = [
+            (
+                req.diag_es_mtp_session_id,
+                req.rid,
+                int(accept_len) - 1,
+            )
+            for req, accept_len in zip(batch.reqs, accept_lens)
+            if req.diag_es_mtp_session_id is not None
+        ]
+        acceptance_reservation = manager.preflight_acceptance_batch(
+            acceptance_batch
+        )
+        transitioned = [] if self._diag_es_mtp_requires_kv_replay else None
         for req, accept_len in zip(batch.reqs, accept_lens):
             if req.diag_es_mtp_session_id is None:
+                if transitioned is not None:
+                    transitioned.append(False)
                 continue
-            req.diag_es_mtp_status = manager.record_acceptance(
+            previous_status = req.diag_es_mtp_status
+            next_status = manager.record_acceptance(
                 session_id=req.diag_es_mtp_session_id,
                 rid=req.rid,
                 accepted_drafts=int(accept_len) - 1,
             )
+            req.diag_es_mtp_status = next_status
+            if transitioned is not None:
+                from sglang.srt.diag_es.mtp_kv_replay import (
+                    mtp_candidate_requires_kv_replay,
+                )
+
+                transitioned.append(
+                    mtp_candidate_requires_kv_replay(previous_status, next_status)
+                )
+        has_transition = transitioned is not None and any(transitioned)
+        if has_transition != acceptance_reservation.expects_kv_replay:
+            raise RuntimeError(
+                "MTP acceptance preflight disagreed with the effective candidate transition"
+            )
+        if not has_transition:
+            manager.finish_acceptance_batch(acceptance_reservation)
+            return None
+        return tuple(transitioned), acceptance_reservation
 
     def _note_diag_es_mtp_draft_read(self, batch) -> None:
         """Fence the last draft-model read before its bank slot is reused.

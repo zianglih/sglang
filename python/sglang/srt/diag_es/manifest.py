@@ -8,7 +8,7 @@ from typing import Literal, Mapping
 import torch
 
 QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v2"
-JOYAI_LLM_FLASH_MTP_SCHEMA_ID = "joyai-llm-flash-mtp-diag-es-v1"
+JOYAI_LLM_FLASH_MTP_SCHEMA_ID = "joyai-llm-flash-mtp-diag-es-v2"
 DiagESPlacement = Literal["pre", "post", "both"]
 
 _SUPPORTED_PLACEMENTS = frozenset(("pre", "post", "both"))
@@ -285,38 +285,18 @@ def _joyai_mtp_schema_digest(
     *,
     placement: DiagESPlacement,
 ) -> str:
-    # Preserve the already-published post-only v1 digest exactly. The pre space
-    # deliberately omits the physical fused q_a/kv_a input so a four-attempt
-    # candidate cannot leave seed-dependent draft KV behind for later
-    # candidates.
-    post_only = placement == "post"
     payload = {
         "version": JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
         "placement": placement,
-        "kv_contract": (
-            "target-and-direct-draft-kv-neutral-v1"
-            if post_only
-            else "target-and-direct-draft-kv-neutral-pre-v1"
-        ),
+        "kv_contract": "request-private-draft-kv-prefix-replay-v2",
         "dense_sites": [
             (site.site_id, site.width, site.active_width) for site in dense_sites
         ],
-        "excluded_sites": (
-            [
-                "model.eh_proj.output",
-                "model.decoder.self_attn.kv_a_proj_with_mqa.output",
-                "model.decoder.self_attn.kv_b_proj.output",
-                "model.shared_head.head.output",
-            ]
-            if post_only
-            else [
-                "model.eh_proj",
-                "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.input",
-                "model.decoder.self_attn.kv_a_proj_with_mqa.output",
-                "model.decoder.self_attn.kv_b_proj",
-                "model.shared_head.head",
-            ]
-        ),
+        "excluded_non_sites": [
+            "model.decoder.self_attn.kv_b_proj:absorbed-mla-bypasses-linear",
+            "model.eh_proj:outside-decoder",
+            "model.shared_head.head:outside-decoder",
+        ],
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -329,11 +309,11 @@ def register_joyai_llm_flash_mtp_manifest(
 ) -> DiagESManifest:
     """Register the pre/post search space for JoyAI's dense MTP layer.
 
-    For post steering, q_a is fused with kv_a in SGLang. Its bank spans the
-    physical 2112-wide epilogue, but only the leading 1536 q_a values are
-    trainable; the 576-wide kv_a suffix stays exact zero. The fused q_a/kv_a
-    input is excluded from pre steering so candidate changes never alter draft
-    KV state. No MTP placement changes the target model or target KV cache.
+    q_a is fused with kv_a in SGLang, so both the 2048-wide fused input and the
+    complete 2112-wide fused output are ordinary decoder linear sites. This
+    makes draft KV candidate-dependent for every placement. The speculative
+    worker rebuilds the historical draft prefix at candidate transitions; no
+    MTP placement changes target-model values or target KV contents.
     """
 
     if placement not in _SUPPORTED_PLACEMENTS:
@@ -418,8 +398,12 @@ def register_joyai_llm_flash_mtp_manifest(
             shape=shape,
             dtype=torch.bfloat16,
         )
-    # Reset all relevant sites explicitly so a reused model object cannot carry
-    # stale bindings from a failed or earlier registration.
+    # Reset all inspected linears explicitly so a reused model object cannot
+    # carry stale bindings from a failed or earlier registration. kv_b is
+    # deliberately not a site: JoyAI's active MLA path consumes the post-load
+    # w_kc/w_vc tensors and bypasses kv_b_proj's LinearBase. An algebraically
+    # moved scale would not preserve the standalone-pre / FP32-GEMM-epilogue
+    # numerical contract.
     for linear in (fused_q_a_kv_a, q_b, kv_b, out, gate_up, down):
         linear.es_pre_site_id = None
         linear.es_post_site_id = None
@@ -434,35 +418,26 @@ def register_joyai_llm_flash_mtp_manifest(
     attention._use_min_latency_q_b_gemm = False
 
     dense_sites_list: list[DenseSite] = []
-    for linear, base, input_width, output_width, post_active_width, allow_pre in (
+    for linear, base, input_width, output_width in (
         (
             fused_q_a_kv_a,
             "model.decoder.self_attn.fused_qkv_a_proj_with_mqa",
             2048,
             2112,
-            1536,
-            False,
         ),
-        (q_b, "model.decoder.self_attn.q_b_proj", 1536, 6144, None, True),
-        (out, "model.decoder.self_attn.o_proj", 4096, 2048, None, True),
-        (gate_up, "model.decoder.mlp.gate_up_proj", 2048, 14336, None, True),
-        (down, "model.decoder.mlp.down_proj", 7168, 2048, None, True),
+        (q_b, "model.decoder.self_attn.q_b_proj", 1536, 6144),
+        (out, "model.decoder.self_attn.o_proj", 4096, 2048),
+        (gate_up, "model.decoder.mlp.gate_up_proj", 2048, 14336),
+        (down, "model.decoder.mlp.down_proj", 7168, 2048),
     ):
-        if allow_pre and placement in ("pre", "both"):
+        if placement in ("pre", "both"):
             pre_site = f"{base}.input"
             linear.es_pre_site_id = pre_site
             dense_sites_list.append(DenseSite(pre_site, input_width))
         if placement in ("post", "both"):
-            post_base = (
-                "model.decoder.self_attn.q_a_proj" if linear is fused_q_a_kv_a else base
-            )
-            post_site = f"{post_base}.output"
+            post_site = f"{base}.output"
             linear.es_post_site_id = post_site
-            dense_sites_list.append(
-                DenseSite(post_site, output_width, active_width=post_active_width)
-            )
-    # kv_b remains unbound. With post steering, the kv_a suffix of the fused
-    # bank is fixed-zero by active_width=1536 in the session manager.
+            dense_sites_list.append(DenseSite(post_site, output_width))
     dense_sites = tuple(dense_sites_list)
     grouped_shapes: dict[str, tuple[int, ...]] = {}
     return DiagESManifest(

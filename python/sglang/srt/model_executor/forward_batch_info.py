@@ -115,6 +115,25 @@ def _build_diag_es_candidate_slots(
         device=model_runner.device,
     )
     if batch.forward_mode.is_decode_or_idle():
+        if (
+            batch.forward_mode.is_decode()
+            and getattr(model_runner, "is_draft_worker", False)
+            and batch.spec_info is not None
+            and batch.spec_info.num_tokens_per_req != 1
+        ):
+            width = batch.spec_info.num_tokens_per_req
+            if width < 1:
+                raise RuntimeError(
+                    "MTP draft decode requires a positive token width per request"
+                )
+            return (
+                torch.repeat_interleave(
+                    request_slots,
+                    width,
+                    output_size=len(batch.input_ids),
+                ),
+                request_slots_cpu,
+            )
         return request_slots, request_slots_cpu
 
     # Target verification is a fixed-width extend whose live rows are the

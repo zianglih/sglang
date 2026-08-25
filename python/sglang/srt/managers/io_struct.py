@@ -1833,11 +1833,17 @@ class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
     reward_zscore_epsilon: float = 1e-8
     max_update_rms_ratio: float = 10.0
     max_update_abs_max_ratio: float = 100.0
+    candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous"
 
     def __post_init__(self) -> None:
         if self.action == "register":
             if self.session_id is None or self.seed is None:
                 raise ValueError("MTP session register requires session_id and seed")
+            if self.candidate_schedule not in ("contiguous", "round_robin"):
+                raise ValueError(
+                    "MTP session candidate_schedule must be 'contiguous' or "
+                    "'round_robin'"
+                )
         elif self.action == "retire":
             if self.session_id is None:
                 raise ValueError("MTP session retire requires session_id")

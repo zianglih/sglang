@@ -30,12 +30,33 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
     candidate = {"index": 0}
 
     class _Manager:
+        reservation = SimpleNamespace(expects_kv_replay=True)
+
+        @classmethod
+        def preflight_acceptance_batch(cls, attempts):
+            assert attempts == [("session", "rid", 1)]
+            order.append("preflight")
+            return cls.reservation
+
         @staticmethod
         def record_acceptance(**kwargs):
             order.append("feedback")
             assert kwargs["accepted_drafts"] == 1
             candidate["index"] = 1
-            return {"population_index": 1}
+            return {
+                "population_index": 1,
+                "theta_version": 0,
+                "perturbation_seed": 2,
+                "sigma": 0.01,
+                "learning_rate": 0.1,
+            }
+
+        @staticmethod
+        def record_kv_replay(**kwargs):
+            assert kwargs["acceptance_batch_reservation"] is _Manager.reservation
+            assert kwargs["session_ids"] == ["session"]
+            assert kwargs["request_rows"] == [10]
+            order.append("replay_telemetry")
 
         @staticmethod
         def note_slots_read(slots):
@@ -67,11 +88,24 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
         assert candidate["index"] == 1
         order.append("cuda_graph_replay")
 
+    class _Replay:
+        @staticmethod
+        def replay_transitioned_prefixes(_batch, transitions):
+            assert transitions == (True,)
+            assert candidate["index"] == 1
+            order.append("kv_replay")
+            return SimpleNamespace(
+                replayed_rows=10,
+                request_rows=(10,),
+                enqueue_time_ms=0.25,
+            )
+
     draft_worker = SimpleNamespace(
         draft=lambda batch: draft(batch),
         _draft_extend_for_decode=draft_extend,
         draft_runner=SimpleNamespace(tp_group=None),
         draft_tp_context=lambda _group: contextlib.nullcontext(),
+        diag_es_mtp_kv_replay=_Replay(),
     )
     output = SimpleNamespace(
         accept_lens=torch.tensor([2]),
@@ -81,7 +115,13 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
         rid="rid",
         diag_es_mtp_session_id="session",
         diag_es_mtp_slot=7,
-        diag_es_mtp_status=None,
+        diag_es_mtp_status={
+            "population_index": 0,
+            "theta_version": 0,
+            "perturbation_seed": 1,
+            "sigma": 0.01,
+            "learning_rate": 0.1,
+        },
     )
     batch = SimpleNamespace(
         forward_mode=SimpleNamespace(is_extend=lambda: False),
@@ -93,6 +133,7 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
     worker = object.__new__(EAGLEWorkerV2)
     worker._draft_worker = draft_worker
     worker._diag_es_mtp_enabled = True
+    worker._diag_es_mtp_requires_kv_replay = True
     worker.speculative_num_steps = 3
     worker.activate_step_by_batch = lambda _bs: None
 
@@ -102,14 +143,22 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
 
     worker.verify = verify
 
-    result = EAGLEWorkerV2.forward_batch_generation(worker, batch)
+    def publish(_seq_lens):
+        assert order[-1] == "replay_telemetry"
+        order.append("publish")
+
+    result = EAGLEWorkerV2.forward_batch_generation(worker, batch, on_publish=publish)
 
     assert result is output
-    assert req.diag_es_mtp_status == {"population_index": 1}
+    assert req.diag_es_mtp_status["population_index"] == 1
     assert order == [
         "draft",
         "verify",
+        "preflight",
         "feedback",
+        "kv_replay",
+        "replay_telemetry",
+        "publish",
         "cuda_graph_replay",
         "slot_read_fence",
     ]

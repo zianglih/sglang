@@ -179,6 +179,11 @@ class JoyAILLMFlashForCausalLMNextN:
         (
             "pre",
             [
+                (
+                    "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.input",
+                    2048,
+                    None,
+                ),
                 ("model.decoder.self_attn.q_b_proj.input", 1536, None),
                 ("model.decoder.self_attn.o_proj.input", 4096, None),
                 ("model.decoder.mlp.gate_up_proj.input", 2048, None),
@@ -188,7 +193,11 @@ class JoyAILLMFlashForCausalLMNextN:
         (
             "post",
             [
-                ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
+                (
+                    "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.output",
+                    2112,
+                    None,
+                ),
                 ("model.decoder.self_attn.q_b_proj.output", 6144, None),
                 ("model.decoder.self_attn.o_proj.output", 2048, None),
                 ("model.decoder.mlp.gate_up_proj.output", 14336, None),
@@ -198,7 +207,16 @@ class JoyAILLMFlashForCausalLMNextN:
         (
             "both",
             [
-                ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
+                (
+                    "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.input",
+                    2048,
+                    None,
+                ),
+                (
+                    "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.output",
+                    2112,
+                    None,
+                ),
                 ("model.decoder.self_attn.q_b_proj.input", 1536, None),
                 ("model.decoder.self_attn.q_b_proj.output", 6144, None),
                 ("model.decoder.self_attn.o_proj.input", 4096, None),
@@ -225,22 +243,26 @@ def test_joyai_mtp_manifest_is_exact_dense_search_space(placement, expected_site
     attention = model.model.decoder.self_attn
     assert attention._use_min_latency_fused_a_gemm is False
     assert attention._use_min_latency_q_b_gemm is False
+    # kv_b is absorbed into w_kc/w_vc by the active MLA backend, bypassing
+    # LinearBase; it remains an explicit non-site to preserve the GEMM contract.
     assert attention.kv_b_proj.es_pre_site_id is None
     assert attention.kv_b_proj.es_post_site_id is None
     assert attention.kv_b_proj.es_pre_delta_bank is None
     assert attention.kv_b_proj.es_post_delta_bank is None
-    assert attention.fused_qkv_a_proj_with_mqa.es_pre_site_id is None
+    assert (attention.fused_qkv_a_proj_with_mqa.es_pre_site_id is not None) == (
+        placement in ("pre", "both")
+    )
     assert (attention.fused_qkv_a_proj_with_mqa.es_post_site_id is not None) == (
         placement in ("post", "both")
     )
 
 
-def test_joyai_mtp_post_schema_digest_remains_backward_compatible():
+def test_joyai_mtp_v2_post_schema_digest_is_stable():
     manifest = register_joyai_llm_flash_mtp_manifest(
         JoyAILLMFlashForCausalLMNextN(), placement="post"
     )
     assert manifest.schema_digest == (
-        "7c5a6102fcc4b685afe6ac22a3ac1adf35408702a2a9a3f2ef4bde96ae4f05b2"
+        "7cb156b471d337fa56184defb0296782b66a17fa14b11104c242d114345eb37e"
     )
 
 

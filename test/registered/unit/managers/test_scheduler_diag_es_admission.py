@@ -8,7 +8,10 @@ from sglang.srt.diag_es import (
     DiagESInvalidCandidateError,
     DiagESNotEnabledError,
 )
-from sglang.srt.diag_es.manager import DiagESManager
+from sglang.srt.diag_es.manager import (
+    DiagESManager,
+    compose_diag_es_mtp_request_extra_key,
+)
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.managers import scheduler as scheduler_module
 from sglang.srt.managers.scheduler import Scheduler
@@ -37,6 +40,7 @@ class _FakeReq:
 
 def _scheduler():
     scheduler = Scheduler.__new__(Scheduler)
+    scheduler._diag_es_mtp_request_bind_generation = 0
     scheduler.model_config = SimpleNamespace(vocab_size=100, hf_eos_token_id=2)
     scheduler.tokenizer = object()
     scheduler.metrics_reporter = SimpleNamespace(enable_metrics=False)
@@ -153,7 +157,8 @@ def test_blank_candidate_id_is_request_local(monkeypatch, candidate_id):
     assert "non-empty" in queued_req.finished_reason
 
 
-def test_mtp_admission_binds_independent_slot_without_target_cache_key(monkeypatch):
+def test_mtp_admission_binds_slot_and_request_private_cache_key(monkeypatch):
+    scheduler = _scheduler()
     req = _FakeReq(
         "rid", "hello", [1], object(), extra_key="tenant", es_candidate_id="main"
     )
@@ -163,15 +168,54 @@ def test_mtp_admission_binds_independent_slot_without_target_cache_key(monkeypat
     import sglang.srt.diag_es as diag_es
 
     monkeypatch.setattr(diag_es, "get_diag_es_mtp_manager", lambda: manager)
-    Scheduler._bind_diag_es_mtp_request(req, "mtp-session")
+    scheduler._bind_diag_es_mtp_request(req, "mtp-session")
 
     manager.bind_request.assert_called_once_with(
         session_id="mtp-session", rid="rid"
     )
     assert req.diag_es_mtp_slot == 7
     assert req.es_candidate_slot == 0
-    assert req.extra_key == "tenant"
+    assert req.extra_key == compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="mtp-session", rid="rid", bind_generation=1
+    )
     assert not req.diag_es_mtp_session_released
+
+
+def test_mtp_request_private_cache_key_changes_on_reused_rid_binding():
+    key = compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="session-a", rid="rid-a", bind_generation=1
+    )
+    assert key == compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="session-a", rid="rid-a", bind_generation=1
+    )
+    assert key != compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="session-a", rid="rid-a", bind_generation=2
+    )
+    assert key != compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="session-a", rid="rid-b", bind_generation=1
+    )
+    assert key != compose_diag_es_mtp_request_extra_key(
+        "tenant", session_id="session-b", rid="rid-a", bind_generation=1
+    )
+
+
+def test_mtp_rebinding_same_rid_gets_a_fresh_private_cache_namespace(monkeypatch):
+    scheduler = _scheduler()
+    manager = SimpleNamespace(
+        bind_request=Mock(return_value={"resident_slot": 7, "population_index": 0})
+    )
+
+    import sglang.srt.diag_es as diag_es
+
+    monkeypatch.setattr(diag_es, "get_diag_es_mtp_manager", lambda: manager)
+    first = _FakeReq("rid", "hello", [1], object(), extra_key="tenant")
+    second = _FakeReq("rid", "hello", [1], object(), extra_key="tenant")
+
+    scheduler._bind_diag_es_mtp_request(first, "mtp-session")
+    scheduler._bind_diag_es_mtp_request(second, "mtp-session")
+
+    assert first.extra_key != second.extra_key
+    assert scheduler._diag_es_mtp_request_bind_generation == 2
 
 
 def test_mtp_id_on_clean_server_is_request_local(monkeypatch):

@@ -2211,6 +2211,13 @@ class DeepseekV2AttentionMLA(
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ):
         assert self.q_lora_rank is not None
+        if replay := getattr(self, "diag_es_mtp_kv_replay", None):
+            replay.capture(
+                hidden_states,
+                forward_batch.positions,
+                forward_batch.forward_mode,
+                forward_batch.out_cache_loc,
+            )
         if self._use_min_latency_fused_a_gemm is None:
             self._use_min_latency_fused_a_gemm = (
                 self.has_fused_proj

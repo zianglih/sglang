@@ -1143,6 +1143,7 @@ class Scheduler(
             ipc_channels=self.ipc_channels,
         )
         self._last_logged_elastic_radix_namespace: Optional[str] = None
+        self._diag_es_mtp_request_bind_generation = 0
         self.session_controller = SessionController(self.tree_cache)
         self.forward_sleep_time = None
         self._engine_paused = False
@@ -2359,9 +2360,11 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
-    @staticmethod
-    def _bind_diag_es_mtp_request(req: Req, session_id: str) -> None:
-        from sglang.srt.diag_es import get_diag_es_mtp_manager
+    def _bind_diag_es_mtp_request(self, req: Req, session_id: str) -> None:
+        from sglang.srt.diag_es import (
+            compose_diag_es_mtp_request_extra_key,
+            get_diag_es_mtp_manager,
+        )
 
         status = get_diag_es_mtp_manager().bind_request(
             session_id=session_id,
@@ -2371,6 +2374,13 @@ class Scheduler(
         req.diag_es_mtp_session_released = False
         req.diag_es_mtp_status = status
         req.diag_es_mtp_slot = status["resident_slot"]
+        self._diag_es_mtp_request_bind_generation += 1
+        req.extra_key = compose_diag_es_mtp_request_extra_key(
+            req.extra_key,
+            session_id=session_id,
+            rid=req.rid,
+            bind_generation=self._diag_es_mtp_request_bind_generation,
+        )
 
     def handle_generate_request(
         self,
@@ -2577,8 +2587,9 @@ class Scheduler(
                 self.init_req_max_new_tokens(req)
                 self._add_request_to_queue(req)
                 return
-            # MTP steering changes only the draft policy. Deliberately leave
-            # req.extra_key untouched so target radix/KV identity is unchanged.
+            # The target values remain unsteered, but the v2 MTP replay sidecar
+            # shares its physical location IDs with the target allocator. The
+            # admission helper therefore makes every live request cache-private.
 
         self._maybe_namespace_elastic_radix_cache(req)
 

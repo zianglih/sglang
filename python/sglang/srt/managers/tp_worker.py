@@ -257,6 +257,7 @@ class BaseTpWorker(ABC):
                 reward_zscore_epsilon=recv_req.reward_zscore_epsilon,
                 max_update_rms_ratio=recv_req.max_update_rms_ratio,
                 max_update_abs_max_ratio=recv_req.max_update_abs_max_ratio,
+                candidate_schedule=recv_req.candidate_schedule,
             ),
         )
 

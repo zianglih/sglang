@@ -125,6 +125,7 @@ def _make_model_runner(
     sa.enable_hisparse = False
     sa.enable_dsa_cache_layer_split = False
     sa.kv_cache_dtype = "auto"
+    sa.diag_es_mtp_placement = "off"
     mr.server_args = sa
 
     spec = MagicMock()
@@ -220,6 +221,28 @@ class TestDefaultConfigurator(unittest.TestCase):
         _, _, config = self._run(10_000_000)
         self.assertIsNone(config.full_max_total_num_tokens)
         self.assertIsNone(config.swa_max_total_num_tokens)
+
+    def test_mtp_replay_sidecar_is_accounted_in_target_cell_size(self):
+        runner = _make_model_runner(num_layers=40, use_mla_backend=True)
+        runner.model_config.hidden_size = 2048
+        runner.server_args.diag_es_mtp_placement = "both"
+        runner.spec_algorithm.is_eagle.return_value = True
+        runner.spec_aux_config.eagle_draft_num_layers = 1
+
+        with mock_cpu_env(kv_size=2):
+            from sglang.srt.model_executor.pool_configurator import (
+                DefaultPoolConfigurator,
+            )
+
+            configurator = DefaultPoolConfigurator(runner)
+
+        target_mla = (512 + 64) * 40 * 2
+        draft_mla = (512 + 64) * 2
+        replay_sidecar = 2048 * 2 + 8
+        self.assertEqual(
+            configurator._cell_size,
+            target_mla + draft_mla + replay_sidecar,
+        )
 
     @patch(
         "sglang.srt.model_executor.pool_configurator.get_dsa_index_head_dim",

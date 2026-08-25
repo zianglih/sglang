@@ -177,6 +177,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         # Alias for better readability
         self.draft_runner = self.draft_worker.model_runner
+        self.diag_es_mtp_kv_replay = None
         self._init_dsa_index_share_state()
         # Eager draft-extend seed buffer (graph paths use their own static ones).
         self.dsa_extend_topk_buf: Optional[torch.Tensor] = None
@@ -201,6 +202,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
+        if self.server_args.diag_es_mtp_placement != "off":
+            from sglang.srt.diag_es.mtp_kv_replay import DiagESMTPDraftKVReplay
+
+            self.diag_es_mtp_kv_replay = DiagESMTPDraftKVReplay(
+                model=self.draft_runner.model,
+                token_to_kv_pool=self.draft_runner.token_to_kv_pool,
+            )
         self.init_token_map()
         self.init_lm_head()
 
@@ -1015,6 +1023,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
         # Parse arguments
         self.server_args = server_args
         self._diag_es_mtp_enabled = server_args.diag_es_mtp_placement != "off"
+        self._diag_es_mtp_requires_kv_replay = self._diag_es_mtp_enabled
         self.topk = server_args.speculative_eagle_topk
         self.speculative_num_steps = server_args.speculative_num_steps
         self.speculative_num_draft_tokens = server_args.speculative_num_draft_tokens
@@ -1175,7 +1184,45 @@ class EAGLEWorkerV2(BaseSpecWorker):
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
             batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
-            self._record_diag_es_mtp_feedback(batch, batch_output)
+            mtp_feedback = self._record_diag_es_mtp_feedback(batch, batch_output)
+            if mtp_feedback is not None:
+                mtp_kv_transitions, acceptance_reservation = mtp_feedback
+                with (
+                    self.draft_worker.draft_tp_context(
+                        self.draft_worker.draft_runner.tp_group
+                    ),
+                    speculative_moe_backend_context(),
+                    speculative_moe_a2a_backend_context(),
+                    spec_stage_span("draft_kv_replay"),
+                ):
+                    replay = self.draft_worker.diag_es_mtp_kv_replay
+                    if replay is None:
+                        raise RuntimeError(
+                            "MTP candidate changed without a draft-KV replay buffer"
+                        )
+                    replay_stats = replay.replay_transitioned_prefixes(
+                        batch, mtp_kv_transitions
+                    )
+                from sglang.srt.diag_es import get_diag_es_mtp_manager
+
+                transitioned_indices = [
+                    index
+                    for index, changed in enumerate(mtp_kv_transitions)
+                    if changed
+                ]
+                get_diag_es_mtp_manager().record_kv_replay(
+                    acceptance_batch_reservation=acceptance_reservation,
+                    session_ids=[
+                        batch.reqs[index].diag_es_mtp_session_id
+                        for index in transitioned_indices
+                    ],
+                    request_rows=[
+                        replay_stats.request_rows[index]
+                        for index in transitioned_indices
+                    ],
+                    replayed_rows=replay_stats.replayed_rows,
+                    enqueue_time_ms=replay_stats.enqueue_time_ms,
+                )
             # Publish before draft_extend so the fence is at verify-end.
             if on_publish is not None:
                 on_publish(batch_output.new_seq_lens)

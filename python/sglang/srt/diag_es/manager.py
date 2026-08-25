@@ -67,6 +67,29 @@ def compose_diag_es_extra_key(
     return f"diag-es-v1:{digest.hexdigest()}"
 
 
+def compose_diag_es_mtp_request_extra_key(
+    existing_extra_key: str | None,
+    *,
+    session_id: str,
+    rid: str,
+    bind_generation: int,
+) -> str:
+    """Give one live MTP request private physical target/draft locations."""
+
+    if not isinstance(bind_generation, int) or isinstance(bind_generation, bool):
+        raise TypeError("MTP request bind_generation must be an integer")
+    if bind_generation < 1:
+        raise ValueError("MTP request bind_generation must be positive")
+    digest = hashlib.sha256()
+    for value in (existing_extra_key or "", session_id, rid):
+        encoded = value.encode()
+        digest.update(len(encoded).to_bytes(8, "little"))
+        digest.update(encoded)
+    digest.update(bind_generation.to_bytes(8, "little", signed=False))
+    digest.update(b"diag-es-mtp-request-private-v2")
+    return f"diag-es-mtp-request-private-v2:{digest.hexdigest()}"
+
+
 class DiagESManager:
     """Fixed-address resident FP32 delta banks for one Qwen3 ES engine."""
 

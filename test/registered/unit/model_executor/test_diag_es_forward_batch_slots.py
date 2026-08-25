@@ -71,6 +71,17 @@ class TestDiagESForwardBatchSlots(unittest.TestCase):
         )
         self.assertEqual(request_slots, (13, 11))
 
+    def test_topk2_draft_decode_expands_mtp_slots_per_activation_row(self):
+        token_slots, request_slots = _build_diag_es_candidate_slots(
+            _batch(ForwardMode.DECODE, [3, 1], token_count=4, width=2),
+            _runner(True, is_draft_worker=True),
+        )
+
+        torch.testing.assert_close(
+            token_slots, torch.tensor([13, 13, 11, 11], dtype=torch.int32)
+        )
+        self.assertEqual(request_slots, (13, 11))
+
     def test_prefill_expands_slots_by_extend_lengths(self):
         token_slots, request_slots = _build_diag_es_candidate_slots(
             _batch(

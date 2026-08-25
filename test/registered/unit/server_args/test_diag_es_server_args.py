@@ -32,6 +32,7 @@ def _runtime_view(**overrides):
         "attention_backend": "trtllm_mha",
         "decode_attention_backend": None,
         "prefill_attention_backend": None,
+        "page_size": 1,
         "enable_torch_compile": False,
         "ep_num_redundant_experts": 0,
         "enable_eplb": False,
@@ -166,7 +167,7 @@ def test_diag_es_identity_is_role_scoped():
 def test_mtp_diag_es_identity_is_exact_and_allows_independent_target_role():
     values = dict(
         diag_es_mtp_placement="post",
-        diag_es_mtp_schema_id="joyai-llm-flash-mtp-diag-es-v1",
+        diag_es_mtp_schema_id="joyai-llm-flash-mtp-diag-es-v2",
         diag_es_mtp_model_artifact_id="joyai@sha256:abc",
         speculative_algorithm="EAGLE",
     )
@@ -195,12 +196,75 @@ def test_mtp_diag_es_runtime_allows_target_moe_backend_auto():
         _resolved=lambda: _runtime_view(
             speculative_algorithm="EAGLE",
             moe_runner_backend="auto",
+            attention_backend="flashinfer",
         ),
     )
     subject._handle_diag_es_mtp_runtime_contract = lambda: (
         ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
     )
     ServerArgs._handle_diag_es_runtime_contract(subject)
+
+
+def test_mtp_diag_es_runtime_allows_official_topk2_shape():
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="both",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            speculative_num_steps=2,
+            speculative_num_draft_tokens=3,
+            speculative_eagle_topk=2,
+            attention_backend="flashinfer",
+            page_size=64,
+        ),
+    )
+    subject._handle_diag_es_mtp_runtime_contract = lambda: (
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
+    )
+    ServerArgs._handle_diag_es_runtime_contract(subject)
+
+
+def test_mtp_diag_es_rejects_topk2_trtllm_mla_page_tree():
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="both",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            speculative_num_steps=2,
+            speculative_num_draft_tokens=3,
+            speculative_eagle_topk=2,
+            attention_backend="trtllm_mla",
+            page_size=64,
+        ),
+    )
+    with pytest.raises(ValueError, match="topk>1 with page_size>1"):
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("radix_cache_backend", "custom"),
+        ("enable_hierarchical_cache", True),
+        ("enable_lmcache", True),
+        ("enable_flexkv", True),
+    ],
+)
+def test_mtp_diag_es_rejects_external_cache_backends(field, value):
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="post",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            attention_backend="flashinfer",
+            **{field: value},
+        ),
+    )
+    with pytest.raises(ValueError, match="FlashInfer-attention/Triton-GEMM"):
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
 
 
 def test_mtp_diag_es_rejects_multi_layer_eagle():
@@ -210,6 +274,7 @@ def test_mtp_diag_es_rejects_multi_layer_eagle():
         diag_es_mtp_max_sessions=64,
         _resolved=lambda: _runtime_view(
             speculative_algorithm="EAGLE",
+            attention_backend="flashinfer",
             enable_multi_layer_eagle=True,
         ),
     )

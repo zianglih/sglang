@@ -93,6 +93,22 @@ def _dflash_draft_cell_size(kvc: KVCacheConfigurator) -> int:
     return int(cell_size) * get_parallel().attn_dcp_size
 
 
+def _mtp_replay_cell_size(kvc: KVCacheConfigurator) -> int:
+    """Candidate-neutral BF16 activation plus int64 position per token."""
+
+    placement = getattr(kvc.server_args, "diag_es_mtp_placement", "off")
+    if kvc.is_draft_worker or placement == "off":
+        return 0
+    hidden_size = int(kvc.model_config.hidden_size)
+    if hidden_size != 2048:
+        raise ValueError(
+            "JoyAI MTP draft-KV replay memory accounting requires hidden_size=2048"
+        )
+    return hidden_size * torch._utils._element_size(
+        torch.bfloat16
+    ) + torch._utils._element_size(torch.int64)
+
+
 def _get_dsv4_compress_state_dtype_sizes() -> tuple[int, int]:
     dtype_name = envs.SGLANG_DSV4_COMPRESS_STATE_DTYPE.get().strip().lower()
     if dtype_name in ("float32", "fp32"):
@@ -181,6 +197,11 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     self._cell_size
                     * (1 + int(eagle_draft_num_layers) / int(num_layers))
                 )
+
+        # The replay buffer is allocated beside the one-layer draft MLA pool,
+        # but the target worker owns the shared max-token budget. Price its
+        # fixed-address BF16 [token, hidden] sidecar into that budget here.
+        self._cell_size += _mtp_replay_cell_size(kvc)
 
         # DFLASH/DSPARK: scale cell_size to account for draft model KV cache
         if kvc.spec_algorithm.is_dflash_family() and not kvc.is_draft_worker:

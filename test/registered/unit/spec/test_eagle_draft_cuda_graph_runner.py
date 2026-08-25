@@ -214,6 +214,34 @@ class TestEagleDraftCudaGraphRunner(CustomTestCase):
             torch.tensor([5, 7, 0, 0], dtype=torch.int32),
         )
 
+    def test_topk2_mtp_slots_copy_every_row_into_static_graph_buffer(self):
+        backend = _RecordingDraftBackend()
+        runner = self._build_runner(backend)
+        runner.captured_req_width = 2
+        runner.buffers.out_cache_loc = torch.empty(
+            CAPTURE_BS * 2 * NUM_STEPS, dtype=torch.int64
+        )
+        runner.buffers.positions = torch.empty(CAPTURE_BS * 2, dtype=torch.int64)
+        runner.buffers.es_candidate_slots = torch.full(
+            (CAPTURE_BS * 2,), -1, dtype=torch.int32
+        )
+        forward_batch = self._build_forward_batch([10, 11], 21)
+        forward_batch.out_cache_loc = torch.arange(
+            2 * 2 * NUM_STEPS, dtype=torch.int64
+        )
+        forward_batch.positions = torch.arange(4, dtype=torch.int64)
+        forward_batch.spec_info.num_tokens_per_req = 2
+        forward_batch.es_candidate_slots = torch.tensor(
+            [5, 5, 7, 7], dtype=torch.int32
+        )
+
+        runner.execute(forward_batch)
+
+        torch.testing.assert_close(
+            runner.buffers.es_candidate_slots,
+            torch.tensor([5, 5, 7, 7, 0, 0, 0, 0], dtype=torch.int32),
+        )
+
     def test_mtp_capture_warmup_has_identity_cpu_slots(self):
         class _CaptureBackend(_RecordingDraftBackend):
             def init_forward_metadata_in_graph(self, _forward_batch):
