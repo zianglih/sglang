@@ -34,6 +34,7 @@ from sglang.srt.configs.model_config import (
 from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.debug_utils.dumper import dumper
 from sglang.srt.diag_es.roles import (
+    get_diag_es_mtp_max_correct_drafts,
     get_diag_es_placement,
     is_diag_es_enabled,
 )
@@ -453,9 +454,9 @@ class ModelRunner:
         )
 
         if self.ps.pp_size > 1:
-            assert self.support_pp, (
-                "Pipeline Parallel is not compatible with this model."
-            )
+            assert (
+                self.support_pp
+            ), "Pipeline Parallel is not compatible with this model."
 
         # For weight updates
         self.init_weight_updater()
@@ -1142,8 +1143,8 @@ class ModelRunner:
                 ),
                 is_draft_worker=self.is_draft_worker,
                 mtp_max_sessions=self.server_args.diag_es_mtp_max_sessions,
-                mtp_max_correct_drafts=(
-                    self.server_args.speculative_num_draft_tokens - 1
+                mtp_max_correct_drafts=get_diag_es_mtp_max_correct_drafts(
+                    self.server_args, is_draft_worker=self.is_draft_worker
                 ),
             )
 

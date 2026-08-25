@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+
 from sglang.srt.server_args import ServerArgs
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -54,15 +55,22 @@ def _runtime_view(**overrides):
         "max_running_requests": 64,
         "disaggregation_mode": "null",
         "enable_two_batch_overlap": False,
+        "disable_cuda_graph": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
 
 
-def _validate_runtime(view, *, placement="pre"):
+def _validate_runtime(
+    view,
+    *,
+    placement="pre",
+    schema_id="qwen3-30b-a3b-diag-es-v2",
+):
     subject = SimpleNamespace(
         diag_es_target_placement=placement,
         diag_es_mtp_placement="off",
+        diag_es_schema_id=schema_id,
         _resolved=lambda: view,
     )
     ServerArgs._handle_diag_es_runtime_contract(subject)
@@ -99,6 +107,34 @@ def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
         _validate_runtime(
             _runtime_view(quantization="mxfp8", fp8_gemm_runner_backend="triton"),
             placement="post",
+        )
+
+
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+def test_qwen2_dense_diag_es_accepts_each_placement(placement):
+    _validate_runtime(
+        _runtime_view(attention_backend="triton", disable_cuda_graph=True),
+        placement=placement,
+        schema_id="qwen2.5-1.5b-instruct-dense-diag-es-v2",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("attention_backend", "trtllm_mha", "attention_backend"),
+        ("disable_cuda_graph", False, "disable_cuda_graph"),
+        ("quantization", "fp8", "unquantized BF16"),
+        ("speculative_algorithm", "EAGLE", "requires None"),
+    ],
+)
+def test_qwen2_dense_diag_es_rejects_runtime_contract_drift(field, value, message):
+    overrides = {"attention_backend": "triton", "disable_cuda_graph": True}
+    overrides[field] = value
+    with pytest.raises(ValueError, match=message):
+        _validate_runtime(
+            _runtime_view(**overrides),
+            schema_id="qwen2.5-1.5b-instruct-dense-diag-es-v2",
         )
 
 
@@ -162,6 +198,48 @@ def test_diag_es_identity_is_role_scoped():
         _validate_identity(
             diag_es_target_placement="pre", speculative_algorithm="EAGLE"
         )
+
+
+def test_disabled_qwen2_target_identity_does_not_reject_joyai_mtp_only():
+    _validate_identity(
+        diag_es_target_placement="off",
+        diag_es_schema_id="qwen2.5-1.5b-instruct-dense-diag-es-v2",
+        diag_es_mtp_placement="post",
+        diag_es_mtp_schema_id="joyai-llm-flash-mtp-diag-es-v2",
+        diag_es_mtp_model_artifact_id="joyai-artifact",
+        speculative_algorithm="EAGLE",
+    )
+
+
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+def test_qwen2_identity_accepts_target_only_and_rejects_mtp(placement):
+    target = {
+        "diag_es_target_placement": placement,
+        "diag_es_schema_id": "qwen2.5-1.5b-instruct-dense-diag-es-v2",
+        "diag_es_model_artifact_id": "qwen2-artifact",
+        "diag_es_resident_candidate_slots": 2,
+    }
+    _validate_identity(**target)
+
+    with pytest.raises(ValueError, match="Qwen2.5.*MTP.*off"):
+        _validate_identity(
+            **target,
+            diag_es_mtp_placement="post",
+            diag_es_mtp_schema_id="joyai-llm-flash-mtp-diag-es-v2",
+            diag_es_mtp_model_artifact_id="joyai-artifact",
+            speculative_algorithm="EAGLE",
+        )
+
+
+def test_qwen3_v1_identity_is_pre_only():
+    values = {
+        "diag_es_schema_id": "qwen3-30b-a3b-diag-es-v1",
+        "diag_es_model_artifact_id": "legacy-artifact",
+        "diag_es_resident_candidate_slots": 2,
+    }
+    _validate_identity(diag_es_target_placement="pre", **values)
+    with pytest.raises(ValueError, match="pre"):
+        _validate_identity(diag_es_target_placement="post", **values)
 
 
 def test_mtp_diag_es_identity_is_exact_and_allows_independent_target_role():
@@ -310,13 +388,24 @@ def test_invalid_role_placement_is_rejected():
 
 
 def test_diag_es_runner_role_helpers():
-    from sglang.srt.diag_es import get_diag_es_placement, is_diag_es_enabled
+    from sglang.srt.diag_es import (
+        get_diag_es_mtp_max_correct_drafts,
+        get_diag_es_placement,
+        is_diag_es_enabled,
+    )
 
     args = SimpleNamespace(
         diag_es_target_placement="both",
         diag_es_mtp_placement="off",
+        speculative_num_draft_tokens=None,
     )
     assert get_diag_es_placement(args, is_draft_worker=False) == "both"
     assert get_diag_es_placement(args, is_draft_worker=True) is None
     assert is_diag_es_enabled(args, is_draft_worker=False)
     assert not is_diag_es_enabled(args, is_draft_worker=True)
+    assert get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=False) is None
+    with pytest.raises(ValueError, match="speculative_num_draft_tokens"):
+        get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=True)
+
+    args.speculative_num_draft_tokens = 4
+    assert get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=True) == 3

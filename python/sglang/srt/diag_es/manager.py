@@ -5,14 +5,19 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
+
 from sglang.srt.diag_es.manifest import (
     JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
+    QWEN2_5_1_5B_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
+    QWEN3_30B_A3B_V1_SCHEMA_ID,
     DiagESManifest,
     DiagESPlacement,
     compute_effective_model_digest,
     register_joyai_llm_flash_mtp_manifest,
+    register_qwen2_5_1_5b_manifest,
     register_qwen3_30b_a3b_manifest,
+    register_qwen3_30b_a3b_v1_manifest,
 )
 from sglang.srt.diag_es.mtp import DiagESMTPSessionManager
 
@@ -471,9 +476,14 @@ def register_diag_es_model(
         _mtp_manager = mtp_manager
         return mtp_manager
 
-    if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
+    if schema_id == QWEN3_30B_A3B_SCHEMA_ID:
+        manifest = register_qwen3_30b_a3b_manifest(model, placement=placement)
+    elif schema_id == QWEN3_30B_A3B_V1_SCHEMA_ID:
+        manifest = register_qwen3_30b_a3b_v1_manifest(model, placement=placement)
+    elif schema_id == QWEN2_5_1_5B_SCHEMA_ID:
+        manifest = register_qwen2_5_1_5b_manifest(model, placement=placement)
+    else:
         raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
-    manifest = register_qwen3_30b_a3b_manifest(model, placement=placement)
     manager = DiagESManager(
         manifest=manifest,
         resident_candidate_slots=resident_candidate_slots,
@@ -481,14 +491,17 @@ def register_diag_es_model(
         device=next(model.parameters()).device,
     )
 
-    from sglang.srt.diag_es.moe_ops import MoeDeltaBanks
-
-    grouped = manifest.grouped_delta_shapes
-    for layer_id, decoder_layer in enumerate(model.model.layers):
-        for linear in (
+    is_qwen2 = schema_id == QWEN2_5_1_5B_SCHEMA_ID
+    for decoder_layer in model.model.layers:
+        linears = [
             decoder_layer.self_attn.qkv_proj,
             decoder_layer.self_attn.o_proj,
-        ):
+        ]
+        if is_qwen2:
+            linears.extend(
+                (decoder_layer.mlp.gate_up_proj, decoder_layer.mlp.down_proj)
+            )
+        for linear in linears:
             pre_site_id = linear.es_pre_site_id
             post_site_id = linear.es_post_site_id
             linear.es_pre_delta_bank = (
@@ -502,18 +515,27 @@ def register_diag_es_model(
                 else None
             )
 
-        def layer_bank(name: str) -> torch.Tensor | None:
-            if name not in grouped:
-                return None
-            return manager.get_grouped_delta_bank(name)[layer_id]
+    if not is_qwen2:
+        from sglang.srt.diag_es.moe_ops import MoeDeltaBanks
 
-        decoder_layer.mlp.experts.moe_runner_config.diag_es_delta_banks = MoeDeltaBanks(
-            token_slots=None,
-            fc1_pre=layer_bank("moe_fc1_pre"),
-            fc1_post=layer_bank("moe_fc1_post"),
-            fc2_pre=layer_bank("moe_fc2_pre"),
-            fc2_post=layer_bank("moe_fc2_post"),
-        )
+        grouped = manifest.grouped_delta_shapes
+        legacy_v1 = schema_id == QWEN3_30B_A3B_V1_SCHEMA_ID
+        for layer_id, decoder_layer in enumerate(model.model.layers):
+
+            def layer_bank(name: str) -> torch.Tensor | None:
+                if name not in grouped:
+                    return None
+                return manager.get_grouped_delta_bank(name)[layer_id]
+
+            decoder_layer.mlp.experts.moe_runner_config.diag_es_delta_banks = (
+                MoeDeltaBanks(
+                    token_slots=None,
+                    fc1_pre=layer_bank("moe_fc1" if legacy_v1 else "moe_fc1_pre"),
+                    fc1_post=None if legacy_v1 else layer_bank("moe_fc1_post"),
+                    fc2_pre=layer_bank("moe_fc2" if legacy_v1 else "moe_fc2_pre"),
+                    fc2_post=None if legacy_v1 else layer_bank("moe_fc2_post"),
+                )
+            )
 
     # Publish only after validation, allocation, and all hot-path bindings
     # succeed. A failed startup cannot expose a partially initialized manager.

@@ -16,6 +16,7 @@ from sglang.srt.diag_es.mtp import (
     DiagESMTPSessionError,
 )
 from sglang.srt.diag_es.roles import (
+    get_diag_es_mtp_max_correct_drafts,
     get_diag_es_placement,
     is_diag_es_enabled,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "compose_diag_es_mtp_request_extra_key",
     "compute_effective_model_digest",
     "get_diag_es_manager",
+    "get_diag_es_mtp_max_correct_drafts",
     "get_diag_es_mtp_manager",
     "get_diag_es_placement",
     "is_diag_es_enabled",

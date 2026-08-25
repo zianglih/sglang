@@ -2,7 +2,8 @@
 
 The weight follows ``torch.nn.functional.linear`` layout ``[N, K]``.  This
 module intentionally contains no backend fallback: the project harness selects
-it only for contiguous CUDA BF16 tensors from Qwen3-30B-A3B.
+it only for contiguous CUDA BF16 tensors from explicitly registered Diag-ES
+schemas.
 """
 
 from typing import Optional
