@@ -244,9 +244,9 @@ def test_joyai_mtp_manifest_is_exact_dense_search_space(placement, expected_site
     assert [
         (site.site_id, site.width, site.active_width) for site in manifest.dense_sites
     ] == expected_sites
-    expected_fused_a_override = None if placement == "pre" else False
-    assert attention._use_min_latency_fused_a_gemm is expected_fused_a_override
-    assert attention._use_min_latency_q_b_gemm is expected_fused_a_override
+    assert attention._use_min_latency_fused_a_gemm is False
+    expected_q_b_override = None if placement == "pre" else False
+    assert attention._use_min_latency_q_b_gemm is expected_q_b_override
     # kv_b is absorbed into w_kc/w_vc by the active MLA backend, bypassing
     # LinearBase; it remains an explicit non-site to preserve the GEMM contract.
     assert attention.kv_b_proj.es_pre_site_id is None
@@ -309,6 +309,28 @@ def test_joyai_mtp_post_query_sites_never_bypass_bound_linear_epilogue(
     assert q_b.shape == (num_tokens, 32, 192)
     assert attention.fused_qkv_a_proj_with_mqa.calls == [num_tokens]
     assert attention.q_b_proj.calls == [num_tokens]
+
+
+def test_joyai_mtp_pre_keeps_cache_writing_q_a_on_replay_linear(monkeypatch):
+    import sglang.srt.models.deepseek_v2 as deepseek_v2
+
+    model = JoyAILLMFlashForCausalLMNextN()
+    register_joyai_llm_flash_mtp_manifest(model, placement="pre")
+    attention = model.model.decoder.self_attn
+    attention.q_lora_rank = 1536
+
+    def fused_a_is_forbidden(*_args, **_kwargs):
+        raise AssertionError("cache-writing q_a must match the replay GEMM path")
+
+    monkeypatch.setattr(deepseek_v2, "linear_with_fused_a_gemm", fused_a_is_forbidden)
+    q_a = deepseek_v2.DeepseekV2AttentionMLA.prepare_qkv_latent(
+        attention,
+        torch.zeros(2, 2048, dtype=torch.bfloat16),
+        forward_batch=None,
+    )
+
+    assert q_a.shape == (2, 2112)
+    assert attention.fused_qkv_a_proj_with_mqa.calls == [2]
 
 
 @pytest.mark.parametrize(

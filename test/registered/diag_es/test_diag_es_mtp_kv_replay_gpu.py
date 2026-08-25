@@ -212,17 +212,25 @@ def _ordinary_fresh_mla_write(
     loc: torch.Tensor,
     candidate_slots: torch.Tensor,
 ) -> None:
-    """Independent copy of the ordinary fused projection-to-cache dataflow."""
+    """Run the production projection dispatch, then copy its MLA cache dataflow."""
 
     from sglang.srt.model_executor.forward_context import (
         ForwardContext,
         forward_context,
     )
+    from sglang.srt.model_executor.forward_batch_info import ForwardMode
 
     with forward_context(
         ForwardContext(attn_backend=None, es_candidate_slots=candidate_slots)
     ):
-        qkv_latent = attention.fused_qkv_a_proj_with_mqa(hidden_states)[0]
+        qkv_latent = attention.prepare_qkv_latent(
+            hidden_states,
+            SimpleNamespace(
+                positions=positions,
+                forward_mode=ForwardMode.EXTEND,
+                out_cache_loc=loc,
+            ),
+        )
     latent_cache = qkv_latent[:, attention.q_lora_rank :]
     k_nope = attention.kv_a_layernorm(
         latent_cache[:, : attention.kv_lora_rank]
@@ -272,6 +280,9 @@ def test_real_joyai_mtp_replay_matches_fresh_mla_write(placement, monkeypatch):
             config, fused_weight, kv_norm_weight, device
         )
         projection = attention.fused_qkv_a_proj_with_mqa
+        # The active JoyAI MTP manifest keeps this cache-writing path on the
+        # regular Triton GEMM so fresh writes and packed replay share numerics.
+        attention._use_min_latency_fused_a_gemm = False
         projection.es_pre_delta_bank = (
             _delta_bank(4, 2048, device, phase=3)
             if placement in ("pre", "both")

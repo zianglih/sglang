@@ -410,13 +410,13 @@ def register_joyai_llm_flash_mtp_manifest(
         linear.es_pre_delta_bank = None
         linear.es_post_delta_bank = None
 
-    # The min-latency fused-A helper owns the same standalone pre transform as
-    # LinearBase, so pre-only query sites can retain its small-M auto-selection.
-    # Post steering still requires the regular Triton linear path to reach the
-    # FP32-accumulator epilogue; both therefore follows the post constraint.
-    use_min_latency_fused_a = None if placement == "pre" else False
-    attention._use_min_latency_fused_a_gemm = use_min_latency_fused_a
-    attention._use_min_latency_q_b_gemm = use_min_latency_fused_a
+    # Draft-KV replay recomputes the fused q_a/kv_a projection in large packed
+    # Triton GEMMs. Keep the cache-writing fresh path on that same GEMM so replay
+    # cannot mix numerics from the small-M fused-A kernel into one KV prefix.
+    # q_b does not write KV, so pre-only steering can still use fused-A after its
+    # standalone pre transform. Post/both require the Triton FP32 epilogue.
+    attention._use_min_latency_fused_a_gemm = False
+    attention._use_min_latency_q_b_gemm = None if placement == "pre" else False
 
     dense_sites_list: list[DenseSite] = []
     for linear, base, input_width, output_width in (
