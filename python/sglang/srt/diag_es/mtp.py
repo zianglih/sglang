@@ -1453,9 +1453,13 @@ class DiagESMTPSessionManager:
                 f"MTP diagonal-ES session {session_id!r} still owns live request "
                 f"{state.active_rid!r}"
             )
-        if self._active_acceptance_batch is not None:
+        active_batch = self._active_acceptance_batch
+        if active_batch is not None and any(
+            attempt_session_id == session_id
+            for attempt_session_id, _rid, _accepted_drafts in active_batch.attempts
+        ):
             raise DiagESMTPSessionError(
-                "MTP diagonal-ES session state cannot be exported during an "
+                f"MTP diagonal-ES session {session_id!r} participates in the "
                 "active acceptance batch reservation"
             )
 

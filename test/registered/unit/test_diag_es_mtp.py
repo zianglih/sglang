@@ -586,11 +586,15 @@ def test_mtp_session_state_requires_quiescent_absent_session():
         source.export_session_state("session")
     source.release_request(session_id="session", rid="rid")
 
-    source._active_acceptance_batch = object()
-    with pytest.raises(DiagESMTPSessionError, match="acceptance batch"):
-        source.export_session_state("session")
-    source._active_acceptance_batch = None
+    source.register_session(session_id="other", config=config)
+    source.bind_request(session_id="other", rid="other-rid")
+    reservation = source.preflight_acceptance_batch([("other", "other-rid", 1)])
+    # State export is session-local: an unrelated in-progress verify batch must
+    # not starve a completed session's checkpoint while other requests run.
     snapshot = source.export_session_state("session")
+    source.record_acceptance(session_id="other", rid="other-rid", accepted_drafts=1)
+    source.finish_acceptance_batch(reservation)
+    source.release_request(session_id="other", rid="other-rid")
 
     restored = _snapshot_test_manager()
     restored._active_acceptance_batch = object()
