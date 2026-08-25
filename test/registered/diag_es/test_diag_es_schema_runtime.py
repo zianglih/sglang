@@ -2,6 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
+import sglang.srt.diag_es.manager as manager_module
+import sglang.srt.diag_es.manifest as manifest_module
 from sglang.srt.diag_es.manager import (
     DiagESCandidateNotFoundError,
     DiagESCandidateRetiringError,
@@ -138,6 +141,42 @@ class Qwen3MoeForCausalLM:
         )
 
 
+class Qwen2ForCausalLM:
+    def __init__(
+        self,
+        *,
+        num_layers=28,
+        hidden_size=1536,
+        dtype=torch.bfloat16,
+        quant_config=None,
+    ):
+        self.quant_config = quant_config
+        self.config = SimpleNamespace(
+            architectures=["Qwen2ForCausalLM"],
+            num_hidden_layers=num_layers,
+            hidden_size=hidden_size,
+            intermediate_size=8960,
+            num_attention_heads=12,
+            num_key_value_heads=2,
+            head_dim=128,
+        )
+        self.model = SimpleNamespace(
+            layers=[
+                SimpleNamespace(
+                    self_attn=SimpleNamespace(
+                        qkv_proj=_Linear(1536, 2048, dtype=dtype),
+                        o_proj=_Linear(1536, 1536, dtype=dtype),
+                    ),
+                    mlp=SimpleNamespace(
+                        gate_up_proj=_Linear(1536, 17920, dtype=dtype),
+                        down_proj=_Linear(8960, 1536, dtype=dtype),
+                    ),
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+
 class DeepseekV2MLP:
     def __init__(self):
         self.gate_up_proj = _Linear(2048, 14336)
@@ -171,6 +210,200 @@ class JoyAILLMFlashForCausalLMNextN:
             num_nextn_predict_layers=1,
         )
         self.model = SimpleNamespace(decoder=JoyAIDenseNextNDecoderLayer())
+
+
+@pytest.mark.parametrize(
+    ("placement", "sites_per_layer", "parameter_count", "schema_digest"),
+    [
+        (
+            "pre",
+            [
+                ("self_attn.qkv_proj.input", 1536),
+                ("self_attn.o_proj.input", 1536),
+                ("mlp.gate_up_proj.input", 1536),
+                ("mlp.down_proj.input", 8960),
+            ],
+            379_904,
+            "991d7c66de5120c2b0442efe41e0f1a2e25b6cb04785940804850f32d5c3ba09",
+        ),
+        (
+            "post",
+            [
+                ("self_attn.qkv_proj.output", 2048),
+                ("self_attn.o_proj.output", 1536),
+                ("mlp.gate_up_proj.output", 17920),
+                ("mlp.down_proj.output", 1536),
+            ],
+            645_120,
+            "77572f5350d4564f67e189d4ac95c8b056c6adb8d719d438ae6e1cf3442fb517",
+        ),
+        (
+            "both",
+            [
+                ("self_attn.qkv_proj.input", 1536),
+                ("self_attn.qkv_proj.output", 2048),
+                ("self_attn.o_proj.input", 1536),
+                ("self_attn.o_proj.output", 1536),
+                ("mlp.gate_up_proj.input", 1536),
+                ("mlp.gate_up_proj.output", 17920),
+                ("mlp.down_proj.input", 8960),
+                ("mlp.down_proj.output", 1536),
+            ],
+            1_025_024,
+            "95a117e2b166f05f3e030645f83e28d8cea24aa8c20b3fcfdd4d027124f9e033",
+        ),
+    ],
+)
+def test_qwen2_v2_manifest_exact_contract(
+    placement, sites_per_layer, parameter_count, schema_digest
+):
+    register = getattr(manifest_module, "register_qwen2_5_1_5b_manifest", None)
+    assert callable(register), "Qwen2.5 v2 manifest registration is missing"
+
+    manifest = register(Qwen2ForCausalLM(), placement=placement)
+
+    assert manifest.schema_id == "qwen2.5-1.5b-instruct-dense-diag-es-v2"
+    assert manifest.placement == placement
+    assert manifest.schema_digest == schema_digest
+    assert manifest.grouped_delta_shapes == {}
+    assert len(manifest.dense_sites) == len(sites_per_layer) * 28
+    assert sum(site.width for site in manifest.dense_sites) == parameter_count
+    assert [
+        (site.site_id.removeprefix("model.layers.0."), site.width)
+        for site in manifest.dense_sites[: len(sites_per_layer)]
+    ] == sites_per_layer
+
+
+def test_qwen2_v2_manifest_rejects_wrong_dtype_quantization_and_geometry():
+    register = manifest_module.register_qwen2_5_1_5b_manifest
+    for model, match in (
+        (SimpleNamespace(), "Qwen2ForCausalLM"),
+        (Qwen2ForCausalLM(dtype=torch.float16), "bfloat16"),
+        (Qwen2ForCausalLM(quant_config=SimpleNamespace()), "unquantized"),
+        (Qwen2ForCausalLM(num_layers=27), "num_hidden_layers"),
+        (Qwen2ForCausalLM(hidden_size=2048), "hidden_size"),
+    ):
+        with pytest.raises((TypeError, ValueError), match=match):
+            register(model, placement="pre")
+
+    model = Qwen2ForCausalLM()
+    model.model.layers[0].self_attn.qkv_proj.weight = torch.empty(
+        (2048, 1535), dtype=torch.bfloat16, device="meta"
+    )
+    with pytest.raises(ValueError, match="qkv_proj.weight"):
+        register(model, placement="pre")
+
+
+def test_qwen3_v1_manifest_preserves_pre_only_resume_identity():
+    register = getattr(manifest_module, "register_qwen3_30b_a3b_v1_manifest", None)
+    assert callable(register), "Qwen3 v1 compatibility manifest is missing"
+
+    manifest = register(Qwen3MoeForCausalLM(), placement="pre")
+    assert manifest.schema_id == "qwen3-30b-a3b-diag-es-v1"
+    assert manifest.schema_digest == (
+        "65fc2ae92a979c997d1ee37f5f909663091272bc7465c629e9884cbeb031025a"
+    )
+    assert manifest.grouped_delta_shapes == {
+        "moe_fc1": (48, 128, 2048),
+        "moe_fc2": (48, 128, 768),
+    }
+    with pytest.raises(ValueError, match="pre"):
+        register(Qwen3MoeForCausalLM(), placement="post")
+
+
+def test_effective_digest_supports_qwen2_v4_and_preserves_qwen3_v1_v3():
+    dense = {"dense": torch.tensor([1e-4, -1e-4], dtype=torch.float32)}
+    qwen2 = manifest_module.compute_effective_model_digest(
+        model_artifact_id="qwen2-artifact",
+        schema_id="qwen2.5-1.5b-instruct-dense-diag-es-v2",
+        schema_digest="ab" * 32,
+        dense_deltas=dense,
+        grouped_deltas={},
+    )
+    assert len(qwen2) == 64
+
+    qwen3_v1 = manifest_module.compute_effective_model_digest(
+        model_artifact_id="qwen3-artifact",
+        schema_id="qwen3-30b-a3b-diag-es-v1",
+        schema_digest="ab" * 32,
+        dense_deltas=dense,
+        grouped_deltas={
+            "moe_fc1": torch.tensor([[1.0]], dtype=torch.float32),
+            "moe_fc2": torch.tensor([[2.0]], dtype=torch.float32),
+        },
+    )
+    assert qwen3_v1 == (
+        "7b74b178734a6d79b1c8ebc07c03297f9ebc758f49b6c805486d564e170317d5"
+    )
+
+
+class _StubManager:
+    def __init__(
+        self, *, manifest, resident_candidate_slots, model_artifact_id, device
+    ):
+        self.manifest = manifest
+        self.resident_candidate_slots = resident_candidate_slots
+        self.model_artifact_id = model_artifact_id
+        self.device = device
+        self.requested_grouped_banks = []
+
+    def get_dense_delta_bank(self, site_id):
+        return ("dense", site_id)
+
+    def get_grouped_delta_bank(self, name):
+        self.requested_grouped_banks.append(name)
+        return [("grouped", name, layer_id) for layer_id in range(48)]
+
+
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+def test_manager_dispatches_qwen2_and_binds_all_dense_projections(
+    monkeypatch, placement
+):
+    monkeypatch.setattr(manager_module, "DiagESManager", _StubManager)
+    monkeypatch.setattr(manager_module, "_target_manager", None)
+    model = Qwen2ForCausalLM()
+    model.parameters = lambda: iter((torch.empty(0),))
+
+    manager = manager_module.register_diag_es_model(
+        model,
+        schema_id="qwen2.5-1.5b-instruct-dense-diag-es-v2",
+        resident_candidate_slots=2,
+        model_artifact_id="qwen2-artifact",
+        placement=placement,
+    )
+
+    assert manager.manifest.placement == placement
+    assert manager.manifest.grouped_delta_shapes == {}
+    for linear in (
+        model.model.layers[0].self_attn.qkv_proj,
+        model.model.layers[0].self_attn.o_proj,
+        model.model.layers[0].mlp.gate_up_proj,
+        model.model.layers[0].mlp.down_proj,
+    ):
+        assert (linear.es_pre_delta_bank is not None) is (placement in ("pre", "both"))
+        assert (linear.es_post_delta_bank is not None) is (
+            placement in ("post", "both")
+        )
+
+
+def test_manager_maps_qwen3_v1_grouped_names_to_pre_hot_path(monkeypatch):
+    monkeypatch.setattr(manager_module, "DiagESManager", _StubManager)
+    monkeypatch.setattr(manager_module, "_target_manager", None)
+    model = Qwen3MoeForCausalLM()
+    model.parameters = lambda: iter((torch.empty(0),))
+
+    manager = manager_module.register_diag_es_model(
+        model,
+        schema_id="qwen3-30b-a3b-diag-es-v1",
+        resident_candidate_slots=2,
+        model_artifact_id="qwen3-artifact",
+        placement="pre",
+    )
+
+    banks = model.model.layers[0].mlp.experts.moe_runner_config.diag_es_delta_banks
+    assert banks.fc1_pre is not None and banks.fc2_pre is not None
+    assert banks.fc1_post is None and banks.fc2_post is None
+    assert set(manager.requested_grouped_banks) == {"moe_fc1", "moe_fc2"}
 
 
 @pytest.mark.parametrize(

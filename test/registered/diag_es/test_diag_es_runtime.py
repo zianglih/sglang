@@ -502,6 +502,72 @@ def test_unquantized_linear_both_placement_threads_post_accumulator_inputs(
     torch.testing.assert_close(graph_output, replay_expected, rtol=0.02, atol=0.5)
 
 
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+@pytest.mark.parametrize(
+    ("projection", "input_width", "output_width", "has_bias"),
+    [
+        ("qkv", 1536, 2048, True),
+        ("o_proj", 1536, 1536, False),
+        ("gate_up", 1536, 17920, False),
+        ("down_proj", 8960, 1536, False),
+    ],
+)
+def test_qwen2_exact_dense_dimensions_match_fp32_reference(
+    projection, input_width, output_width, has_bias, placement
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    from sglang.kernels.ops.gemm.triton_bf16_gemm import triton_bf16_linear
+    from sglang.srt.diag_es.ops import apply_dense_delta
+
+    torch.manual_seed(20260824 + input_width + output_width)
+    rows = 7
+    x = torch.randn((rows, input_width), dtype=torch.bfloat16, device="cuda")
+    weight = (
+        torch.randn((output_width, input_width), dtype=torch.bfloat16, device="cuda")
+        * 0.05
+    )
+    bias = (
+        torch.randn(output_width, dtype=torch.bfloat16, device="cuda") * 0.1
+        if has_bias
+        else None
+    )
+    slots = torch.tensor([0, 1, 1, 0, 1, 0, 1], dtype=torch.int32, device="cuda")
+    pre_bank = torch.zeros((2, input_width), dtype=torch.float32, device="cuda")
+    post_bank = torch.zeros((2, output_width), dtype=torch.float32, device="cuda")
+    pre_bank[1].uniform_(-0.01, 0.01)
+    post_bank[1].uniform_(-0.01, 0.01)
+
+    steered_input = (
+        apply_dense_delta(x, pre_bank, slots) if placement in ("pre", "both") else x
+    )
+    actual = triton_bf16_linear(
+        steered_input,
+        weight,
+        bias,
+        post_delta_bank=(post_bank if placement in ("post", "both") else None),
+        candidate_slots=(slots if placement in ("post", "both") else None),
+    )
+
+    affine = steered_input.float() @ weight.float().T
+    if bias is not None:
+        affine += bias.float()
+    expected = (
+        torch.addcmul(affine, affine, post_bank[slots.long()])
+        if placement in ("post", "both")
+        else affine
+    ).bfloat16()
+
+    torch.testing.assert_close(
+        actual,
+        expected,
+        rtol=0.025,
+        atol=1.0,
+        msg=lambda message: f"{projection}/{placement}: {message}",
+    )
+
+
 def test_resident_manager_retire_is_nonblocking_and_backpressures():
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")

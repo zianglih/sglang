@@ -3728,11 +3728,15 @@ class ServerArgs:
     def _handle_diag_es_identity(self):
         supported = ("off", "pre", "post", "both")
         if self.diag_es_target_placement not in supported:
-            raise ValueError(
-                "diag_es_target_placement must be off, pre, post, or both"
-            )
+            raise ValueError("diag_es_target_placement must be off, pre, post, or both")
         if self.diag_es_mtp_placement not in supported:
             raise ValueError("diag_es_mtp_placement must be off, pre, post, or both")
+        is_qwen2 = (
+            self.diag_es_target_placement != "off"
+            and self.diag_es_schema_id == "qwen2.5-1.5b-instruct-dense-diag-es-v2"
+        )
+        if is_qwen2 and self.diag_es_mtp_placement != "off":
+            raise ValueError("Qwen2.5 target diagonal ES requires MTP placement off")
         if self.diag_es_mtp_placement != "off":
             requested_algorithm = (
                 self.speculative_algorithm.upper()
@@ -3743,10 +3747,7 @@ class ServerArgs:
                 raise ValueError(
                     "MTP diagonal ES requires --speculative-algorithm EAGLE or NEXTN"
                 )
-            if (
-                self.diag_es_mtp_schema_id
-                != "joyai-llm-flash-mtp-diag-es-v2"
-            ):
+            if self.diag_es_mtp_schema_id != "joyai-llm-flash-mtp-diag-es-v2":
                 raise ValueError(
                     "MTP diagonal ES requires "
                     "diag_es_mtp_schema_id='joyai-llm-flash-mtp-diag-es-v2'"
@@ -3774,10 +3775,23 @@ class ServerArgs:
                 "target diagonal ES supports only --speculative-algorithm "
                 "NEXTN; other speculative algorithms are not supported"
             )
-        if self.diag_es_schema_id != "qwen3-30b-a3b-diag-es-v2":
+        supported_schemas = {
+            "qwen3-30b-a3b-diag-es-v1",
+            "qwen3-30b-a3b-diag-es-v2",
+            "qwen2.5-1.5b-instruct-dense-diag-es-v2",
+        }
+        if self.diag_es_schema_id not in supported_schemas:
             raise ValueError(
-                "target diagonal ES requires "
-                "diag_es_schema_id='qwen3-30b-a3b-diag-es-v2'"
+                "target diagonal ES requires an explicit supported " "diag_es_schema_id"
+            )
+        if (
+            self.diag_es_schema_id == "qwen3-30b-a3b-diag-es-v1"
+            and self.diag_es_target_placement != "pre"
+        ):
+            raise ValueError("Qwen3 v1 diagonal ES supports pre placement only")
+        if is_qwen2 and requested_speculative_algorithm is not None:
+            raise ValueError(
+                "Qwen2.5 diagonal ES does not support speculative decoding"
             )
         if (
             not isinstance(self.diag_es_model_artifact_id, str)
@@ -3806,6 +3820,7 @@ class ServerArgs:
             return
         view = self._resolved()
         quantization = view.quantization
+        is_qwen2 = self.diag_es_schema_id == "qwen2.5-1.5b-instruct-dense-diag-es-v2"
         exact_values = {
             "device": (view.device, "cuda"),
             "nnodes": (view.nnodes, 1),
@@ -3828,14 +3843,12 @@ class ServerArgs:
                 False,
             ),
             "enable_dp_attention": (view.enable_dp_attention, False),
-            "moe_a2a_backend": (view.moe_a2a_backend, "none"),
-            "moe_runner_backend": (view.moe_runner_backend, "triton"),
             "bf16_gemm_backend": (view.bf16_gemm_backend, "triton"),
-            "attention_backend": (view.attention_backend, "trtllm_mha"),
+            "attention_backend": (
+                view.attention_backend,
+                "triton" if is_qwen2 else "trtllm_mha",
+            ),
             "enable_torch_compile": (view.enable_torch_compile, False),
-            "ep_num_redundant_experts": (view.ep_num_redundant_experts, 0),
-            "enable_eplb": (view.enable_eplb, False),
-            "elastic_ep_backend": (view.elastic_ep_backend, None),
             "disable_radix_cache": (view.disable_radix_cache, False),
             "radix_cache_backend": (view.radix_cache_backend, None),
             "enable_hierarchical_cache": (view.enable_hierarchical_cache, False),
@@ -3844,6 +3857,21 @@ class ServerArgs:
             "disaggregation_mode": (view.disaggregation_mode, "null"),
             "enable_two_batch_overlap": (view.enable_two_batch_overlap, False),
         }
+        if is_qwen2:
+            exact_values["disable_cuda_graph"] = (view.disable_cuda_graph, True)
+        else:
+            exact_values.update(
+                {
+                    "moe_a2a_backend": (view.moe_a2a_backend, "none"),
+                    "moe_runner_backend": (view.moe_runner_backend, "triton"),
+                    "ep_num_redundant_experts": (
+                        view.ep_num_redundant_experts,
+                        0,
+                    ),
+                    "enable_eplb": (view.enable_eplb, False),
+                    "elastic_ep_backend": (view.elastic_ep_backend, None),
+                }
+            )
         mismatches = [
             f"{name}={actual!r} (requires {expected!r})"
             for name, (actual, expected) in exact_values.items()
@@ -3851,12 +3879,21 @@ class ServerArgs:
         ]
         # NEXTN is canonicalized to EAGLE by the speculative-decoding hook.
         # The pre-resolution identity check rejects a user-requested EAGLE.
-        if view.speculative_algorithm not in (None, "EAGLE"):
+        allowed_speculative = (None,) if is_qwen2 else (None, "EAGLE")
+        if view.speculative_algorithm not in allowed_speculative:
             mismatches.append(
                 f"speculative_algorithm={view.speculative_algorithm!r} "
-                "(requires None or NEXTN resolved as 'EAGLE')"
+                + (
+                    "(requires None)"
+                    if is_qwen2
+                    else "(requires None or NEXTN resolved as 'EAGLE')"
+                )
             )
-        if quantization is None:
+        if is_qwen2 and quantization is not None:
+            mismatches.append(
+                f"quantization={quantization!r} (Qwen2.5 requires unquantized BF16)"
+            )
+        elif quantization is None:
             pass
         elif quantization == "fp8":
             if self.diag_es_target_placement != "post":
@@ -3871,14 +3908,13 @@ class ServerArgs:
                     "(block-FP8 requires 'triton')"
                 )
         else:
-            mismatches.append(
-                f"quantization={quantization!r} (requires None or 'fp8')"
-            )
+            mismatches.append(f"quantization={quantization!r} (requires None or 'fp8')")
         for name in ("decode_attention_backend", "prefill_attention_backend"):
             actual = getattr(view, name)
-            if actual not in (None, "trtllm_mha"):
+            required_backend = "triton" if is_qwen2 else "trtllm_mha"
+            if actual not in (None, required_backend):
                 mismatches.append(
-                    f"{name}={actual!r} (requires None or 'trtllm_mha')"
+                    f"{name}={actual!r} (requires None or {required_backend!r})"
                 )
         if view.enable_lora or view.lora_paths:
             mismatches.append("LoRA is enabled (requires no LoRA adapters)")

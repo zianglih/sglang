@@ -7,7 +7,9 @@ from typing import Literal, Mapping
 
 import torch
 
+QWEN3_30B_A3B_V1_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v1"
 QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v2"
+QWEN2_5_1_5B_SCHEMA_ID = "qwen2.5-1.5b-instruct-dense-diag-es-v2"
 JOYAI_LLM_FLASH_MTP_SCHEMA_ID = "joyai-llm-flash-mtp-diag-es-v2"
 DiagESPlacement = Literal["pre", "post", "both"]
 
@@ -68,15 +70,30 @@ def _schema_digest(
     *,
     placement: DiagESPlacement,
     grouped_delta_shapes: Mapping[str, tuple[int, ...]],
+    schema_id: str = QWEN3_30B_A3B_SCHEMA_ID,
 ) -> str:
     # Keep the external grouped_gate_shapes spelling as part of the v2 schema
     # codec. Renaming this JSON field would silently change every persisted
     # schema digest and wrapper checkpoint identity.
     payload = {
-        "version": QWEN3_30B_A3B_SCHEMA_ID,
+        "version": schema_id,
         "placement": placement,
         "dense_sites": [(site.site_id, site.width) for site in dense_sites],
         "grouped_gate_shapes": dict(grouped_delta_shapes),
+    }
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_qwen3_schema_digest(dense_sites: tuple[DenseSite, ...]) -> str:
+    payload = {
+        "version": QWEN3_30B_A3B_V1_SCHEMA_ID,
+        "dense_sites": [(site.site_id, site.width) for site in dense_sites],
+        "num_layers": 48,
+        "num_experts": 128,
+        "hidden_size": 2048,
+        "moe_intermediate_size": 768,
+        "expert_sites": ["moe_fc1", "moe_fc2"],
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -276,6 +293,151 @@ def register_qwen3_30b_a3b_manifest(
             dense_sites_tuple,
             placement=placement,
             grouped_delta_shapes=grouped_shapes,
+        ),
+    )
+
+
+def register_qwen3_30b_a3b_v1_manifest(
+    model: torch.nn.Module,
+    *,
+    placement: DiagESPlacement,
+) -> DiagESManifest:
+    """Restore the exact historical Qwen3 v1 pre-only runtime identity."""
+
+    if placement != "pre":
+        raise ValueError("Qwen3 v1 diagonal ES supports pre placement only")
+    current = register_qwen3_30b_a3b_manifest(model, placement="pre")
+    grouped_shapes = {
+        "moe_fc1": (48, 128, 2048),
+        "moe_fc2": (48, 128, 768),
+    }
+    return DiagESManifest(
+        schema_id=QWEN3_30B_A3B_V1_SCHEMA_ID,
+        placement="pre",
+        dense_sites=current.dense_sites,
+        grouped_delta_shapes=grouped_shapes,
+        schema_digest=_legacy_qwen3_schema_digest(current.dense_sites),
+    )
+
+
+def register_qwen2_5_1_5b_manifest(
+    model: torch.nn.Module,
+    *,
+    placement: DiagESPlacement,
+) -> DiagESManifest:
+    """Validate and register the exact dense Qwen2.5-1.5B search space."""
+
+    if placement not in _SUPPORTED_PLACEMENTS:
+        raise ValueError("diagonal-ES placement must be pre, post, or both")
+    if model.__class__.__name__ != "Qwen2ForCausalLM":
+        raise TypeError("Qwen2.5 diagonal ES requires Qwen2ForCausalLM")
+    if getattr(model, "quant_config", None) is not None:
+        raise ValueError("Qwen2.5 diagonal ES requires unquantized BF16 weights")
+    if not hasattr(model, "config") or not hasattr(model, "model"):
+        raise TypeError("Qwen2.5 diagonal ES requires a loaded Qwen2 model")
+
+    config = model.config
+    for name, expected in (
+        ("num_hidden_layers", 28),
+        ("hidden_size", 1536),
+        ("intermediate_size", 8960),
+        ("num_attention_heads", 12),
+        ("num_key_value_heads", 2),
+    ):
+        actual = getattr(config, name, None)
+        if actual != expected:
+            raise ValueError(
+                f"Qwen2.5 diagonal ES requires {name}={expected}, got {actual}"
+            )
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is None:
+        head_dim = config.hidden_size // config.num_attention_heads
+    if head_dim != 128:
+        raise ValueError(f"Qwen2.5 diagonal ES requires head_dim=128, got {head_dim}")
+    architectures = getattr(config, "architectures", None)
+    if architectures is not None and "Qwen2ForCausalLM" not in architectures:
+        raise TypeError("Qwen2.5 diagonal ES requires Qwen2ForCausalLM config")
+
+    layers = getattr(model.model, "layers", None)
+    if layers is None or len(layers) != 28:
+        actual = None if layers is None else len(layers)
+        raise ValueError(
+            f"Qwen2.5 diagonal ES requires num_hidden_layers=28, got {actual}"
+        )
+
+    dense_sites: list[DenseSite] = []
+    for layer_id, decoder_layer in enumerate(layers):
+        layer_path = f"model.layers.{layer_id}"
+        try:
+            physical_sites = (
+                (
+                    decoder_layer.self_attn.qkv_proj,
+                    "self_attn.qkv_proj",
+                    1536,
+                    2048,
+                ),
+                (
+                    decoder_layer.self_attn.o_proj,
+                    "self_attn.o_proj",
+                    1536,
+                    1536,
+                ),
+                (
+                    decoder_layer.mlp.gate_up_proj,
+                    "mlp.gate_up_proj",
+                    1536,
+                    17920,
+                ),
+                (
+                    decoder_layer.mlp.down_proj,
+                    "mlp.down_proj",
+                    8960,
+                    1536,
+                ),
+            )
+        except AttributeError as exc:
+            raise TypeError(
+                f"{layer_path} does not match the Qwen2.5-1.5B layer layout"
+            ) from exc
+
+        for linear, path, input_width, output_width in physical_sites:
+            _require_contiguous_tensor(
+                linear.weight,
+                path=f"{layer_path}.{path}.weight",
+                shape=(output_width, input_width),
+                dtype=torch.bfloat16,
+            )
+            if getattr(linear, "input_size", None) != input_width:
+                raise ValueError(
+                    f"{layer_path}.{path}.input width must be {input_width}"
+                )
+            if getattr(linear, "output_size", None) != output_width:
+                raise ValueError(
+                    f"{layer_path}.{path}.output width must be {output_width}"
+                )
+            linear.es_pre_site_id = None
+            linear.es_post_site_id = None
+            if placement in ("pre", "both"):
+                site_id = f"{layer_path}.{path}.input"
+                linear.es_pre_site_id = site_id
+                dense_sites.append(DenseSite(site_id, input_width))
+            if placement in ("post", "both"):
+                site_id = f"{layer_path}.{path}.output"
+                linear.es_post_site_id = site_id
+                dense_sites.append(DenseSite(site_id, output_width))
+
+    dense_sites_tuple = tuple(dense_sites)
+    grouped_shapes: dict[str, tuple[int, ...]] = {}
+    return DiagESManifest(
+        schema_id=QWEN2_5_1_5B_SCHEMA_ID,
+        placement=placement,
+        dense_sites=dense_sites_tuple,
+        grouped_delta_shapes=grouped_shapes,
+        schema_digest=_schema_digest(
+            dense_sites_tuple,
+            placement=placement,
+            grouped_delta_shapes=grouped_shapes,
+            schema_id=QWEN2_5_1_5B_SCHEMA_ID,
         ),
     )
 
@@ -494,7 +656,12 @@ def compute_effective_model_digest(
     """Hash the exact CPU FP32 residual deltas used as the KV namespace."""
 
     _validate_digest_identity("model_artifact_id", model_artifact_id)
-    if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
+    supported_schema_ids = {
+        QWEN3_30B_A3B_V1_SCHEMA_ID,
+        QWEN3_30B_A3B_SCHEMA_ID,
+        QWEN2_5_1_5B_SCHEMA_ID,
+    }
+    if schema_id not in supported_schema_ids:
         raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
     validate_sha256_digest("schema_digest", schema_digest)
     if not isinstance(dense_deltas, Mapping):
@@ -503,12 +670,18 @@ def compute_effective_model_digest(
         raise TypeError("grouped_deltas must be a mapping")
 
     digest = hashlib.sha256()
-    digest.update(b"diag-es-effective-model-fp32-delta-v4\0")
-    digest.update(model_artifact_id.encode())
-    digest.update(b"\0")
-    digest.update(schema_id.encode())
-    digest.update(b"\0")
-    digest.update(schema_digest.encode())
+    if schema_id == QWEN3_30B_A3B_V1_SCHEMA_ID:
+        digest.update(b"diag-es-effective-model-fp32-delta-v3\0")
+        digest.update(model_artifact_id.encode())
+        digest.update(b"\0")
+        digest.update(schema_digest.encode())
+    else:
+        digest.update(b"diag-es-effective-model-fp32-delta-v4\0")
+        digest.update(model_artifact_id.encode())
+        digest.update(b"\0")
+        digest.update(schema_id.encode())
+        digest.update(b"\0")
+        digest.update(schema_digest.encode())
 
     def update_tensor(name: str, tensor: torch.Tensor) -> None:
         value = _validate_digest_tensor(name, tensor)
@@ -520,6 +693,14 @@ def compute_effective_model_digest(
 
     for site_id in sorted(dense_deltas):
         update_tensor(f"dense:{site_id}", dense_deltas[site_id])
-    for delta_name in sorted(grouped_deltas):
-        update_tensor(f"grouped:{delta_name}", grouped_deltas[delta_name])
+    if schema_id == QWEN3_30B_A3B_V1_SCHEMA_ID:
+        if set(grouped_deltas) != {"moe_fc1", "moe_fc2"}:
+            raise ValueError(
+                "Qwen3 v1 digest requires moe_fc1 and moe_fc2 grouped deltas"
+            )
+        update_tensor("expert:moe_fc1", grouped_deltas["moe_fc1"])
+        update_tensor("expert:moe_fc2", grouped_deltas["moe_fc2"])
+    else:
+        for delta_name in sorted(grouped_deltas):
+            update_tensor(f"grouped:{delta_name}", grouped_deltas[delta_name])
     return digest.hexdigest()
