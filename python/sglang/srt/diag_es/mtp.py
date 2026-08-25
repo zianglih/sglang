@@ -284,6 +284,7 @@ class _MTPAcceptanceBatchReservation:
     acceptance_event_count: int
     expects_kv_replay: bool
     attempts: tuple[tuple[str, str, int], ...]
+    kv_replay_requests: tuple[tuple[str, str], ...]
 
 
 def _zeros_like_map(values: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -1338,7 +1339,7 @@ class DiagESMTPSessionManager:
             )
 
         acceptance_event_count = 0
-        expects_kv_replay = False
+        kv_replay_requests = []
         for session_id, rid, accepted_drafts in normalized:
             state = self._validate_acceptance(
                 session_id=session_id,
@@ -1347,7 +1348,11 @@ class DiagESMTPSessionManager:
             )
             event_count, changes_candidate = self._acceptance_event_plan(state)
             acceptance_event_count += event_count
-            expects_kv_replay |= changes_candidate
+            if changes_candidate:
+                kv_replay_requests.append((session_id, rid))
+
+        replay_requests = tuple(kv_replay_requests)
+        expects_kv_replay = bool(replay_requests)
 
         self._reserve_event_capacity(acceptance_event_count + int(expects_kv_replay))
         reservation = _MTPAcceptanceBatchReservation(
@@ -1356,6 +1361,7 @@ class DiagESMTPSessionManager:
             acceptance_event_count=acceptance_event_count,
             expects_kv_replay=expects_kv_replay,
             attempts=normalized,
+            kv_replay_requests=replay_requests,
         )
         self._next_acceptance_batch_nonce += 1
         self._active_acceptance_batch = reservation
@@ -1801,6 +1807,16 @@ class DiagESMTPSessionManager:
         self._validate_acceptance_batch_progress(
             acceptance_batch_reservation, expects_kv_replay=True
         )
+        expected_session_ids = tuple(
+            session_id
+            for session_id, _ in acceptance_batch_reservation.kv_replay_requests
+        )
+        if tuple(session_ids) != expected_session_ids:
+            raise DiagESMTPSessionError(
+                "MTP draft-KV replay telemetry sessions do not match the active "
+                "acceptance batch order"
+            )
+        request_ids = dict(acceptance_batch_reservation.kv_replay_requests)
         self._kv_replay_batch_count += 1
         self._kv_replay_transitioned_requests += len(session_ids)
         self._kv_replayed_rows += replayed_rows
@@ -1814,6 +1830,7 @@ class DiagESMTPSessionManager:
                 "session_id": None,
                 "event_scope": "global_batch",
                 "session_ids": list(session_ids),
+                "request_ids": request_ids,
                 "request_replayed_rows": dict(zip(session_ids, request_rows)),
                 "transitioned_request_count": len(session_ids),
                 "replayed_rows": replayed_rows,

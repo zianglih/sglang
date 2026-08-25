@@ -1077,6 +1077,7 @@ def test_acceptance_batch_preflights_mixed_replay_event_at_queue_boundary():
     reservation = manager.preflight_acceptance_batch(attempts)
     assert reservation.acceptance_event_count == 3
     assert reservation.expects_kv_replay
+    assert reservation.kv_replay_requests == (("s", "rid-a"),)
     manager.record_acceptance(session_id="s", rid="rid-a", accepted_drafts=1)
     manager.record_acceptance(session_id="stationary", rid="rid-b", accepted_drafts=2)
     manager.record_kv_replay(
@@ -1097,12 +1098,106 @@ def test_acceptance_batch_preflights_mixed_replay_event_at_queue_boundary():
     )
     assert len(page["events"]) == 4
     assert page["events"][-1]["event_scope"] == "global_batch"
+    assert page["events"][-1]["request_ids"] == {"s": "rid-a"}
     assert len(manager._events) == 4
     manager.ack_events(
         engine_epoch=manager.engine_epoch,
         through_event_id=page["read_through_event_id"],
     )
     assert manager._events == []
+
+
+def _prepared_two_session_replay_batch():
+    first = _state(rewards=[])
+    first.config = DiagESMTPSessionConfig(
+        seed=1,
+        population_size=2,
+        sigma=0.1,
+        learning_rate=0.0,
+        attempts_per_candidate=1,
+    )
+    first.active_rid = "rid-a"
+    second = _state(rewards=[])
+    second.session_id = "second"
+    second.resident_slot = 2
+    second.config = DiagESMTPSessionConfig(
+        seed=2,
+        population_size=2,
+        sigma=0.1,
+        learning_rate=0.0,
+        attempts_per_candidate=1,
+    )
+    second.active_rid = "rid-b"
+
+    manager, _ = _recording_manager(first)
+    manager._sessions[second.session_id] = second
+    reservation = manager.preflight_acceptance_batch(
+        [("s", "rid-a", 1), ("second", "rid-b", 2)]
+    )
+    manager.record_acceptance(session_id="s", rid="rid-a", accepted_drafts=1)
+    manager.record_acceptance(session_id="second", rid="rid-b", accepted_drafts=2)
+    return manager, reservation
+
+
+def test_kv_replay_event_attributes_reserved_request_ids(monkeypatch):
+    monkeypatch.setattr(
+        mtp_module,
+        "time",
+        SimpleNamespace(time=lambda: 123.5, monotonic_ns=lambda: 456),
+    )
+    manager, reservation = _prepared_two_session_replay_batch()
+
+    manager.record_kv_replay(
+        acceptance_batch_reservation=reservation,
+        session_ids=["s", "second"],
+        request_rows=[5, 7],
+        replayed_rows=12,
+        enqueue_time_ms=0.25,
+    )
+
+    assert manager._events[-1] == {
+        "event_id": 5,
+        "timestamp": 123.5,
+        "monotonic_timestamp_ns": 456,
+        "event": "draft_kv_prefix_replay",
+        "session_id": None,
+        "event_scope": "global_batch",
+        "session_ids": ["s", "second"],
+        "request_ids": {"s": "rid-a", "second": "rid-b"},
+        "request_replayed_rows": {"s": 5, "second": 7},
+        "transitioned_request_count": 2,
+        "replayed_rows": 12,
+        "enqueue_time_ms": 0.25,
+    }
+
+
+def test_kv_replay_rejects_session_order_mismatch_without_mutation():
+    manager, reservation = _prepared_two_session_replay_batch()
+    events_before = copy.deepcopy(manager._events)
+    counters_before = (
+        manager._kv_replay_batch_count,
+        manager._kv_replay_transitioned_requests,
+        manager._kv_replayed_rows,
+        manager._kv_replay_enqueue_time_ms,
+    )
+
+    with pytest.raises(DiagESMTPSessionError, match="acceptance batch order"):
+        manager.record_kv_replay(
+            acceptance_batch_reservation=reservation,
+            session_ids=["second", "s"],
+            request_rows=[7, 5],
+            replayed_rows=12,
+            enqueue_time_ms=0.25,
+        )
+
+    assert manager._events == events_before
+    assert (
+        manager._kv_replay_batch_count,
+        manager._kv_replay_transitioned_requests,
+        manager._kv_replayed_rows,
+        manager._kv_replay_enqueue_time_ms,
+    ) == counters_before
+    assert manager._active_acceptance_batch is reservation
 
 
 def test_delta_stats_are_cpu_cached_and_include_scale_ranges(monkeypatch):
