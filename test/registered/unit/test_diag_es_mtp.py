@@ -14,6 +14,7 @@ from sglang.srt.diag_es.mtp import (
     DiagESMTPSessionConfig,
     DiagESMTPSessionError,
     DiagESMTPSessionManager,
+    MTP_MAX_EVENT_READ_LIMIT,
     MTP_SESSION_STATE_ABI,
     _delta_stats,
     _MTPSessionState,
@@ -61,8 +62,7 @@ def _recording_manager(state):
     manager = DiagESMTPSessionManager.__new__(DiagESMTPSessionManager)
     manager.max_correct_drafts = 3
     manager.max_pending_events = 1_000_000
-    manager._events = []
-    manager._next_event_id = 1
+    manager._initialize_event_protocol()
     manager._sessions = {state.session_id: state}
     manager._next_acceptance_batch_nonce = 1
     manager._active_acceptance_batch = None
@@ -110,8 +110,7 @@ def _snapshot_test_manager(*, active_width=None):
     manager._sessions = {}
     manager._slot_last_read_events = [None, None, None]
     manager._dense_delta_banks = {"site": torch.zeros(3, 2, dtype=torch.float32)}
-    manager._events = []
-    manager._next_event_id = 1
+    manager._initialize_event_protocol()
     manager._kv_replay_batch_count = 0
     manager._kv_replay_transitioned_requests = 0
     manager._kv_replayed_rows = 0
@@ -146,6 +145,16 @@ def _advance_snapshot_session(manager, session_id, accepted_drafts):
     manager.release_request(session_id=session_id, rid="rid")
 
 
+def _read_all_events(manager):
+    result = manager.read_events(
+        engine_epoch=manager.engine_epoch,
+        after_event_id=manager._acked_through_event_id,
+        limit=MTP_MAX_EVENT_READ_LIMIT,
+    )
+    assert result["read_through_event_id"] == result["event_high_watermark"]
+    return result["events"]
+
+
 def _assert_session_snapshots_equal(left, right):
     assert {key: value for key, value in left.items() if key != "tensors"} == {
         key: value for key, value in right.items() if key != "tensors"
@@ -158,6 +167,196 @@ def _assert_session_snapshots_equal(left, right):
                 rtol=0,
                 atol=0,
             )
+
+
+def test_mtp_event_stream_epochs_are_fresh_and_visible_in_status():
+    first = _snapshot_test_manager()
+    second = _snapshot_test_manager()
+
+    assert first.engine_epoch != second.engine_epoch
+    status = first.status()
+    assert status["engine_epoch"] == first.engine_epoch
+    assert status["acked_through_event_id"] == 0
+    assert status["event_high_watermark"] == 0
+    assert status["highest_read_through_event_id"] == 0
+    assert status["pending_event_count"] == 0
+    assert status["max_event_read_limit"] == MTP_MAX_EVENT_READ_LIMIT
+
+
+def test_mtp_event_read_is_paginated_non_destructive_and_copy_isolated():
+    state = _state(rewards=[])
+    manager, _ = _recording_manager(state)
+    for value in range(3):
+        manager._emit("probe", state, payload={"values": [value]})
+
+    first = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=0, limit=2
+    )
+    assert set(first) == {
+        "engine_epoch",
+        "acked_through_event_id",
+        "event_high_watermark",
+        "read_through_event_id",
+        "events",
+    }
+    assert first["acked_through_event_id"] == 0
+    assert first["event_high_watermark"] == 3
+    assert first["read_through_event_id"] == 2
+    assert [event["event_id"] for event in first["events"]] == [1, 2]
+    assert len(manager._events) == 3
+
+    first["events"][0]["payload"]["values"].append(99)
+    repeated = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=0, limit=2
+    )
+    assert repeated["events"][0]["payload"] == {"values": [0]}
+    assert manager._events[0]["payload"] == {"values": [0]}
+
+    ack = manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=2)
+    assert ack == {
+        "engine_epoch": manager.engine_epoch,
+        "acked_through_event_id": 2,
+        "event_high_watermark": 3,
+        "pending_event_count": 1,
+    }
+    assert [event["event_id"] for event in manager._events] == [3]
+    assert (
+        manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=2) == ack
+    )
+
+    final_page = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=2, limit=1
+    )
+    assert [event["event_id"] for event in final_page["events"]] == [3]
+    manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=3)
+    assert manager._events == []
+
+
+def test_mtp_event_read_and_ack_reject_stale_or_invalid_cursors():
+    state = _state(rewards=[])
+    manager, _ = _recording_manager(state)
+    manager._emit("probe", state)
+    manager._emit("probe", state)
+
+    with pytest.raises(DiagESMTPSessionError, match="epoch"):
+        manager.read_events(engine_epoch="stale", after_event_id=0, limit=1)
+    with pytest.raises(DiagESMTPSessionError, match="epoch"):
+        manager.ack_events(engine_epoch="stale", through_event_id=0)
+    with pytest.raises(ValueError, match="after_event_id"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=True, limit=1
+        )
+    with pytest.raises(ValueError, match="read limit"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch,
+            after_event_id=0,
+            limit=MTP_MAX_EVENT_READ_LIMIT + 1,
+        )
+    with pytest.raises(DiagESMTPSessionError, match="high watermark"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=3, limit=1
+        )
+    with pytest.raises(DiagESMTPSessionError, match="read contiguously"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=1, limit=1
+        )
+    with pytest.raises(DiagESMTPSessionError, match="must be read"):
+        manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=1)
+
+    manager.read_events(engine_epoch=manager.engine_epoch, after_event_id=0, limit=1)
+    with pytest.raises(DiagESMTPSessionError, match="read contiguously"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=2, limit=1
+        )
+    with pytest.raises(DiagESMTPSessionError, match="must be read"):
+        manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=2)
+    manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=1)
+    with pytest.raises(DiagESMTPSessionError, match="regressive"):
+        manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=0)
+    with pytest.raises(DiagESMTPSessionError, match="acknowledged event history"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=0, limit=1
+        )
+
+
+def test_mtp_event_read_and_ack_reject_active_acceptance_batch():
+    state = _state(rewards=[])
+    state.active_rid = "rid"
+    manager, _ = _recording_manager(state)
+    reservation = manager.preflight_acceptance_batch([("s", "rid", 1)])
+    manager.record_acceptance(session_id="s", rid="rid", accepted_drafts=1)
+
+    with pytest.raises(DiagESMTPSessionError, match="active acceptance batch"):
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=0, limit=1
+        )
+    with pytest.raises(DiagESMTPSessionError, match="active acceptance batch"):
+        manager.ack_events(engine_epoch=manager.engine_epoch, through_event_id=0)
+
+    manager.finish_acceptance_batch(reservation)
+    assert (
+        manager.read_events(
+            engine_epoch=manager.engine_epoch, after_event_id=0, limit=1
+        )["read_through_event_id"]
+        == 1
+    )
+
+
+def test_mtp_event_capacity_is_released_only_by_ack():
+    state = _state(rewards=[])
+    manager, _ = _recording_manager(state)
+    manager.max_pending_events = 1
+    manager._emit("first", state)
+
+    page = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=0, limit=1
+    )
+    with pytest.raises(DiagESMTPSessionError, match="fail-closed limit"):
+        manager._emit("second", state)
+    manager.ack_events(
+        engine_epoch=manager.engine_epoch,
+        through_event_id=page["read_through_event_id"],
+    )
+    manager._emit("second", state)
+    assert [event["event_id"] for event in manager._events] == [2]
+
+
+def test_mtp_session_export_pairs_unchanged_state_abi_with_event_frontier():
+    manager = _snapshot_test_manager()
+    config = DiagESMTPSessionConfig(seed=99, population_size=2)
+    manager.register_session(session_id="session", config=config)
+    page = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=0, limit=1
+    )
+    manager.ack_events(
+        engine_epoch=manager.engine_epoch,
+        through_event_id=page["read_through_event_id"],
+    )
+
+    envelope = manager.export_session_state_with_frontier("session")
+    assert set(envelope) == {"session_state", "telemetry_frontier"}
+    assert set(envelope["session_state"]) == {
+        "state_abi",
+        "identity",
+        "config",
+        "state",
+        "tensors",
+    }
+    assert envelope["session_state"]["state_abi"] == MTP_SESSION_STATE_ABI
+    assert envelope["telemetry_frontier"] == {
+        "engine_epoch": manager.engine_epoch,
+        "event_high_watermark": 1,
+    }
+
+    restored = _snapshot_test_manager()
+    restored_epoch = restored.engine_epoch
+    restored.import_session_state(
+        session_id="session", config=config, snapshot=envelope["session_state"]
+    )
+    assert restored.engine_epoch == restored_epoch
+    assert restored.engine_epoch != manager.engine_epoch
+    assert restored._next_event_id == 1
+    assert restored._events == []
 
 
 @pytest.mark.parametrize(
@@ -893,9 +1092,17 @@ def test_acceptance_batch_preflights_mixed_replay_event_at_queue_boundary():
         "verify_attempt",
         "draft_kv_prefix_replay",
     ]
-    with pytest.raises(DiagESMTPSessionError, match="global batch event"):
-        manager.drain_events("s")
-    assert len(manager.drain_events()["events"]) == 4
+    page = manager.read_events(
+        engine_epoch=manager.engine_epoch, after_event_id=0, limit=4
+    )
+    assert len(page["events"]) == 4
+    assert page["events"][-1]["event_scope"] == "global_batch"
+    assert len(manager._events) == 4
+    manager.ack_events(
+        engine_epoch=manager.engine_epoch,
+        through_event_id=page["read_through_event_id"],
+    )
+    assert manager._events == []
 
 
 def test_delta_stats_are_cpu_cached_and_include_scale_ranges(monkeypatch):
@@ -966,7 +1173,7 @@ def test_round_robin_visits_each_candidate_once_per_round_and_averages_reward():
             )
         )
 
-    events = manager.drain_events()["events"]
+    events = _read_all_events(manager)
     verify_events = [event for event in events if event["event"] == "verify_attempt"]
     completed_events = [
         event for event in events if event["event"] == "candidate_completed"
@@ -1025,7 +1232,7 @@ def test_contiguous_default_keeps_candidate_and_event_sequence():
             session_id="s", rid="rid", accepted_drafts=accepted_drafts
         )
 
-    events = manager.drain_events()["events"]
+    events = _read_all_events(manager)
     verify_events = [event for event in events if event["event"] == "verify_attempt"]
     assert [event["population_index"] for event in verify_events] == [
         0,
@@ -1130,7 +1337,7 @@ def test_block_interleaved_p4_b4_k8_schedule_and_boundary_transitions():
         else:
             manager.finish_acceptance_batch(reservation)
 
-    events = manager.drain_events()["events"]
+    events = _read_all_events(manager)
     verify_events = [event for event in events if event["event"] == "verify_attempt"]
     completed_events = [
         event for event in events if event["event"] == "candidate_completed"

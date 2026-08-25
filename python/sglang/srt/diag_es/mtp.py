@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
 import struct
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
@@ -15,6 +17,7 @@ MTP_RNG_VERSION = "numpy-philox-site-v1"
 MTP_SCHEDULE_RNG_VERSION = "numpy-philox-block-interleaved-v1"
 MTP_SESSION_STATE_ABI = "joyai-mtp-session-state-v1"
 MTP_MAX_PENDING_EVENTS = 1_000_000
+MTP_MAX_EVENT_READ_LIMIT = 4096
 MTPCandidateSchedule = Literal["contiguous", "round_robin", "block_interleaved"]
 
 _MTP_SESSION_SNAPSHOT_KEYS = frozenset(
@@ -470,8 +473,7 @@ class DiagESMTPSessionManager:
             )
             for site in manifest.dense_sites
         }
-        self._events: list[dict[str, Any]] = []
-        self._next_event_id = 1
+        self._initialize_event_protocol()
         self._kv_replay_batch_count = 0
         self._kv_replay_transitioned_requests = 0
         self._kv_replayed_rows = 0
@@ -479,6 +481,13 @@ class DiagESMTPSessionManager:
         self._next_acceptance_batch_nonce = 1
         self._active_acceptance_batch: _MTPAcceptanceBatchReservation | None = None
         self._active_acceptance_batch_cursor = 0
+
+    def _initialize_event_protocol(self) -> None:
+        self.engine_epoch = str(uuid.uuid4())
+        self._events: list[dict[str, Any]] = []
+        self._next_event_id = 1
+        self._acked_through_event_id = 0
+        self._highest_read_through_event_id = 0
 
     def get_dense_delta_bank(self, site_id: str) -> torch.Tensor:
         return self._dense_delta_banks[site_id]
@@ -714,8 +723,8 @@ class DiagESMTPSessionManager:
         if len(self._events) + count > self.max_pending_events:
             raise DiagESMTPSessionError(
                 "MTP diagonal-ES pending event queue reached its fail-closed "
-                f"limit of {self.max_pending_events}; drain events before "
-                "continuing inference"
+                f"limit of {self.max_pending_events}; read and acknowledge "
+                "events before continuing inference"
             )
 
     def _validate_acceptance(
@@ -1462,6 +1471,18 @@ class DiagESMTPSessionManager:
             "config": self._validated_config_payload(state.config),
             "state": self._snapshot_state_payload(state),
             "tensors": tensor_payload,
+        }
+
+    def export_session_state_with_frontier(self, session_id: str) -> dict[str, Any]:
+        """Atomically pair a portable session snapshot with its event frontier."""
+
+        session_state = self.export_session_state(session_id)
+        return {
+            "session_state": session_state,
+            "telemetry_frontier": {
+                "engine_epoch": self.engine_epoch,
+                "event_high_watermark": self._next_event_id - 1,
+            },
         }
 
     def _decode_session_snapshot(
@@ -2345,21 +2366,115 @@ class DiagESMTPSessionManager:
 
         return self._finish_population_update(state=state, rid=rid)
 
-    def drain_events(self, session_id: str | None = None) -> dict[str, Any]:
-        if session_id is None:
-            events = self._events
-            self._events = []
-        else:
-            self._validate_session_id(session_id)
-            if any(event["session_id"] is None for event in self._events):
+    def _validate_event_request_epoch(self, engine_epoch: str) -> None:
+        if engine_epoch != self.engine_epoch:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES event engine epoch does not match the active engine"
+            )
+        if self._active_acceptance_batch is not None:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES events cannot be read or acknowledged during an "
+                "active acceptance batch reservation"
+            )
+
+    def _event_high_watermark(self) -> int:
+        return self._next_event_id - 1
+
+    def _validate_event_queue_bounds(self) -> tuple[int, int]:
+        acked = self._acked_through_event_id
+        high_watermark = self._event_high_watermark()
+        if len(self._events) != high_watermark - acked:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES retained event queue is not contiguous"
+            )
+        return acked, high_watermark
+
+    def read_events(
+        self, *, engine_epoch: str, after_event_id: int, limit: int
+    ) -> dict[str, Any]:
+        """Read one retained, engine-global event page without releasing it."""
+
+        if type(after_event_id) is not int or after_event_id < 0:
+            raise ValueError(
+                "MTP diagonal-ES after_event_id must be a non-negative int"
+            )
+        if type(limit) is not int or not 1 <= limit <= MTP_MAX_EVENT_READ_LIMIT:
+            raise ValueError(
+                "MTP diagonal-ES event read limit must be an int in "
+                f"[1, {MTP_MAX_EVENT_READ_LIMIT}]"
+            )
+        self._validate_event_request_epoch(engine_epoch)
+        acked, high_watermark = self._validate_event_queue_bounds()
+        if after_event_id < acked:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES after_event_id precedes acknowledged event history"
+            )
+        if after_event_id > high_watermark:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES after_event_id exceeds the event high watermark"
+            )
+        if after_event_id > self._highest_read_through_event_id:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES events must be read contiguously from the "
+                "acknowledged frontier"
+            )
+
+        offset = after_event_id - acked
+        retained_page = self._events[offset : offset + limit]
+        for index, event in enumerate(retained_page, start=after_event_id + 1):
+            if event.get("event_id") != index:
                 raise DiagESMTPSessionError(
-                    "MTP draft-KV replay telemetry is a global batch event; "
-                    "drain events without a session_id before using a "
-                    "session-scoped drain"
+                    "MTP diagonal-ES retained event queue is not contiguous"
                 )
-            events = [e for e in self._events if e["session_id"] == session_id]
-            self._events = [e for e in self._events if e["session_id"] != session_id]
-        return {"events": events, "next_event_id": self._next_event_id}
+        events = copy.deepcopy(retained_page)
+        read_through_event_id = after_event_id + len(events)
+        self._highest_read_through_event_id = max(
+            self._highest_read_through_event_id, read_through_event_id
+        )
+        return {
+            "engine_epoch": self.engine_epoch,
+            "acked_through_event_id": acked,
+            "event_high_watermark": high_watermark,
+            "read_through_event_id": read_through_event_id,
+            "events": events,
+        }
+
+    def ack_events(self, *, engine_epoch: str, through_event_id: int) -> dict[str, Any]:
+        """Release the exact retained prefix already exposed by a successful read."""
+
+        if type(through_event_id) is not int or through_event_id < 0:
+            raise ValueError(
+                "MTP diagonal-ES through_event_id must be a non-negative int"
+            )
+        self._validate_event_request_epoch(engine_epoch)
+        acked, high_watermark = self._validate_event_queue_bounds()
+        if through_event_id < acked:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES event acknowledgement is regressive"
+            )
+        if through_event_id > high_watermark:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES event acknowledgement exceeds the high watermark"
+            )
+        if through_event_id > self._highest_read_through_event_id:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES events must be read before they are acknowledged"
+            )
+
+        release_count = through_event_id - acked
+        for index, event in enumerate(self._events[:release_count], start=acked + 1):
+            if event.get("event_id") != index:
+                raise DiagESMTPSessionError(
+                    "MTP diagonal-ES retained event queue is not contiguous"
+                )
+        del self._events[:release_count]
+        self._acked_through_event_id = through_event_id
+        return {
+            "engine_epoch": self.engine_epoch,
+            "acked_through_event_id": self._acked_through_event_id,
+            "event_high_watermark": high_watermark,
+            "pending_event_count": len(self._events),
+        }
 
     def status(self, session_id: str | None = None) -> dict[str, Any]:
         if session_id is not None:
@@ -2381,6 +2496,11 @@ class DiagESMTPSessionManager:
             "free_slot_count": len(self._free_slots),
             "max_correct_drafts": self.max_correct_drafts,
             "max_pending_events": self.max_pending_events,
+            "max_event_read_limit": MTP_MAX_EVENT_READ_LIMIT,
+            "engine_epoch": self.engine_epoch,
+            "acked_through_event_id": self._acked_through_event_id,
+            "event_high_watermark": self._event_high_watermark(),
+            "highest_read_through_event_id": self._highest_read_through_event_id,
             "draft_architecture_id": "joyai-llm-flash-dense-nextn-v1",
             "draft_model_class": "JoyAILLMFlashForCausalLMNextN",
             "draft_decoder_class": "JoyAIDenseNextNDecoderLayer",
