@@ -231,7 +231,11 @@ class JoyAILLMFlashForCausalLMNextN:
 )
 def test_joyai_mtp_manifest_is_exact_dense_search_space(placement, expected_sites):
     model = JoyAILLMFlashForCausalLMNextN()
-    model.model.decoder.self_attn.kv_b_proj.es_post_delta_bank = object()
+    attention = model.model.decoder.self_attn
+    attention.kv_b_proj.es_post_delta_bank = object()
+    stale_fused_a_override = False if placement == "pre" else None
+    attention._use_min_latency_fused_a_gemm = stale_fused_a_override
+    attention._use_min_latency_q_b_gemm = stale_fused_a_override
     manifest = register_joyai_llm_flash_mtp_manifest(model, placement=placement)
 
     assert manifest.schema_id == JOYAI_LLM_FLASH_MTP_SCHEMA_ID
@@ -240,9 +244,9 @@ def test_joyai_mtp_manifest_is_exact_dense_search_space(placement, expected_site
     assert [
         (site.site_id, site.width, site.active_width) for site in manifest.dense_sites
     ] == expected_sites
-    attention = model.model.decoder.self_attn
-    assert attention._use_min_latency_fused_a_gemm is False
-    assert attention._use_min_latency_q_b_gemm is False
+    expected_fused_a_override = None if placement == "pre" else False
+    assert attention._use_min_latency_fused_a_gemm is expected_fused_a_override
+    assert attention._use_min_latency_q_b_gemm is expected_fused_a_override
     # kv_b is absorbed into w_kc/w_vc by the active MLA backend, bypassing
     # LinearBase; it remains an explicit non-site to preserve the GEMM contract.
     assert attention.kv_b_proj.es_pre_site_id is None
@@ -273,9 +277,9 @@ def test_joyai_mtp_manifest_rejects_unknown_placement():
         )
 
 
-@pytest.mark.parametrize("placement", ["pre", "post", "both"])
+@pytest.mark.parametrize("placement", ["post", "both"])
 @pytest.mark.parametrize("num_tokens", [1, 64])
-def test_joyai_mtp_query_sites_never_bypass_bound_linear_epilogue(
+def test_joyai_mtp_post_query_sites_never_bypass_bound_linear_epilogue(
     monkeypatch, num_tokens, placement
 ):
     import sglang.srt.models.deepseek_v2 as deepseek_v2
@@ -305,6 +309,154 @@ def test_joyai_mtp_query_sites_never_bypass_bound_linear_epilogue(
     assert q_b.shape == (num_tokens, 32, 192)
     assert attention.fused_qkv_a_proj_with_mqa.calls == [num_tokens]
     assert attention.q_b_proj.calls == [num_tokens]
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "pre_bound", "expect_fused", "expect_pre"),
+    [
+        (2, False, True, False),
+        (2, True, True, True),
+        (17, True, False, False),
+    ],
+)
+def test_min_latency_fused_a_applies_diag_es_pre_exactly_on_direct_gemm(
+    monkeypatch, num_tokens, pre_bound, expect_fused, expect_pre
+):
+    import sglang.kernels.ops.gemm.fused_a_gemm as fused_a_gemm
+    import sglang.srt.diag_es.ops as diag_es_ops
+
+    linear = _Linear(2048, 2112)
+    linear.es_pre_delta_bank = object() if pre_bound else None
+    hidden_states = torch.zeros(num_tokens, 2048, dtype=torch.bfloat16)
+    steered = torch.ones_like(hidden_states)
+    pre_calls = []
+    fused_calls = []
+
+    def apply_pre(layer, value):
+        pre_calls.append((layer, value))
+        return steered
+
+    def fused(value, weight, output=None, backend="auto"):
+        fused_calls.append((value, weight, output, backend))
+        return torch.zeros(num_tokens, 2112, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(diag_es_ops, "maybe_apply_diag_es_pre", apply_pre)
+    monkeypatch.setattr(fused_a_gemm, "dsv3_fused_a_gemm", fused)
+
+    output = fused_a_gemm.linear_with_fused_a_gemm(linear, hidden_states, backend="jit")
+
+    assert output.shape == (num_tokens, 2112)
+    assert bool(fused_calls) is expect_fused
+    assert bool(pre_calls) is expect_pre
+    if expect_fused:
+        expected_input = steered if expect_pre else hidden_states
+        assert fused_calls[0][0] is expected_input
+        assert fused_calls[0][1]._base is linear.weight
+        assert fused_calls[0][2:] == (None, "jit")
+        assert linear.calls == []
+    else:
+        assert linear.calls == [num_tokens]
+
+
+def test_joyai_pre_fused_a_captures_candidate_neutral_replay_input(monkeypatch):
+    import sglang.srt.models.deepseek_v2 as deepseek_v2
+
+    attention = JoyAILLMFlashForCausalLMNextN().model.decoder.self_attn
+    attention.fused_qkv_a_proj_with_mqa.es_pre_delta_bank = object()
+    attention.q_lora_rank = 1536
+    attention.has_fused_proj = True
+    attention.is_packed_weight = False
+    attention._use_min_latency_fused_a_gemm = None
+    attention.fused_a_gemm_backend = "jit"
+    events = []
+
+    attention.diag_es_mtp_kv_replay = SimpleNamespace(
+        capture=lambda hidden_states, *_args: events.append(
+            ("capture", hidden_states.clone())
+        )
+    )
+    monkeypatch.setattr(
+        deepseek_v2,
+        "get_exec",
+        lambda: SimpleNamespace(
+            deterministic=SimpleNamespace(enable_deterministic_inference=False)
+        ),
+    )
+    monkeypatch.setattr(
+        deepseek_v2, "fused_a_gemm_weight_eligible", lambda _linear: True
+    )
+
+    def fused(linear, hidden_states, *, backend):
+        events.append(("fused", hidden_states))
+        return torch.zeros(hidden_states.shape[0], 2112, dtype=hidden_states.dtype)
+
+    monkeypatch.setattr(deepseek_v2, "linear_with_fused_a_gemm", fused)
+    hidden_states = torch.arange(2 * 2048, dtype=torch.int32).to(torch.bfloat16)
+    hidden_states = hidden_states.view(2, 2048)
+    forward_batch = SimpleNamespace(
+        positions=torch.tensor([7, 8], dtype=torch.int64),
+        forward_mode="draft_extend",
+        out_cache_loc=torch.tensor([3, 4], dtype=torch.int64),
+    )
+
+    output = deepseek_v2.DeepseekV2AttentionMLA.prepare_qkv_latent(
+        attention, hidden_states, forward_batch
+    )
+
+    assert output.shape == (2, 2112)
+    assert [event[0] for event in events] == ["capture", "fused"]
+    assert torch.equal(events[0][1], hidden_states)
+    assert events[1][1] is hidden_states
+
+
+@pytest.mark.parametrize(
+    ("deterministic_inference", "expect_fused_a"),
+    [(False, True), (True, False)],
+)
+def test_joyai_q_b_min_latency_fused_a_respects_deterministic_inference(
+    monkeypatch, deterministic_inference, expect_fused_a
+):
+    import sglang.srt.models.deepseek_v2 as deepseek_v2
+
+    attention = JoyAILLMFlashForCausalLMNextN().model.decoder.self_attn
+    attention._use_min_latency_q_b_gemm = None
+    attention._q_b_proj_verified_shape = True
+    attention.fused_a_gemm_backend = "auto"
+    attention.num_local_heads = 32
+    attention.qk_head_dim = 192
+    fused_calls = []
+
+    monkeypatch.setattr(
+        deepseek_v2,
+        "get_exec",
+        lambda: SimpleNamespace(
+            deterministic=SimpleNamespace(
+                enable_deterministic_inference=deterministic_inference
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        deepseek_v2, "fused_a_gemm_weight_eligible", lambda _linear: True
+    )
+
+    def fused_a(linear, value, *, backend):
+        fused_calls.append((backend, value.shape[0]))
+        return torch.zeros(
+            (value.shape[0], linear.output_size),
+            dtype=value.dtype,
+            device=value.device,
+        )
+
+    monkeypatch.setattr(deepseek_v2, "linear_with_fused_a_gemm", fused_a)
+    q_b = deepseek_v2.DeepseekV2AttentionMLA.q_b_proj_forward(
+        attention,
+        torch.zeros(2, 1536, dtype=torch.bfloat16),
+    )
+
+    assert q_b.shape == (2, 32, 192)
+    assert attention._use_min_latency_q_b_gemm is expect_fused_a
+    assert fused_calls == ([("auto", 2)] if expect_fused_a else [])
+    assert attention.q_b_proj.calls == ([] if expect_fused_a else [2])
 
 
 def test_joyai_mtp_manifest_fails_closed_on_generic_sparse_nextn_layout():

@@ -25,6 +25,16 @@ TARGET_SHAPES = [
     (1, 151936, 2048),
 ]
 
+JOYAI_MTP_IDENTITY_CASES = [
+    # M spans single-request decode through a full 64-session draft batch.
+    # (N, K) covers every BF16 dense linear in JoyAI's NextN decoder.
+    (1, 2112, 2048),
+    (2, 6144, 1536),
+    (3, 2048, 4096),
+    (17, 14336, 2048),
+    (64, 2048, 7168),
+]
+
 
 def test_triton_bf16_linear_reuses_kernel_across_dynamic_batch_sizes():
     assert _triton_bf16_linear_kernel.keys == ["N", "K", "APPLY_POST_DELTA"]
@@ -149,7 +159,26 @@ def test_triton_bf16_linear_post_delta_bias_order_and_identity():
         post_delta_bank=delta_bank,
         candidate_slots=identity_slots,
     )
-    assert torch.equal(identity, native)
+    assert torch.equal(identity.view(torch.int16), native.view(torch.int16))
+
+
+@pytest.mark.parametrize("m,n,k", JOYAI_MTP_IDENTITY_CASES)
+def test_triton_bf16_linear_zero_post_delta_is_bitwise_identity(m, n, k):
+    torch.manual_seed(20260825 + m + n + k)
+    x = torch.randn((m, k), dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn((n, k), dtype=torch.bfloat16, device="cuda")
+    zero_delta_bank = torch.zeros((5, n), dtype=torch.float32, device="cuda")
+    slots = torch.arange(m, dtype=torch.int32, device="cuda") % 5
+
+    native = triton_bf16_linear(x, weight)
+    identity = triton_bf16_linear(
+        x,
+        weight,
+        post_delta_bank=zero_delta_bank,
+        candidate_slots=slots,
+    )
+
+    assert torch.equal(identity.view(torch.int16), native.view(torch.int16))
 
 
 @pytest.mark.parametrize("has_bias", [False, True])

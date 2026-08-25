@@ -54,6 +54,10 @@ def linear_with_fused_a_gemm(
         and 1 <= hidden_states.shape[0] <= 16
         and not getattr(layer, "set_lora", False)
     ):
+        if layer.es_pre_delta_bank is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
+
+            hidden_states = maybe_apply_diag_es_pre(layer, hidden_states)
         return dsv3_fused_a_gemm(hidden_states, layer.weight.T, backend=backend)
     return layer(hidden_states)[0]
 

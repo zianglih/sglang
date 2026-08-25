@@ -2237,6 +2237,7 @@ class DeepseekV2AttentionMLA(
         if self._use_min_latency_q_b_gemm is None:
             self._use_min_latency_q_b_gemm = (
                 self._q_b_proj_verified_shape
+                and not get_exec().deterministic.enable_deterministic_inference
                 and fused_a_gemm_weight_eligible(self.q_b_proj)
             )
         if self._use_min_latency_q_b_gemm:
