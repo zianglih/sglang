@@ -1,6 +1,7 @@
 import contextlib
 from types import SimpleNamespace
 
+import pytest
 import sglang.srt.diag_es as diag_es
 import sglang.srt.speculative.eagle_worker_v2 as eagle_module
 import torch
@@ -162,6 +163,106 @@ def test_feedback_switch_and_graph_read_fence_bracket_draft_extend(monkeypatch):
         "cuda_graph_replay",
         "slot_read_fence",
     ]
+
+
+@pytest.mark.parametrize("skip_zero_step_draft_extend", [False, True])
+def test_zero_step_decode_does_not_record_mtp_feedback_or_replay(
+    monkeypatch, skip_zero_step_draft_extend
+):
+    order = []
+    initial_status = {
+        "population_index": 0,
+        "theta_version": 0,
+        "perturbation_seed": 1,
+        "sigma": 0.01,
+        "learning_rate": 0.1,
+        "candidate_attempts": 3,
+    }
+
+    monkeypatch.setattr(
+        eagle_module.envs,
+        "SGLANG_SPEC_SKIP_ZERO_STEP_DRAFT_EXTEND",
+        SimpleNamespace(get=lambda: skip_zero_step_draft_extend),
+    )
+    monkeypatch.setattr(
+        eagle_module, "speculative_moe_backend_context", contextlib.nullcontext
+    )
+    monkeypatch.setattr(
+        eagle_module, "speculative_moe_a2a_backend_context", contextlib.nullcontext
+    )
+    monkeypatch.setattr(
+        eagle_module, "spec_stage_span", lambda _name: contextlib.nullcontext()
+    )
+
+    verify_input = SimpleNamespace(is_verify_input=lambda: True)
+
+    def unexpected_draft(_batch):
+        raise AssertionError("zero-step decode ran a draft attempt")
+
+    def draft_extend(_batch, _output):
+        order.append("draft_extend")
+
+    class _Replay:
+        @staticmethod
+        def replay_transitioned_prefixes(_batch, _transitions):
+            raise AssertionError("zero-step decode replayed draft KV")
+
+    draft_worker = SimpleNamespace(
+        draft=unexpected_draft,
+        _draft_extend_for_decode=draft_extend,
+        draft_runner=SimpleNamespace(tp_group=None),
+        draft_tp_context=lambda _group: contextlib.nullcontext(),
+        diag_es_mtp_kv_replay=_Replay(),
+    )
+    output = SimpleNamespace(
+        accept_lens=torch.tensor([1]),
+        new_seq_lens=torch.tensor([11]),
+    )
+    req = SimpleNamespace(
+        rid="rid",
+        diag_es_mtp_session_id="session",
+        diag_es_mtp_slot=7,
+        diag_es_mtp_status=initial_status.copy(),
+    )
+    batch = SimpleNamespace(
+        forward_mode=SimpleNamespace(is_extend=lambda: False),
+        is_extend_in_batch=False,
+        spec_info=object(),
+        seq_lens=torch.tensor([10]),
+        reqs=[req],
+    )
+    worker = object.__new__(EAGLEWorkerV2)
+    worker._draft_worker = draft_worker
+    worker._diag_es_mtp_enabled = True
+    worker._diag_es_mtp_requires_kv_replay = True
+    worker.speculative_num_steps = 0
+    worker.activate_step_by_batch = lambda _bs: None
+    worker._build_trivial_verify_input = lambda _batch: verify_input
+
+    def unexpected_feedback(_batch, _output):
+        raise AssertionError("zero-step decode recorded MTP feedback")
+
+    worker._record_diag_es_mtp_feedback = unexpected_feedback
+    worker._note_diag_es_mtp_draft_read = lambda _batch: order.append("slot_read_fence")
+    worker._stub_skipped_draft_extend = lambda _batch, _output: order.append(
+        "stub_draft_extend"
+    )
+
+    def verify(_batch, grammar_barrier=None):
+        order.append("verify")
+        return output
+
+    worker.verify = verify
+
+    result = EAGLEWorkerV2.forward_batch_generation(worker, batch)
+
+    assert result is output
+    assert req.diag_es_mtp_status == initial_status
+    assert order == (
+        ["verify", "stub_draft_extend"]
+        if skip_zero_step_draft_extend
+        else ["verify", "draft_extend", "slot_read_fence"]
+    )
 
 
 def test_eager_draft_inner_forward_preserves_mtp_candidate_slots(monkeypatch):

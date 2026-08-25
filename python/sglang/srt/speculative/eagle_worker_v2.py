@@ -1184,7 +1184,14 @@ class EAGLEWorkerV2(BaseSpecWorker):
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
             batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
-            mtp_feedback = self._record_diag_es_mtp_feedback(batch, batch_output)
+            # The adaptive zero-step tier verifies only a synthetic root for
+            # plain decode. It did not run an MTP draft attempt, so it must not
+            # consume ES feedback or advance/switch the active candidate.
+            mtp_feedback = (
+                None
+                if self.speculative_num_steps == 0
+                else self._record_diag_es_mtp_feedback(batch, batch_output)
+            )
             if mtp_feedback is not None:
                 mtp_kv_transitions, acceptance_reservation = mtp_feedback
                 with (

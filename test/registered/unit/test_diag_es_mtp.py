@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -135,6 +137,121 @@ def test_equal_candidate_rewards_produce_exact_zero_update():
     assert torch.count_nonzero(update["site"]) == 0
 
 
+def test_null_theta_trust_region_preserves_unbounded_commit():
+    state = _state(rewards=[0.0, 1.0, 2.0, 3.0])
+    assert state.config.max_theta_rms_ratio is None
+    assert state.config.max_theta_abs_max_ratio is None
+    manager, activations = _recording_manager(state)
+
+    status = manager._finish_population_update(state=state, rid="rid")
+    event = manager._events[-1]
+
+    assert event["event"] == "update_committed"
+    assert event["proposed_theta_rms_ratio"] == pytest.approx(
+        status["theta_rms_ratio"]
+    )
+    assert event["proposed_theta_abs_max_ratio"] == pytest.approx(
+        status["theta_abs_max_ratio"]
+    )
+    assert event["proposed_theta_stats"] == status["theta_stats"]
+    assert status["max_theta_rms_ratio"] is None
+    assert status["max_theta_abs_max_ratio"] is None
+    assert status["committed_updates"] == 1
+    assert status["rejected_updates"] == 0
+    assert state.theta_version == 1
+    assert state.perturbation_seed == mtp_candidate_seed(1234, 1, 0)
+    assert activations == [(0, 0), (1, 0)]
+
+
+@pytest.mark.parametrize(
+    ("limit_field", "ratio_field"),
+    [
+        ("max_theta_rms_ratio", "proposed_theta_rms_ratio"),
+        ("max_theta_abs_max_ratio", "proposed_theta_abs_max_ratio"),
+    ],
+)
+def test_theta_trust_region_rejects_atomically_and_advances_seed(
+    limit_field, ratio_field
+):
+    state = _state(rewards=[0.0, 1.0, 2.0, 3.0])
+    state.config = replace(state.config, **{limit_field: 5.0})
+    state.theta_dense["site"].fill_(0.45)
+    state.theta_stats = _delta_stats(state.theta_dense)
+    state.rewarded_noise_sum_dense["site"].mul_(-1)
+    initial_theta = state.theta_dense["site"].clone()
+    initial_theta_stats = state.theta_stats
+    manager, activations = _recording_manager(state)
+
+    status = manager._finish_population_update(state=state, rid="rid")
+    event = manager._events[-1]
+
+    assert event["event"] == "update_rejected"
+    assert event["update_rms_ratio"] < state.config.max_update_rms_ratio
+    assert event["update_abs_max_ratio"] < state.config.max_update_abs_max_ratio
+    assert event[ratio_field] > 5.0
+    assert event["proposed_theta_stats"]["aggregate"]["rms"] > 0
+    assert event["theta_stats"] is initial_theta_stats
+    assert len(event["update_rejection_reasons"]) == 1
+    assert limit_field in event["update_rejection_reasons"][0]
+    torch.testing.assert_close(state.theta_dense["site"], initial_theta)
+    assert state.theta_stats is initial_theta_stats
+    assert status[limit_field] == 5.0
+    assert status["theta_rms_ratio"] == pytest.approx(4.5)
+    assert status["theta_abs_max_ratio"] == pytest.approx(4.5)
+    assert status["committed_updates"] == 0
+    assert status["rejected_updates"] == 1
+    assert status["theta_version"] == 1
+    assert status["population_index"] == 0
+    assert status["perturbation_seed"] == mtp_candidate_seed(1234, 1, 0)
+    assert state.candidate_rewards == []
+    assert torch.count_nonzero(state.noise_sum_dense["site"]) == 0
+    assert torch.count_nonzero(state.rewarded_noise_sum_dense["site"]) == 0
+    assert activations == [(0, 0), (1, 0)]
+
+
+def test_step_limit_rejection_still_reports_finite_proposed_theta():
+    state = _state(rewards=[0.0, 1.0, 2.0, 3.0])
+    state.config = replace(state.config, max_update_rms_ratio=0.5)
+    initial_theta = state.theta_dense["site"].clone()
+    manager, _ = _recording_manager(state)
+
+    manager._finish_population_update(state=state, rid="rid")
+    event = manager._events[-1]
+
+    assert event["event"] == "update_rejected"
+    assert event["update_rms_ratio"] > 0.5
+    assert event["proposed_theta_stats"]["aggregate"]["nonfinite_count"] == 0
+    assert math.isfinite(event["proposed_theta_rms_ratio"])
+    assert math.isfinite(event["proposed_theta_abs_max_ratio"])
+    assert "update_rms_ratio" in event["update_rejection_reasons"][0]
+    torch.testing.assert_close(state.theta_dense["site"], initial_theta)
+
+
+def test_nonfinite_update_rejection_reports_proposed_stats_without_mutation():
+    state = _state(rewards=[0.0, 1.0, 2.0, 3.0])
+    state.rewarded_noise_sum_dense["site"].fill_(math.inf)
+    initial_theta = state.theta_dense["site"].clone()
+    manager, _ = _recording_manager(state)
+
+    manager._finish_population_update(state=state, rid="rid")
+    event = manager._events[-1]
+
+    assert event["event"] == "update_rejected"
+    assert event["update_nonfinite_count"] == 2
+    assert event["proposed_theta_stats"]["aggregate"]["nonfinite_count"] == 2
+    assert math.isnan(event["proposed_theta_rms_ratio"])
+    assert math.isnan(event["proposed_theta_abs_max_ratio"])
+    assert any(
+        "staged update has 2 non-finite values" in reason
+        for reason in event["update_rejection_reasons"]
+    )
+    assert any(
+        "proposed theta has non-finite values" in reason
+        for reason in event["update_rejection_reasons"]
+    )
+    torch.testing.assert_close(state.theta_dense["site"], initial_theta)
+
+
 def test_sigma_zero_lr_zero_is_exact_identity_without_rng_materialization():
     state = _state(rewards=[0.0, 1.0])
     state.config = DiagESMTPSessionConfig(
@@ -187,6 +304,8 @@ def test_identity_control_cycles_without_candidate_upload():
         sigma=0.0,
         learning_rate=0.0,
         attempts_per_candidate=1,
+        max_theta_rms_ratio=0.1,
+        max_theta_abs_max_ratio=0.1,
     )
     state.active_rid = "rid"
     manager, activations = _recording_manager(state)
@@ -208,6 +327,13 @@ def test_identity_control_cycles_without_candidate_upload():
     assert activations == []
     assert state.theta_version == 1
     assert torch.count_nonzero(state.theta_dense["site"]) == 0
+    status = manager._session_status(state)
+    assert status["theta_rms_ratio"] == 0.0
+    assert status["theta_abs_max_ratio"] == 0.0
+    update = next(event for event in manager._events if event["event"].startswith("update_"))
+    assert update["event"] == "update_committed"
+    assert update["proposed_theta_rms_ratio"] == 0.0
+    assert update["proposed_theta_abs_max_ratio"] == 0.0
 
 
 def test_acceptance_batch_preflights_mixed_replay_event_at_queue_boundary():
@@ -596,6 +722,8 @@ def test_round_robin_registration_io_and_config_validation():
         candidate_schedule="round_robin",
     )
     assert request.candidate_schedule == "round_robin"
+    assert request.max_theta_rms_ratio is None
+    assert request.max_theta_abs_max_ratio is None
     assert (
         DiagESMTPSessionReqInput(
             action="register", session_id="s", seed=1
@@ -649,6 +777,34 @@ def test_round_robin_registration_io_and_config_validation():
             schedule_lane=0,
         )
 
+    positional = DiagESMTPSessionConfig(
+        1,
+        16,
+        0.01,
+        0.0,
+        4,
+        "population_zscore",
+        1e-8,
+        10.0,
+        100.0,
+        "round_robin",
+        None,
+        None,
+        None,
+    )
+    assert positional.candidate_schedule == "round_robin"
+    assert positional.max_theta_rms_ratio is None
+    assert positional.max_theta_abs_max_ratio is None
+
+
+@pytest.mark.parametrize("field", ["max_theta_rms_ratio", "max_theta_abs_max_ratio"])
+@pytest.mark.parametrize("value", [0.0, -1.0, math.inf, math.nan, True, "1"])
+def test_theta_trust_region_config_requires_optional_positive_finite_float(
+    field, value
+):
+    with pytest.raises(ValueError, match=field):
+        DiagESMTPSessionConfig(seed=1, **{field: value})
+
 
 def test_engine_api_propagates_round_robin_registration():
     from sglang.srt.entrypoints.engine import Engine
@@ -667,11 +823,15 @@ def test_engine_api_propagates_round_robin_registration():
             session_id="s",
             seed=1,
             candidate_schedule="round_robin",
+            max_theta_rms_ratio=2.5,
+            max_theta_abs_max_ratio=7.5,
         )
     )
 
     assert status == {"ok": True}
     assert captured["request"].candidate_schedule == "round_robin"
+    assert captured["request"].max_theta_rms_ratio == 2.5
+    assert captured["request"].max_theta_abs_max_ratio == 7.5
 
     status = asyncio.run(
         engine.async_register_diag_es_mtp_session(
@@ -689,6 +849,46 @@ def test_engine_api_propagates_round_robin_registration():
     assert captured["request"].candidate_dwell_attempts == 4
     assert captured["request"].schedule_seed == 88
     assert captured["request"].schedule_lane == 2
+    for method in (
+        Engine.register_diag_es_mtp_session,
+        Engine.async_register_diag_es_mtp_session,
+    ):
+        parameters = list(inspect.signature(method).parameters)
+        assert parameters.index("schedule_lane") < parameters.index(
+            "max_theta_rms_ratio"
+        )
+
+
+def test_tp_worker_propagates_theta_trust_region(monkeypatch):
+    import sglang.srt.diag_es as diag_es_package
+    from sglang.srt.managers.tp_worker import BaseTpWorker
+
+    captured = {}
+
+    class Manager:
+        @staticmethod
+        def register_session(*, session_id, config):
+            captured["session_id"] = session_id
+            captured["config"] = config
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        diag_es_package, "get_diag_es_mtp_manager", lambda: Manager()
+    )
+    request = DiagESMTPSessionReqInput(
+        action="register",
+        session_id="s",
+        seed=1,
+        max_theta_rms_ratio=2.5,
+        max_theta_abs_max_ratio=7.5,
+    )
+
+    status = BaseTpWorker.diag_es_mtp_session(object(), request)
+
+    assert status == {"ok": True}
+    assert captured["session_id"] == "s"
+    assert captured["config"].max_theta_rms_ratio == 2.5
+    assert captured["config"].max_theta_abs_max_ratio == 7.5
 
 
 def test_target_and_mtp_managers_are_role_keyed(monkeypatch):

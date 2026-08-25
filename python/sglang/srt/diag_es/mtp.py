@@ -103,6 +103,8 @@ class DiagESMTPSessionConfig:
     candidate_dwell_attempts: int | None = None
     schedule_seed: int | None = None
     schedule_lane: int | None = None
+    max_theta_rms_ratio: float | None = None
+    max_theta_abs_max_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
@@ -171,6 +173,17 @@ class DiagESMTPSessionConfig:
             if not math.isfinite(value) or (value < 0 if allow_zero else value <= 0):
                 relation = "non-negative" if allow_zero else "positive"
                 raise ValueError(f"MTP diagonal-ES {name} must be finite and {relation}")
+        for name, value in (
+            ("max_theta_rms_ratio", self.max_theta_rms_ratio),
+            ("max_theta_abs_max_ratio", self.max_theta_abs_max_ratio),
+        ):
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"MTP diagonal-ES {name} must be finite and positive")
         if self.sigma == 0.0 and self.learning_rate != 0.0:
             raise ValueError(
                 "MTP diagonal-ES sigma may be zero only when learning_rate is zero"
@@ -328,6 +341,22 @@ def _require_finite_delta_stats(stats: Mapping[str, Any], *, name: str) -> None:
             f"delta={aggregate['nonfinite_count']}, "
             f"scale={aggregate['scale_nonfinite_count']}"
         )
+
+
+def _theta_ratio_stats(
+    stats: Mapping[str, Any], *, sigma: float, prefix: str = "theta"
+) -> dict[str, float]:
+    aggregate = stats["aggregate"]
+
+    def ratio(value: float) -> float:
+        if sigma == 0.0:
+            return 0.0 if value == 0.0 else math.inf
+        return value / sigma
+
+    return {
+        f"{prefix}_rms_ratio": ratio(float(aggregate["rms"])),
+        f"{prefix}_abs_max_ratio": ratio(float(aggregate["absmax"])),
+    }
 
 
 class DiagESMTPSessionManager:
@@ -989,8 +1018,6 @@ class DiagESMTPSessionManager:
                 f"{state.config.max_update_abs_max_ratio:.6g}"
             )
         stats["update_rejection_reasons"] = reasons
-        if reasons:
-            raise DiagESMTPUpdateRejected(reasons, stats)
         return dense, stats
 
     def _finish_population_update(
@@ -1015,16 +1042,46 @@ class DiagESMTPSessionManager:
                     for name, update in dense_update.items()
                 }
                 next_theta_stats = _delta_stats(next_theta)
-                try:
-                    _require_finite_delta_stats(next_theta_stats, name="proposed theta")
-                except DiagESMTPSessionError as exc:
-                    reasons = [str(exc)]
-                    stats = {
-                        **stats,
-                        "proposed_theta_stats": next_theta_stats,
-                        "update_rejection_reasons": reasons,
-                    }
-                    raise DiagESMTPUpdateRejected(reasons, stats) from exc
+            proposed_theta_ratios = _theta_ratio_stats(
+                next_theta_stats,
+                sigma=state.config.sigma,
+                prefix="proposed_theta",
+            )
+            stats = {
+                **stats,
+                "proposed_theta_stats": next_theta_stats,
+                **proposed_theta_ratios,
+            }
+            reasons = list(stats["update_rejection_reasons"])
+            try:
+                _require_finite_delta_stats(next_theta_stats, name="proposed theta")
+            except DiagESMTPSessionError as exc:
+                reasons.append(str(exc))
+            if (
+                state.config.max_theta_rms_ratio is not None
+                and proposed_theta_ratios["proposed_theta_rms_ratio"]
+                > state.config.max_theta_rms_ratio
+            ):
+                reasons.append(
+                    "proposed_theta_rms_ratio "
+                    f"{proposed_theta_ratios['proposed_theta_rms_ratio']:.6g} "
+                    "exceeds max_theta_rms_ratio "
+                    f"{state.config.max_theta_rms_ratio:.6g}"
+                )
+            if (
+                state.config.max_theta_abs_max_ratio is not None
+                and proposed_theta_ratios["proposed_theta_abs_max_ratio"]
+                > state.config.max_theta_abs_max_ratio
+            ):
+                reasons.append(
+                    "proposed_theta_abs_max_ratio "
+                    f"{proposed_theta_ratios['proposed_theta_abs_max_ratio']:.6g} "
+                    "exceeds max_theta_abs_max_ratio "
+                    f"{state.config.max_theta_abs_max_ratio:.6g}"
+                )
+            if reasons:
+                stats["update_rejection_reasons"] = reasons
+                raise DiagESMTPUpdateRejected(reasons, stats)
         except DiagESMTPUpdateRejected as exc:
             state.rejected_updates += 1
             self._emit(
@@ -1489,6 +1546,7 @@ class DiagESMTPSessionManager:
     @classmethod
     def _session_status(cls, state: _MTPSessionState) -> dict[str, Any]:
         config = state.config
+        theta_ratios = _theta_ratio_stats(state.theta_stats, sigma=config.sigma)
         block_status: dict[str, Any] = {}
         if config.candidate_schedule == "block_interleaved":
             order_seed, visit_0, visit_1 = cls._block_interleaved_schedule(state)
@@ -1540,6 +1598,8 @@ class DiagESMTPSessionManager:
             "reward_zscore_epsilon": config.reward_zscore_epsilon,
             "max_update_rms_ratio": config.max_update_rms_ratio,
             "max_update_abs_max_ratio": config.max_update_abs_max_ratio,
+            "max_theta_rms_ratio": config.max_theta_rms_ratio,
+            "max_theta_abs_max_ratio": config.max_theta_abs_max_ratio,
             "theta_version": state.theta_version,
             "update_index": state.theta_version,
             "population_index": state.population_index,
@@ -1571,6 +1631,7 @@ class DiagESMTPSessionManager:
             "committed_updates": state.committed_updates,
             "rejected_updates": state.rejected_updates,
             "theta_stats": state.theta_stats,
+            **theta_ratios,
             "effective_delta_stats": state.effective_delta_stats,
             **(
                 {

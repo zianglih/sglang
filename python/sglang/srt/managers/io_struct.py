@@ -1839,6 +1839,8 @@ class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
     candidate_dwell_attempts: Optional[int] = None
     schedule_seed: Optional[int] = None
     schedule_lane: Optional[int] = None
+    max_theta_rms_ratio: Optional[float] = None
+    max_theta_abs_max_ratio: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.action == "register":

@@ -1535,6 +1535,8 @@ class Engine(EngineScoreMixin, EngineBase):
         candidate_dwell_attempts: int | None = None,
         schedule_seed: int | None = None,
         schedule_lane: int | None = None,
+        max_theta_rms_ratio: float | None = None,
+        max_theta_abs_max_ratio: float | None = None,
     ) -> Dict[str, Any]:
         return self.loop.run_until_complete(
             self.async_register_diag_es_mtp_session(
@@ -1548,6 +1550,8 @@ class Engine(EngineScoreMixin, EngineBase):
                 reward_zscore_epsilon=reward_zscore_epsilon,
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
+                max_theta_rms_ratio=max_theta_rms_ratio,
+                max_theta_abs_max_ratio=max_theta_abs_max_ratio,
                 candidate_schedule=candidate_schedule,
                 candidate_dwell_attempts=candidate_dwell_attempts,
                 schedule_seed=schedule_seed,
@@ -1573,6 +1577,8 @@ class Engine(EngineScoreMixin, EngineBase):
         candidate_dwell_attempts: int | None = None,
         schedule_seed: int | None = None,
         schedule_lane: int | None = None,
+        max_theta_rms_ratio: float | None = None,
+        max_theta_abs_max_ratio: float | None = None,
     ) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_mtp_session(
             DiagESMTPSessionReqInput(
@@ -1587,6 +1593,8 @@ class Engine(EngineScoreMixin, EngineBase):
                 reward_zscore_epsilon=reward_zscore_epsilon,
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
+                max_theta_rms_ratio=max_theta_rms_ratio,
+                max_theta_abs_max_ratio=max_theta_abs_max_ratio,
                 candidate_schedule=candidate_schedule,
                 candidate_dwell_attempts=candidate_dwell_attempts,
                 schedule_seed=schedule_seed,
