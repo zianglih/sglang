@@ -3384,7 +3384,7 @@ class ServerArgs:
     ] = "off"
     diag_es_mtp_placement: A[
         Literal["off", "pre", "post", "both"],
-        "MTP-drafter acceptance-length diagonal-ES placement. JoyAI MTP currently supports post only.",
+        "MTP-drafter acceptance-length diagonal-ES placement: off, pre, post, or both.",
         NS("exec.features"),
     ] = "off"
     diag_es_mtp_schema_id: A[
@@ -3734,8 +3734,6 @@ class ServerArgs:
         if self.diag_es_mtp_placement not in supported:
             raise ValueError("diag_es_mtp_placement must be off, pre, post, or both")
         if self.diag_es_mtp_placement != "off":
-            if self.diag_es_mtp_placement != "post":
-                raise ValueError("MTP diagonal ES currently supports post placement only")
             requested_algorithm = (
                 self.speculative_algorithm.upper()
                 if isinstance(self.speculative_algorithm, str)
@@ -3891,7 +3889,7 @@ class ServerArgs:
             )
 
     def _handle_diag_es_mtp_runtime_contract(self):
-        """Validate the local, KV-neutral JoyAI MTP steering topology."""
+        """Validate the local JoyAI MTP steering topology."""
 
         view = self._resolved()
         exact_values = {
@@ -3944,7 +3942,7 @@ class ServerArgs:
             mismatches.append("LoRA is enabled (requires no LoRA adapters)")
         if mismatches:
             raise ValueError(
-                "MTP diagonal ES supports only the local TP1/DP1 post-only "
+                "MTP diagonal ES supports only the local TP1/DP1 "
                 "JoyAI Triton BF16 runtime contract: " + ", ".join(mismatches)
             )
 

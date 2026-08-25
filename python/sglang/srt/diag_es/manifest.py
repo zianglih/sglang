@@ -133,8 +133,7 @@ def _is_deepseek_block_fp8_model(
         raise ValueError(
             "block-FP8 diagonal ES requires serialized DeepSeek-style E4M3 "
             "weights with FP32 128x128 scales and dynamic FP32 1x128 "
-            "activation scales: "
-            + ", ".join(mismatches)
+            "activation scales: " + ", ".join(mismatches)
         )
     return True
 
@@ -283,21 +282,41 @@ def register_qwen3_30b_a3b_manifest(
 
 def _joyai_mtp_schema_digest(
     dense_sites: tuple[DenseSite, ...],
+    *,
+    placement: DiagESPlacement,
 ) -> str:
+    # Preserve the already-published post-only v1 digest exactly. The pre space
+    # deliberately omits the physical fused q_a/kv_a input so a four-attempt
+    # candidate cannot leave seed-dependent draft KV behind for later
+    # candidates.
+    post_only = placement == "post"
     payload = {
         "version": JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
-        "placement": "post",
-        "kv_contract": "target-and-direct-draft-kv-neutral-v1",
+        "placement": placement,
+        "kv_contract": (
+            "target-and-direct-draft-kv-neutral-v1"
+            if post_only
+            else "target-and-direct-draft-kv-neutral-pre-v1"
+        ),
         "dense_sites": [
-            (site.site_id, site.width, site.active_width)
-            for site in dense_sites
+            (site.site_id, site.width, site.active_width) for site in dense_sites
         ],
-        "excluded_sites": [
-            "model.eh_proj.output",
-            "model.decoder.self_attn.kv_a_proj_with_mqa.output",
-            "model.decoder.self_attn.kv_b_proj.output",
-            "model.shared_head.head.output",
-        ],
+        "excluded_sites": (
+            [
+                "model.eh_proj.output",
+                "model.decoder.self_attn.kv_a_proj_with_mqa.output",
+                "model.decoder.self_attn.kv_b_proj.output",
+                "model.shared_head.head.output",
+            ]
+            if post_only
+            else [
+                "model.eh_proj",
+                "model.decoder.self_attn.fused_qkv_a_proj_with_mqa.input",
+                "model.decoder.self_attn.kv_a_proj_with_mqa.output",
+                "model.decoder.self_attn.kv_b_proj",
+                "model.shared_head.head",
+            ]
+        ),
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -308,19 +327,19 @@ def register_joyai_llm_flash_mtp_manifest(
     *,
     placement: DiagESPlacement,
 ) -> DiagESManifest:
-    """Register the KV-neutral post-only search space for JoyAI's MTP layer.
+    """Register the pre/post search space for JoyAI's dense MTP layer.
 
-    The q_a projection is fused with kv_a in SGLang. Its bank therefore spans
-    the physical 2112-wide epilogue, but only the leading 1536 q_a values are
-    trainable; the 576-wide kv_a suffix is kept at an exact zero delta.
+    For post steering, q_a is fused with kv_a in SGLang. Its bank spans the
+    physical 2112-wide epilogue, but only the leading 1536 q_a values are
+    trainable; the 576-wide kv_a suffix stays exact zero. The fused q_a/kv_a
+    input is excluded from pre steering so candidate changes never alter draft
+    KV state. No MTP placement changes the target model or target KV cache.
     """
 
-    if placement != "post":
-        raise ValueError("JoyAI MTP diagonal ES supports post placement only")
+    if placement not in _SUPPORTED_PLACEMENTS:
+        raise ValueError("JoyAI MTP diagonal ES placement must be pre, post, or both")
     if model.__class__.__name__ != "JoyAILLMFlashForCausalLMNextN":
-        raise TypeError(
-            "JoyAI MTP diagonal ES requires JoyAILLMFlashForCausalLMNextN"
-        )
+        raise TypeError("JoyAI MTP diagonal ES requires JoyAILLMFlashForCausalLMNextN")
     if getattr(model, "quant_config", None) is not None:
         raise ValueError("JoyAI MTP diagonal ES requires an unquantized BF16 draft")
     if not hasattr(model, "config") or not hasattr(model, "model"):
@@ -357,9 +376,7 @@ def register_joyai_llm_flash_mtp_manifest(
         ) from exc
 
     if decoder.__class__.__name__ != "JoyAIDenseNextNDecoderLayer":
-        raise TypeError(
-            "JoyAI MTP diagonal ES requires JoyAIDenseNextNDecoderLayer"
-        )
+        raise TypeError("JoyAI MTP diagonal ES requires JoyAIDenseNextNDecoderLayer")
     if mlp.__class__.__name__ != "DeepseekV2MLP":
         raise TypeError("JoyAI MTP diagonal ES requires a dense DeepseekV2MLP")
 
@@ -416,32 +433,47 @@ def register_joyai_llm_flash_mtp_manifest(
     attention._use_min_latency_fused_a_gemm = False
     attention._use_min_latency_q_b_gemm = False
 
-    q_a_site = "model.decoder.self_attn.q_a_proj.output"
-    q_b_site = "model.decoder.self_attn.q_b_proj.output"
-    out_site = "model.decoder.self_attn.o_proj.output"
-    gate_up_site = "model.decoder.mlp.gate_up_proj.output"
-    down_site = "model.decoder.mlp.down_proj.output"
-    fused_q_a_kv_a.es_post_site_id = q_a_site
-    q_b.es_post_site_id = q_b_site
-    out.es_post_site_id = out_site
-    gate_up.es_post_site_id = gate_up_site
-    down.es_post_site_id = down_site
-    # kv_b remains unbound. The kv_a suffix of the fused bank is fixed-zero by
-    # active_width=1536 in the session manager.
-    dense_sites = (
-        DenseSite(q_a_site, 2112, active_width=1536),
-        DenseSite(q_b_site, 6144),
-        DenseSite(out_site, 2048),
-        DenseSite(gate_up_site, 14336),
-        DenseSite(down_site, 2048),
-    )
+    dense_sites_list: list[DenseSite] = []
+    for linear, base, input_width, output_width, post_active_width, allow_pre in (
+        (
+            fused_q_a_kv_a,
+            "model.decoder.self_attn.fused_qkv_a_proj_with_mqa",
+            2048,
+            2112,
+            1536,
+            False,
+        ),
+        (q_b, "model.decoder.self_attn.q_b_proj", 1536, 6144, None, True),
+        (out, "model.decoder.self_attn.o_proj", 4096, 2048, None, True),
+        (gate_up, "model.decoder.mlp.gate_up_proj", 2048, 14336, None, True),
+        (down, "model.decoder.mlp.down_proj", 7168, 2048, None, True),
+    ):
+        if allow_pre and placement in ("pre", "both"):
+            pre_site = f"{base}.input"
+            linear.es_pre_site_id = pre_site
+            dense_sites_list.append(DenseSite(pre_site, input_width))
+        if placement in ("post", "both"):
+            post_base = (
+                "model.decoder.self_attn.q_a_proj" if linear is fused_q_a_kv_a else base
+            )
+            post_site = f"{post_base}.output"
+            linear.es_post_site_id = post_site
+            dense_sites_list.append(
+                DenseSite(post_site, output_width, active_width=post_active_width)
+            )
+    # kv_b remains unbound. With post steering, the kv_a suffix of the fused
+    # bank is fixed-zero by active_width=1536 in the session manager.
+    dense_sites = tuple(dense_sites_list)
     grouped_shapes: dict[str, tuple[int, ...]] = {}
     return DiagESManifest(
         schema_id=JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
-        placement="post",
+        placement=placement,
         dense_sites=dense_sites,
         grouped_delta_shapes=grouped_shapes,
-        schema_digest=_joyai_mtp_schema_digest(dense_sites),
+        schema_digest=_joyai_mtp_schema_digest(
+            dense_sites,
+            placement=placement,
+        ),
     )
 
 

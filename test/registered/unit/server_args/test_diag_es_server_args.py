@@ -96,9 +96,7 @@ def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
         )
     with pytest.raises(ValueError, match="requires None or 'fp8'"):
         _validate_runtime(
-            _runtime_view(
-                quantization="mxfp8", fp8_gemm_runner_backend="triton"
-            ),
+            _runtime_view(quantization="mxfp8", fp8_gemm_runner_backend="triton"),
             placement="post",
         )
 
@@ -183,8 +181,8 @@ def test_mtp_diag_es_identity_is_exact_and_allows_independent_target_role():
             "speculative_algorithm": "NEXTN",
         }
     )
-    with pytest.raises(ValueError, match="post placement only"):
-        _validate_identity(**{**values, "diag_es_mtp_placement": "pre"})
+    _validate_identity(**{**values, "diag_es_mtp_placement": "pre"})
+    _validate_identity(**{**values, "diag_es_mtp_placement": "both"})
     with pytest.raises(ValueError, match="schema_id"):
         _validate_identity(**{**values, "diag_es_mtp_schema_id": "wrong"})
 

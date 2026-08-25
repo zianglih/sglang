@@ -414,9 +414,7 @@ def register_diag_es_model(
             raise ValueError(
                 "MTP diagonal ES requires max_sessions and max_correct_drafts"
             )
-        manifest = register_joyai_llm_flash_mtp_manifest(
-            model, placement=placement
-        )
+        manifest = register_joyai_llm_flash_mtp_manifest(model, placement=placement)
         mtp_manager = DiagESMTPSessionManager(
             manifest=manifest,
             max_sessions=mtp_max_sessions,
@@ -434,8 +432,17 @@ def register_diag_es_model(
             decoder.mlp.down_proj,
         )
         for linear in dense_linears:
-            linear.es_post_delta_bank = mtp_manager.get_dense_delta_bank(
-                linear.es_post_site_id
+            pre_site_id = linear.es_pre_site_id
+            post_site_id = linear.es_post_site_id
+            linear.es_pre_delta_bank = (
+                mtp_manager.get_dense_delta_bank(pre_site_id)
+                if pre_site_id is not None
+                else None
+            )
+            linear.es_post_delta_bank = (
+                mtp_manager.get_dense_delta_bank(post_site_id)
+                if post_site_id is not None
+                else None
             )
 
         _mtp_manager = mtp_manager
@@ -511,9 +518,8 @@ def release_req_candidate(req: Any) -> None:
     if req.es_candidate_id is not None and not req.es_candidate_released:
         get_diag_es_manager().release(req.es_candidate_id)
         req.es_candidate_released = True
-    if (
-        getattr(req, "diag_es_mtp_session_id", None) is not None
-        and not getattr(req, "diag_es_mtp_session_released", True)
+    if getattr(req, "diag_es_mtp_session_id", None) is not None and not getattr(
+        req, "diag_es_mtp_session_released", True
     ):
         get_diag_es_mtp_manager().release_request(
             session_id=req.diag_es_mtp_session_id,

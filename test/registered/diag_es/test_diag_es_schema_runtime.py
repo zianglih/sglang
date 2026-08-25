@@ -125,18 +125,12 @@ class Qwen3MoeForCausalLM:
             layers=[
                 SimpleNamespace(
                     self_attn=SimpleNamespace(
-                        qkv_proj=_Linear(
-                            2048, 5120, dtype=dtype, block_fp8=block_fp8
-                        ),
-                        o_proj=_Linear(
-                            4096, 2048, dtype=dtype, block_fp8=block_fp8
-                        ),
+                        qkv_proj=_Linear(2048, 5120, dtype=dtype, block_fp8=block_fp8),
+                        o_proj=_Linear(4096, 2048, dtype=dtype, block_fp8=block_fp8),
                     ),
                     mlp=SimpleNamespace(
                         gate=_Linear(2048, 128, dtype=dtype),
-                        experts=_Experts(
-                            layer_id, dtype=dtype, block_fp8=block_fp8
-                        ),
+                        experts=_Experts(layer_id, dtype=dtype, block_fp8=block_fp8),
                     ),
                 )
                 for layer_id in range(num_layers)
@@ -179,43 +173,93 @@ class JoyAILLMFlashForCausalLMNextN:
         self.model = SimpleNamespace(decoder=JoyAIDenseNextNDecoderLayer())
 
 
-def test_joyai_mtp_manifest_is_exact_dense_kv_neutral_search_space():
+@pytest.mark.parametrize(
+    ("placement", "expected_sites"),
+    [
+        (
+            "pre",
+            [
+                ("model.decoder.self_attn.q_b_proj.input", 1536, None),
+                ("model.decoder.self_attn.o_proj.input", 4096, None),
+                ("model.decoder.mlp.gate_up_proj.input", 2048, None),
+                ("model.decoder.mlp.down_proj.input", 7168, None),
+            ],
+        ),
+        (
+            "post",
+            [
+                ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
+                ("model.decoder.self_attn.q_b_proj.output", 6144, None),
+                ("model.decoder.self_attn.o_proj.output", 2048, None),
+                ("model.decoder.mlp.gate_up_proj.output", 14336, None),
+                ("model.decoder.mlp.down_proj.output", 2048, None),
+            ],
+        ),
+        (
+            "both",
+            [
+                ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
+                ("model.decoder.self_attn.q_b_proj.input", 1536, None),
+                ("model.decoder.self_attn.q_b_proj.output", 6144, None),
+                ("model.decoder.self_attn.o_proj.input", 4096, None),
+                ("model.decoder.self_attn.o_proj.output", 2048, None),
+                ("model.decoder.mlp.gate_up_proj.input", 2048, None),
+                ("model.decoder.mlp.gate_up_proj.output", 14336, None),
+                ("model.decoder.mlp.down_proj.input", 7168, None),
+                ("model.decoder.mlp.down_proj.output", 2048, None),
+            ],
+        ),
+    ],
+)
+def test_joyai_mtp_manifest_is_exact_dense_search_space(placement, expected_sites):
     model = JoyAILLMFlashForCausalLMNextN()
     model.model.decoder.self_attn.kv_b_proj.es_post_delta_bank = object()
-    manifest = register_joyai_llm_flash_mtp_manifest(model, placement="post")
+    manifest = register_joyai_llm_flash_mtp_manifest(model, placement=placement)
 
     assert manifest.schema_id == JOYAI_LLM_FLASH_MTP_SCHEMA_ID
+    assert manifest.placement == placement
     assert manifest.grouped_delta_shapes == {}
     assert [
-        (site.site_id, site.width, site.active_width)
-        for site in manifest.dense_sites
-    ] == [
-        ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
-        ("model.decoder.self_attn.q_b_proj.output", 6144, None),
-        ("model.decoder.self_attn.o_proj.output", 2048, None),
-        ("model.decoder.mlp.gate_up_proj.output", 14336, None),
-        ("model.decoder.mlp.down_proj.output", 2048, None),
-    ]
+        (site.site_id, site.width, site.active_width) for site in manifest.dense_sites
+    ] == expected_sites
     attention = model.model.decoder.self_attn
     assert attention._use_min_latency_fused_a_gemm is False
     assert attention._use_min_latency_q_b_gemm is False
+    assert attention.kv_b_proj.es_pre_site_id is None
     assert attention.kv_b_proj.es_post_site_id is None
+    assert attention.kv_b_proj.es_pre_delta_bank is None
     assert attention.kv_b_proj.es_post_delta_bank is None
-    assert attention.fused_qkv_a_proj_with_mqa.es_post_site_id.endswith(
-        "q_a_proj.output"
+    assert attention.fused_qkv_a_proj_with_mqa.es_pre_site_id is None
+    assert (attention.fused_qkv_a_proj_with_mqa.es_post_site_id is not None) == (
+        placement in ("post", "both")
     )
-    with pytest.raises(ValueError, match="post placement only"):
-        register_joyai_llm_flash_mtp_manifest(model, placement="pre")
 
 
+def test_joyai_mtp_post_schema_digest_remains_backward_compatible():
+    manifest = register_joyai_llm_flash_mtp_manifest(
+        JoyAILLMFlashForCausalLMNextN(), placement="post"
+    )
+    assert manifest.schema_digest == (
+        "7c5a6102fcc4b685afe6ac22a3ac1adf35408702a2a9a3f2ef4bde96ae4f05b2"
+    )
+
+
+def test_joyai_mtp_manifest_rejects_unknown_placement():
+    with pytest.raises(ValueError, match="pre, post, or both"):
+        register_joyai_llm_flash_mtp_manifest(
+            JoyAILLMFlashForCausalLMNextN(), placement="sideways"
+        )
+
+
+@pytest.mark.parametrize("placement", ["pre", "post", "both"])
 @pytest.mark.parametrize("num_tokens", [1, 64])
 def test_joyai_mtp_query_sites_never_bypass_bound_linear_epilogue(
-    monkeypatch, num_tokens
+    monkeypatch, num_tokens, placement
 ):
     import sglang.srt.models.deepseek_v2 as deepseek_v2
 
     model = JoyAILLMFlashForCausalLMNextN()
-    register_joyai_llm_flash_mtp_manifest(model, placement="post")
+    register_joyai_llm_flash_mtp_manifest(model, placement=placement)
     attention = model.model.decoder.self_attn
     attention.q_lora_rank = 1536
     attention.num_local_heads = 32
@@ -224,9 +268,7 @@ def test_joyai_mtp_query_sites_never_bypass_bound_linear_epilogue(
     def bypass_is_forbidden(*_args, **_kwargs):
         raise AssertionError("min-latency fused-A bypassed the ES epilogue")
 
-    monkeypatch.setattr(
-        deepseek_v2, "linear_with_fused_a_gemm", bypass_is_forbidden
-    )
+    monkeypatch.setattr(deepseek_v2, "linear_with_fused_a_gemm", bypass_is_forbidden)
     q_a = deepseek_v2.DeepseekV2AttentionMLA.prepare_qkv_latent(
         attention,
         torch.zeros(num_tokens, 2048, dtype=torch.bfloat16),
