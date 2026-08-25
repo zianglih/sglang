@@ -72,9 +72,12 @@ class TestDiagESForwardBatchSlots(unittest.TestCase):
         self.assertEqual(request_slots, (13, 11))
 
     def test_topk2_draft_decode_expands_mtp_slots_per_activation_row(self):
+        batch = _batch(ForwardMode.DECODE, [3, 1], token_count=4, width=2)
+        # Spec-v2 prepares draft token IDs directly on device and deliberately
+        # leaves the ScheduleBatch CPU input_ids field unset.
+        batch.input_ids = None
         token_slots, request_slots = _build_diag_es_candidate_slots(
-            _batch(ForwardMode.DECODE, [3, 1], token_count=4, width=2),
-            _runner(True, is_draft_worker=True),
+            batch, _runner(True, is_draft_worker=True)
         )
 
         torch.testing.assert_close(
@@ -99,17 +102,18 @@ class TestDiagESForwardBatchSlots(unittest.TestCase):
         self.assertEqual(request_slots, (3, 1))
 
     def test_target_verify_expands_each_target_slot_across_verify_window(self):
+        batch = _batch(
+            ForwardMode.TARGET_VERIFY,
+            [3, 1],
+            token_count=8,
+            # Deliberately stale: target verify must ignore this phase's
+            # prior extend metadata and use the verification width.
+            extend_lens=[17, 23],
+            width=4,
+        )
+        batch.input_ids = None
         token_slots, request_slots = _build_diag_es_candidate_slots(
-            _batch(
-                ForwardMode.TARGET_VERIFY,
-                [3, 1],
-                token_count=8,
-                # Deliberately stale: target verify must ignore this phase's
-                # prior extend metadata and use the verification width.
-                extend_lens=[17, 23],
-                width=4,
-            ),
-            _runner(True),
+            batch, _runner(True)
         )
 
         torch.testing.assert_close(

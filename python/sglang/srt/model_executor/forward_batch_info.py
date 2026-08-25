@@ -130,7 +130,7 @@ def _build_diag_es_candidate_slots(
                 torch.repeat_interleave(
                     request_slots,
                     width,
-                    output_size=len(batch.input_ids),
+                    output_size=len(batch.reqs) * width,
                 ),
                 request_slots_cpu,
             )
@@ -158,7 +158,7 @@ def _build_diag_es_candidate_slots(
             request_slots,
             repeat_counts,
             output_size=(
-                len(batch.input_ids)
+                len(batch.reqs) * batch.spec_info.num_tokens_per_req
                 if batch.forward_mode.is_target_verify()
                 else batch.extend_num_tokens
             ),
