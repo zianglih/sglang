@@ -104,9 +104,9 @@ def _mtp_replay_cell_size(kvc: KVCacheConfigurator) -> int:
         raise ValueError(
             "JoyAI MTP draft-KV replay memory accounting requires hidden_size=2048"
         )
-    return hidden_size * torch._utils._element_size(
-        torch.bfloat16
-    ) + torch._utils._element_size(torch.int64)
+    from sglang.srt.diag_es.mtp_kv_replay import mtp_replay_bytes_per_token
+
+    return mtp_replay_bytes_per_token(hidden_size)
 
 
 def _get_dsv4_compress_state_dtype_sizes() -> tuple[int, int]:
@@ -193,9 +193,9 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                 and int(eagle_draft_num_layers) > 0
                 and int(num_layers) > 0
             ):
-                self._cell_size = int(
-                    self._cell_size
-                    * (1 + int(eagle_draft_num_layers) / int(num_layers))
+                self._cell_size = ceil_div(
+                    self._cell_size * (int(num_layers) + int(eagle_draft_num_layers)),
+                    int(num_layers),
                 )
 
         # The replay buffer is allocated beside the one-layer draft MLA pool,
