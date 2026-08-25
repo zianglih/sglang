@@ -4,7 +4,7 @@ import hashlib
 import math
 import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
@@ -13,8 +13,43 @@ from sglang.srt.diag_es.manifest import DiagESManifest
 
 MTP_RNG_VERSION = "numpy-philox-site-v1"
 MTP_SCHEDULE_RNG_VERSION = "numpy-philox-block-interleaved-v1"
+MTP_SESSION_STATE_ABI = "joyai-mtp-session-state-v1"
 MTP_MAX_PENDING_EVENTS = 1_000_000
 MTPCandidateSchedule = Literal["contiguous", "round_robin", "block_interleaved"]
+
+_MTP_SESSION_SNAPSHOT_KEYS = frozenset(
+    ("state_abi", "identity", "config", "state", "tensors")
+)
+_MTP_SESSION_STATE_KEYS = frozenset(
+    (
+        "candidate_rewards",
+        "candidate_accept_sum",
+        "candidate_attempts",
+        "theta_version",
+        "population_index",
+        "total_attempts",
+        "committed_updates",
+        "rejected_updates",
+        "latest_accept_length",
+        "latest_accepted_drafts",
+        "latest_attempt_theta_version",
+        "latest_attempt_population_index",
+        "latest_attempt_perturbation_seed",
+        "round_robin_accept_sums",
+        "round_robin_attempt_counts",
+        "block_interleaved_accept_sums",
+        "block_interleaved_attempt_counts",
+        "block_schedule_position",
+        "block_attempt_index",
+        "latest_attempt_visit_index",
+        "latest_attempt_block_attempt_index",
+        "latest_attempt_schedule_position",
+        "latest_attempt_schedule_order_seed",
+    )
+)
+_MTP_SESSION_TENSOR_KEYS = frozenset(
+    ("theta_dense", "noise_sum_dense", "rewarded_noise_sum_dense")
+)
 
 
 class DiagESMTPSessionError(RuntimeError):
@@ -37,7 +72,9 @@ def _stable_u64(*parts: object) -> int:
     return int.from_bytes(digest.digest(), "little", signed=False)
 
 
-def mtp_candidate_seed(root_seed: int, theta_version: int, population_index: int) -> int:
+def mtp_candidate_seed(
+    root_seed: int, theta_version: int, population_index: int
+) -> int:
     """Match the wrapper's one-sided diagonal-ES candidate-seed contract."""
 
     return _stable_u64("candidate", root_seed, theta_version, population_index)
@@ -112,9 +149,7 @@ class DiagESMTPSessionConfig:
         if self.population_size < 2:
             raise ValueError("MTP diagonal-ES population_size must be at least 2")
         if self.attempts_per_candidate < 1:
-            raise ValueError(
-                "MTP diagonal-ES attempts_per_candidate must be positive"
-            )
+            raise ValueError("MTP diagonal-ES attempts_per_candidate must be positive")
         if self.estimator != "population_zscore":
             raise ValueError(
                 "MTP diagonal ES supports only estimator='population_zscore'"
@@ -172,7 +207,9 @@ class DiagESMTPSessionConfig:
         ):
             if not math.isfinite(value) or (value < 0 if allow_zero else value <= 0):
                 relation = "non-negative" if allow_zero else "positive"
-                raise ValueError(f"MTP diagonal-ES {name} must be finite and {relation}")
+                raise ValueError(
+                    f"MTP diagonal-ES {name} must be finite and {relation}"
+                )
         for name, value in (
             ("max_theta_rms_ratio", self.max_theta_rms_ratio),
             ("max_theta_abs_max_ratio", self.max_theta_abs_max_ratio),
@@ -250,6 +287,37 @@ def _zeros_like_map(values: Mapping[str, torch.Tensor]) -> dict[str, torch.Tenso
     return {name: torch.zeros_like(value) for name, value in values.items()}
 
 
+def _same_typed_tree(actual: object, expected: object) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _same_typed_tree(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_typed_tree(actual_value, expected_value)
+            for actual_value, expected_value in zip(actual, expected)
+        )
+    return actual == expected
+
+
+def _require_exact_int(value: object, *, name: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise DiagESMTPSessionError(
+            f"MTP session snapshot {name} must be an integer >= {minimum}"
+        )
+    return value
+
+
+def _require_optional_exact_int(
+    value: object, *, name: str, minimum: int = 0
+) -> int | None:
+    if value is None:
+        return None
+    return _require_exact_int(value, name=name, minimum=minimum)
+
+
 def _delta_stats(values: Mapping[str, torch.Tensor]) -> dict[str, Any]:
     """Summarize CPU delta tensors without reading their resident GPU banks."""
 
@@ -286,9 +354,7 @@ def _delta_stats(values: Mapping[str, torch.Tensor]) -> dict[str, Any]:
             )
             value_rms = math.sqrt(value_sum_sq / finite_values.size)
             value_abs_max = max(abs(value_min), abs(value_max))
-        finite_scales = (
-            scales if scale_nonfinite == 0 else scales[finite_scales_mask]
-        )
+        finite_scales = scales if scale_nonfinite == 0 else scales[finite_scales_mask]
         if finite_scales.size == 0:
             min_scale = max_scale = math.nan
         else:
@@ -427,6 +493,133 @@ class DiagESMTPSessionManager:
             raise ValueError(
                 "diag_es_mtp_session_id must be a non-empty string without NUL bytes"
             )
+
+    def _snapshot_identity(self, session_id: str) -> dict[str, Any]:
+        return {
+            "session_id": session_id,
+            "model_artifact_id": self.model_artifact_id,
+            "schema_id": self.manifest.schema_id,
+            "schema_digest": self.manifest.schema_digest,
+            "placement": self.manifest.placement,
+            "rng_version": MTP_RNG_VERSION,
+            "schedule_rng_version": MTP_SCHEDULE_RNG_VERSION,
+            "max_correct_drafts": self.max_correct_drafts,
+            "dense_sites": [
+                {
+                    "site_id": site.site_id,
+                    "width": site.width,
+                    "active_width": (
+                        site.width if site.active_width is None else site.active_width
+                    ),
+                }
+                for site in self.manifest.dense_sites
+            ],
+        }
+
+    @staticmethod
+    def _validated_config_payload(
+        config: DiagESMTPSessionConfig,
+    ) -> dict[str, Any]:
+        if type(config) is not DiagESMTPSessionConfig:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot config has an unsupported type"
+            )
+        payload = asdict(config)
+        try:
+            rebuilt = DiagESMTPSessionConfig(**payload)
+        except (TypeError, ValueError) as exc:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot config is invalid"
+            ) from exc
+        if not _same_typed_tree(asdict(rebuilt), payload):
+            raise DiagESMTPSessionError("MTP session snapshot config is not exact")
+        return payload
+
+    @staticmethod
+    def _require_snapshot_mapping(
+        value: object, *, name: str, keys: frozenset[str]
+    ) -> Mapping[str, Any]:
+        if not isinstance(value, Mapping):
+            raise DiagESMTPSessionError(
+                f"MTP session snapshot {name} must be a mapping"
+            )
+        actual_keys = set(value)
+        if actual_keys != keys:
+            missing = sorted(repr(key) for key in keys - actual_keys)
+            extra = sorted(repr(key) for key in actual_keys - keys)
+            raise DiagESMTPSessionError(
+                f"MTP session snapshot {name} keys mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+        return value
+
+    def _validated_snapshot_tensor_map(
+        self, value: object, *, name: str
+    ) -> dict[str, torch.Tensor]:
+        expected_sites = {site.site_id: site for site in self.manifest.dense_sites}
+        if not isinstance(value, Mapping):
+            raise DiagESMTPSessionError(
+                f"MTP session snapshot tensor map {name!r} must be a mapping"
+            )
+        actual_sites = set(value)
+        if actual_sites != set(expected_sites):
+            missing = sorted(repr(site) for site in set(expected_sites) - actual_sites)
+            extra = sorted(repr(site) for site in actual_sites - set(expected_sites))
+            raise DiagESMTPSessionError(
+                f"MTP session snapshot tensor map {name!r} site mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+
+        result: dict[str, torch.Tensor] = {}
+        for site_id, site in expected_sites.items():
+            tensor = value[site_id]
+            if not torch.is_tensor(tensor):
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must be a tensor"
+                )
+            if tensor.device.type != "cpu":
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must be on CPU"
+                )
+            if tensor.dtype != torch.float32:
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must be FP32"
+                )
+            if tuple(tensor.shape) != (site.width,):
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must have shape "
+                    f"({site.width},), got {tuple(tensor.shape)}"
+                )
+            if not tensor.is_contiguous():
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must be contiguous"
+                )
+            if tensor.requires_grad:
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] must not require grad"
+                )
+            if not bool(torch.isfinite(tensor).all()):
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] has non-finite values"
+                )
+            active_width = (
+                site.width if site.active_width is None else site.active_width
+            )
+            if int(torch.count_nonzero(tensor[active_width:])) != 0:
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name}[{site_id!r}] has a nonzero "
+                    "inactive suffix"
+                )
+            result[site_id] = tensor.detach().clone()
+        return result
+
+    def _clear_resident_slot(self, slot: int) -> None:
+        self._wait_for_slot(slot)
+        with torch.cuda.stream(self._upload_stream):
+            for bank in self._dense_delta_banks.values():
+                bank[slot].zero_()
+        self._upload_stream.synchronize()
+        self._slot_last_read_events[slot] = None
 
     def _new_tensor_map(self) -> dict[str, torch.Tensor]:
         return {
@@ -578,6 +771,449 @@ class DiagESMTPSessionManager:
         )
         return result
 
+    def _validate_persistable_state(self, state: _MTPSessionState) -> dict[str, Any]:
+        config = state.config
+        population_size = config.population_size
+        attempts_per_candidate = config.attempts_per_candidate
+
+        for name in (
+            "candidate_accept_sum",
+            "candidate_attempts",
+            "theta_version",
+            "population_index",
+            "total_attempts",
+            "committed_updates",
+            "rejected_updates",
+            "block_schedule_position",
+            "block_attempt_index",
+        ):
+            _require_exact_int(getattr(state, name), name=f"state.{name}")
+        if state.population_index >= population_size:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot population_index is out of range"
+            )
+        if state.committed_updates + state.rejected_updates != state.theta_version:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot update counters do not equal theta_version"
+            )
+
+        if type(state.candidate_rewards) is not list or any(
+            type(reward) is not float
+            or not math.isfinite(reward)
+            or reward < 0.0
+            or reward > self.max_correct_drafts
+            for reward in state.candidate_rewards
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot candidate_rewards must be finite float values "
+                f"in [0, {self.max_correct_drafts}]"
+            )
+        if any(
+            (accepted_sum := round(reward * attempts_per_candidate)) < 0
+            or accepted_sum > attempts_per_candidate * self.max_correct_drafts
+            or accepted_sum / attempts_per_candidate != reward
+            for reward in state.candidate_rewards
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot candidate reward is not reachable from an "
+                "integer accepted-draft sum"
+            )
+
+        accounting_lists = {
+            "round_robin_accept_sums": state.round_robin_accept_sums,
+            "round_robin_attempt_counts": state.round_robin_attempt_counts,
+            "block_interleaved_accept_sums": state.block_interleaved_accept_sums,
+            "block_interleaved_attempt_counts": (
+                state.block_interleaved_attempt_counts
+            ),
+        }
+        for name, values in accounting_lists.items():
+            if type(values) is not list or len(values) != population_size:
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name} must contain "
+                    f"{population_size} entries"
+                )
+            for value in values:
+                _require_exact_int(value, name=f"state.{name}[]")
+
+        common_latest = (
+            "latest_accept_length",
+            "latest_accepted_drafts",
+            "latest_attempt_theta_version",
+            "latest_attempt_population_index",
+            "latest_attempt_perturbation_seed",
+        )
+        block_latest = (
+            "latest_attempt_visit_index",
+            "latest_attempt_block_attempt_index",
+            "latest_attempt_schedule_position",
+            "latest_attempt_schedule_order_seed",
+        )
+        for name in common_latest + block_latest:
+            _require_optional_exact_int(getattr(state, name), name=f"state.{name}")
+
+        zero_round_robin = all(
+            value == 0
+            for values in (
+                state.round_robin_accept_sums,
+                state.round_robin_attempt_counts,
+            )
+            for value in values
+        )
+        zero_block = all(
+            value == 0
+            for values in (
+                state.block_interleaved_accept_sums,
+                state.block_interleaved_attempt_counts,
+            )
+            for value in values
+        )
+
+        if config.candidate_schedule == "contiguous":
+            if not zero_round_robin or not zero_block:
+                raise DiagESMTPSessionError(
+                    "MTP contiguous snapshot has schedule-specific accounting"
+                )
+            if state.block_schedule_position or state.block_attempt_index:
+                raise DiagESMTPSessionError(
+                    "MTP contiguous snapshot has block schedule coordinates"
+                )
+            if state.candidate_attempts >= attempts_per_candidate:
+                raise DiagESMTPSessionError(
+                    "MTP contiguous snapshot candidate_attempts is out of range"
+                )
+            if len(state.candidate_rewards) != state.population_index:
+                raise DiagESMTPSessionError(
+                    "MTP contiguous snapshot rewards do not match population_index"
+                )
+            progress = (
+                state.population_index * attempts_per_candidate
+                + state.candidate_attempts
+            )
+            completed_population_indices = list(range(state.population_index))
+        elif config.candidate_schedule == "round_robin":
+            if not zero_block:
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot has block-interleaved accounting"
+                )
+            if state.block_schedule_position or state.block_attempt_index:
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot has block schedule coordinates"
+                )
+            progress = sum(state.round_robin_attempt_counts)
+            completed_rounds, expected_population_index = divmod(
+                progress, population_size
+            )
+            expected_counts = [
+                completed_rounds + int(index < expected_population_index)
+                for index in range(population_size)
+            ]
+            if (
+                completed_rounds >= attempts_per_candidate
+                or state.population_index != expected_population_index
+                or state.round_robin_attempt_counts != expected_counts
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot attempt schedule is inconsistent"
+                )
+            if any(
+                accepted_sum > attempt_count * self.max_correct_drafts
+                for accepted_sum, attempt_count in zip(
+                    state.round_robin_accept_sums,
+                    state.round_robin_attempt_counts,
+                )
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot accepted-draft sum is out of range"
+                )
+            completed_candidates = (
+                expected_population_index
+                if completed_rounds == attempts_per_candidate - 1
+                else 0
+            )
+            expected_rewards = [
+                state.round_robin_accept_sums[index] / attempts_per_candidate
+                for index in range(completed_candidates)
+            ]
+            if state.candidate_rewards != expected_rewards:
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot completed rewards are inconsistent"
+                )
+            completed_population_indices = list(range(completed_candidates))
+            if (
+                state.candidate_attempts
+                != state.round_robin_attempt_counts[state.population_index]
+                or state.candidate_accept_sum
+                != state.round_robin_accept_sums[state.population_index]
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP round-robin snapshot active candidate accounting is "
+                    "inconsistent"
+                )
+        else:
+            if not zero_round_robin:
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot has round-robin accounting"
+                )
+            dwell_attempts = config.candidate_dwell_attempts
+            if dwell_attempts is None:
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot is missing dwell attempts"
+                )
+            if (
+                state.block_schedule_position >= 2 * population_size
+                or state.block_attempt_index >= dwell_attempts
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot schedule coordinate is out of range"
+                )
+            _, visit_0, visit_1 = mtp_block_interleaved_orders(
+                schedule_seed=config.schedule_seed,
+                theta_version=state.theta_version,
+                population_size=population_size,
+                schedule_lane=config.schedule_lane,
+            )
+            schedule = visit_0 + visit_1
+            expected_counts = [0] * population_size
+            for candidate in schedule[: state.block_schedule_position]:
+                expected_counts[candidate] += dwell_attempts
+            active_candidate = schedule[state.block_schedule_position]
+            expected_counts[active_candidate] += state.block_attempt_index
+            if (
+                state.population_index != active_candidate
+                or state.block_interleaved_attempt_counts != expected_counts
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot attempt schedule is inconsistent"
+                )
+            if any(
+                accepted_sum > attempt_count * self.max_correct_drafts
+                for accepted_sum, attempt_count in zip(
+                    state.block_interleaved_accept_sums,
+                    state.block_interleaved_attempt_counts,
+                )
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot accepted-draft sum is out of range"
+                )
+            completed_candidates = max(
+                0, state.block_schedule_position - population_size
+            )
+            expected_rewards = [
+                state.block_interleaved_accept_sums[candidate] / attempts_per_candidate
+                for candidate in visit_1[:completed_candidates]
+            ]
+            if state.candidate_rewards != expected_rewards:
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot completed rewards are inconsistent"
+                )
+            completed_population_indices = list(visit_1[:completed_candidates])
+            if (
+                state.candidate_attempts
+                != state.block_interleaved_attempt_counts[active_candidate]
+                or state.candidate_accept_sum
+                != state.block_interleaved_accept_sums[active_candidate]
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved snapshot active candidate accounting is "
+                    "inconsistent"
+                )
+            progress = (
+                state.block_schedule_position * dwell_attempts
+                + state.block_attempt_index
+            )
+
+        if state.candidate_attempts >= attempts_per_candidate:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot active candidate is already complete"
+            )
+        if (
+            state.candidate_accept_sum
+            > state.candidate_attempts * self.max_correct_drafts
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot active candidate reward sum is out of range"
+            )
+        attempts_per_population = population_size * attempts_per_candidate
+        if progress >= attempts_per_population:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot current population is already complete"
+            )
+        expected_total_attempts = (
+            state.theta_version * attempts_per_population + progress
+        )
+        if state.total_attempts != expected_total_attempts:
+            raise DiagESMTPSessionError(
+                "MTP session snapshot total_attempts is inconsistent"
+            )
+
+        if state.total_attempts == 0:
+            if any(getattr(state, name) is not None for name in common_latest):
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot has latest-attempt state before any attempt"
+                )
+        else:
+            if any(getattr(state, name) is None for name in common_latest):
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot latest-attempt state is incomplete"
+                )
+            latest_accepted_drafts = state.latest_accepted_drafts
+            if (
+                latest_accepted_drafts > self.max_correct_drafts
+                or state.latest_accept_length != latest_accepted_drafts + 1
+            ):
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot latest acceptance length is inconsistent"
+                )
+            expected_latest_theta = (
+                state.theta_version if progress else state.theta_version - 1
+            )
+            if state.latest_attempt_theta_version != expected_latest_theta:
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot latest theta coordinate is inconsistent"
+                )
+            if config.candidate_schedule == "contiguous":
+                expected_latest_population = (
+                    state.population_index
+                    if state.candidate_attempts
+                    else (
+                        state.population_index - 1 if progress else population_size - 1
+                    )
+                )
+            elif config.candidate_schedule == "round_robin":
+                expected_latest_population = (
+                    (state.population_index - 1) % population_size
+                    if progress
+                    else population_size - 1
+                )
+            else:
+                dwell_attempts = config.candidate_dwell_attempts
+                latest_schedule_position = (
+                    state.block_schedule_position
+                    if state.block_attempt_index
+                    else (
+                        state.block_schedule_position - 1
+                        if progress
+                        else 2 * population_size - 1
+                    )
+                )
+                latest_block_attempt = (
+                    state.block_attempt_index
+                    if state.block_attempt_index
+                    else dwell_attempts
+                )
+                _, latest_visit_0, latest_visit_1 = mtp_block_interleaved_orders(
+                    schedule_seed=config.schedule_seed,
+                    theta_version=expected_latest_theta,
+                    population_size=population_size,
+                    schedule_lane=config.schedule_lane,
+                )
+                latest_schedule = latest_visit_0 + latest_visit_1
+                expected_latest_population = latest_schedule[latest_schedule_position]
+                expected_latest_order_seed = mtp_schedule_order_seed(
+                    config.schedule_seed, expected_latest_theta
+                )
+                expected_block_latest = (
+                    latest_schedule_position // population_size,
+                    latest_block_attempt,
+                    latest_schedule_position,
+                    expected_latest_order_seed,
+                )
+                actual_block_latest = tuple(
+                    getattr(state, name) for name in block_latest
+                )
+                if actual_block_latest != expected_block_latest:
+                    raise DiagESMTPSessionError(
+                        "MTP block-interleaved snapshot latest-attempt schedule is "
+                        "inconsistent"
+                    )
+            if state.latest_attempt_population_index != expected_latest_population:
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot latest population coordinate is inconsistent"
+                )
+            expected_latest_seed = mtp_candidate_seed(
+                config.seed, expected_latest_theta, expected_latest_population
+            )
+            if state.latest_attempt_perturbation_seed != expected_latest_seed:
+                raise DiagESMTPSessionError(
+                    "MTP session snapshot latest perturbation seed is inconsistent"
+                )
+
+        if config.candidate_schedule != "block_interleaved" and any(
+            getattr(state, name) is not None for name in block_latest
+        ):
+            raise DiagESMTPSessionError(
+                "MTP non-block snapshot has block latest-attempt coordinates"
+            )
+        if config.candidate_schedule == "block_interleaved" and (
+            (state.total_attempts == 0)
+            != all(getattr(state, name) is None for name in block_latest)
+        ):
+            raise DiagESMTPSessionError(
+                "MTP block-interleaved snapshot latest-attempt state is incomplete"
+            )
+
+        theta_stats = _delta_stats(state.theta_dense)
+        _require_finite_delta_stats(theta_stats, name="restored theta")
+        theta_ratios = _theta_ratio_stats(theta_stats, sigma=config.sigma)
+        if (
+            config.max_theta_rms_ratio is not None
+            and theta_ratios["theta_rms_ratio"] > config.max_theta_rms_ratio
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot theta exceeds max_theta_rms_ratio"
+            )
+        if (
+            config.max_theta_abs_max_ratio is not None
+            and theta_ratios["theta_abs_max_ratio"] > config.max_theta_abs_max_ratio
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot theta exceeds max_theta_abs_max_ratio"
+            )
+        for name, values in (
+            ("noise_sum", state.noise_sum_dense),
+            ("rewarded_noise_sum", state.rewarded_noise_sum_dense),
+        ):
+            _require_finite_delta_stats(_delta_stats(values), name=f"restored {name}")
+        if config.sigma == 0.0 and any(
+            int(torch.count_nonzero(value)) for value in state.theta_dense.values()
+        ):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot sigma-zero state has nonzero theta"
+            )
+
+        expected_noise_sum = self._new_tensor_map()
+        expected_rewarded_noise_sum = self._new_tensor_map()
+        if config.sigma != 0.0:
+            for population_index, reward in zip(
+                completed_population_indices, state.candidate_rewards
+            ):
+                noise = self._candidate_noise(
+                    mtp_candidate_seed(
+                        config.seed, state.theta_version, population_index
+                    )
+                )
+                for site_id, value in noise.items():
+                    expected_noise_sum[site_id].add_(value)
+                    expected_rewarded_noise_sum[site_id].add_(value, alpha=reward)
+        for name, actual, expected in (
+            ("noise_sum", state.noise_sum_dense, expected_noise_sum),
+            (
+                "rewarded_noise_sum",
+                state.rewarded_noise_sum_dense,
+                expected_rewarded_noise_sum,
+            ),
+        ):
+            if any(
+                not torch.equal(actual[site_id], expected[site_id])
+                for site_id in expected
+            ):
+                raise DiagESMTPSessionError(
+                    f"MTP session snapshot {name} is inconsistent with completed "
+                    "candidate rewards"
+                )
+        return theta_stats
+
     @staticmethod
     def _prepare_block_interleaved_tracking(state: _MTPSessionState) -> None:
         population_size = state.config.population_size
@@ -630,9 +1266,7 @@ class DiagESMTPSessionManager:
                     f"population size {state.config.population_size}"
                 )
             attempt_count = counts[state.population_index] + 1
-            completing_candidate = (
-                attempt_count == state.config.attempts_per_candidate
-            )
+            completing_candidate = attempt_count == state.config.attempts_per_candidate
             if attempt_count > state.config.attempts_per_candidate:
                 raise DiagESMTPSessionError(
                     "MTP diagonal-ES round-robin attempt count exceeded its limit"
@@ -665,16 +1299,13 @@ class DiagESMTPSessionManager:
             changes_candidate = state.config.sigma != 0.0 and completing_block
         else:
             completing_candidate = (
-                state.candidate_attempts + 1
-                == state.config.attempts_per_candidate
+                state.candidate_attempts + 1 == state.config.attempts_per_candidate
             )
             completing_population = (
                 completing_candidate
                 and state.population_index + 1 == state.config.population_size
             )
-            changes_candidate = (
-                state.config.sigma != 0.0 and completing_candidate
-            )
+            changes_candidate = state.config.sigma != 0.0 and completing_candidate
         return (
             1 + int(completing_candidate) + int(completing_population),
             changes_candidate,
@@ -709,9 +1340,7 @@ class DiagESMTPSessionManager:
             acceptance_event_count += event_count
             expects_kv_replay |= changes_candidate
 
-        self._reserve_event_capacity(
-            acceptance_event_count + int(expects_kv_replay)
-        )
+        self._reserve_event_capacity(acceptance_event_count + int(expects_kv_replay))
         reservation = _MTPAcceptanceBatchReservation(
             nonce=self._next_acceptance_batch_nonce,
             start_event_id=self._next_event_id,
@@ -753,11 +1382,250 @@ class DiagESMTPSessionManager:
     def finish_acceptance_batch(
         self, reservation: _MTPAcceptanceBatchReservation
     ) -> None:
-        self._validate_acceptance_batch_progress(
-            reservation, expects_kv_replay=False
-        )
+        self._validate_acceptance_batch_progress(reservation, expects_kv_replay=False)
         self._active_acceptance_batch = None
         self._active_acceptance_batch_cursor = 0
+
+    @staticmethod
+    def _snapshot_state_payload(state: _MTPSessionState) -> dict[str, Any]:
+        return {
+            "candidate_rewards": list(state.candidate_rewards),
+            "candidate_accept_sum": state.candidate_accept_sum,
+            "candidate_attempts": state.candidate_attempts,
+            "theta_version": state.theta_version,
+            "population_index": state.population_index,
+            "total_attempts": state.total_attempts,
+            "committed_updates": state.committed_updates,
+            "rejected_updates": state.rejected_updates,
+            "latest_accept_length": state.latest_accept_length,
+            "latest_accepted_drafts": state.latest_accepted_drafts,
+            "latest_attempt_theta_version": state.latest_attempt_theta_version,
+            "latest_attempt_population_index": (state.latest_attempt_population_index),
+            "latest_attempt_perturbation_seed": (
+                state.latest_attempt_perturbation_seed
+            ),
+            "round_robin_accept_sums": list(state.round_robin_accept_sums),
+            "round_robin_attempt_counts": list(state.round_robin_attempt_counts),
+            "block_interleaved_accept_sums": list(state.block_interleaved_accept_sums),
+            "block_interleaved_attempt_counts": list(
+                state.block_interleaved_attempt_counts
+            ),
+            "block_schedule_position": state.block_schedule_position,
+            "block_attempt_index": state.block_attempt_index,
+            "latest_attempt_visit_index": state.latest_attempt_visit_index,
+            "latest_attempt_block_attempt_index": (
+                state.latest_attempt_block_attempt_index
+            ),
+            "latest_attempt_schedule_position": (
+                state.latest_attempt_schedule_position
+            ),
+            "latest_attempt_schedule_order_seed": (
+                state.latest_attempt_schedule_order_seed
+            ),
+        }
+
+    def export_session_state(self, session_id: str) -> dict[str, Any]:
+        """Return a detached, versioned snapshot at a between-request boundary."""
+
+        self._validate_session_id(session_id)
+        state = self._sessions.get(session_id)
+        if state is None:
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES session {session_id!r} is not registered"
+            )
+        if state.active_rid is not None:
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES session {session_id!r} still owns live request "
+                f"{state.active_rid!r}"
+            )
+        if self._active_acceptance_batch is not None:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES session state cannot be exported during an "
+                "active acceptance batch reservation"
+            )
+
+        tensor_payload = {
+            "theta_dense": self._validated_snapshot_tensor_map(
+                state.theta_dense, name="theta_dense"
+            ),
+            "noise_sum_dense": self._validated_snapshot_tensor_map(
+                state.noise_sum_dense, name="noise_sum_dense"
+            ),
+            "rewarded_noise_sum_dense": self._validated_snapshot_tensor_map(
+                state.rewarded_noise_sum_dense, name="rewarded_noise_sum_dense"
+            ),
+        }
+        self._validate_persistable_state(state)
+        return {
+            "state_abi": MTP_SESSION_STATE_ABI,
+            "identity": self._snapshot_identity(session_id),
+            "config": self._validated_config_payload(state.config),
+            "state": self._snapshot_state_payload(state),
+            "tensors": tensor_payload,
+        }
+
+    def _decode_session_snapshot(
+        self,
+        *,
+        session_id: str,
+        config: DiagESMTPSessionConfig,
+        snapshot: Mapping[str, Any],
+    ) -> _MTPSessionState:
+        root = self._require_snapshot_mapping(
+            snapshot, name="root", keys=_MTP_SESSION_SNAPSHOT_KEYS
+        )
+        if root["state_abi"] != MTP_SESSION_STATE_ABI:
+            raise DiagESMTPSessionError("MTP session snapshot state_abi is unsupported")
+        expected_identity = self._snapshot_identity(session_id)
+        if not _same_typed_tree(root["identity"], expected_identity):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot runtime identity does not match"
+            )
+        expected_config = self._validated_config_payload(config)
+        if not _same_typed_tree(root["config"], expected_config):
+            raise DiagESMTPSessionError(
+                "MTP session snapshot config does not match registration"
+            )
+        state_payload = self._require_snapshot_mapping(
+            root["state"], name="state", keys=_MTP_SESSION_STATE_KEYS
+        )
+        tensor_payload = self._require_snapshot_mapping(
+            root["tensors"], name="tensors", keys=_MTP_SESSION_TENSOR_KEYS
+        )
+        theta_dense = self._validated_snapshot_tensor_map(
+            tensor_payload["theta_dense"], name="theta_dense"
+        )
+        noise_sum_dense = self._validated_snapshot_tensor_map(
+            tensor_payload["noise_sum_dense"], name="noise_sum_dense"
+        )
+        rewarded_noise_sum_dense = self._validated_snapshot_tensor_map(
+            tensor_payload["rewarded_noise_sum_dense"],
+            name="rewarded_noise_sum_dense",
+        )
+
+        state = _MTPSessionState(
+            session_id=session_id,
+            resident_slot=-1,
+            config=config,
+            theta_dense=theta_dense,
+            noise_sum_dense=noise_sum_dense,
+            rewarded_noise_sum_dense=rewarded_noise_sum_dense,
+            candidate_rewards=state_payload["candidate_rewards"],
+            candidate_accept_sum=state_payload["candidate_accept_sum"],
+            candidate_attempts=state_payload["candidate_attempts"],
+            theta_version=state_payload["theta_version"],
+            population_index=state_payload["population_index"],
+            total_attempts=state_payload["total_attempts"],
+            committed_updates=state_payload["committed_updates"],
+            rejected_updates=state_payload["rejected_updates"],
+            latest_accept_length=state_payload["latest_accept_length"],
+            latest_accepted_drafts=state_payload["latest_accepted_drafts"],
+            latest_attempt_theta_version=state_payload["latest_attempt_theta_version"],
+            latest_attempt_population_index=state_payload[
+                "latest_attempt_population_index"
+            ],
+            latest_attempt_perturbation_seed=state_payload[
+                "latest_attempt_perturbation_seed"
+            ],
+            round_robin_accept_sums=state_payload["round_robin_accept_sums"],
+            round_robin_attempt_counts=state_payload["round_robin_attempt_counts"],
+            block_interleaved_accept_sums=state_payload[
+                "block_interleaved_accept_sums"
+            ],
+            block_interleaved_attempt_counts=state_payload[
+                "block_interleaved_attempt_counts"
+            ],
+            block_schedule_position=state_payload["block_schedule_position"],
+            block_attempt_index=state_payload["block_attempt_index"],
+            latest_attempt_visit_index=state_payload["latest_attempt_visit_index"],
+            latest_attempt_block_attempt_index=state_payload[
+                "latest_attempt_block_attempt_index"
+            ],
+            latest_attempt_schedule_position=state_payload[
+                "latest_attempt_schedule_position"
+            ],
+            latest_attempt_schedule_order_seed=state_payload[
+                "latest_attempt_schedule_order_seed"
+            ],
+        )
+        state.theta_stats = self._validate_persistable_state(state)
+        state.candidate_rewards = list(state.candidate_rewards)
+        state.round_robin_accept_sums = list(state.round_robin_accept_sums)
+        state.round_robin_attempt_counts = list(state.round_robin_attempt_counts)
+        state.block_interleaved_accept_sums = list(state.block_interleaved_accept_sums)
+        state.block_interleaved_attempt_counts = list(
+            state.block_interleaved_attempt_counts
+        )
+        if config.candidate_schedule == "block_interleaved":
+            (
+                state.block_schedule_order_seed,
+                state.block_visit_0,
+                state.block_visit_1,
+            ) = mtp_block_interleaved_orders(
+                schedule_seed=config.schedule_seed,
+                theta_version=state.theta_version,
+                population_size=config.population_size,
+                schedule_lane=config.schedule_lane,
+            )
+        noise_dense, candidate_dense = self._materialize_candidate(state)
+        effective_delta_stats = _delta_stats(candidate_dense)
+        _require_finite_delta_stats(
+            effective_delta_stats, name="restored effective candidate delta"
+        )
+        state.current_noise_dense = noise_dense
+        state.effective_delta_stats = effective_delta_stats
+        return state
+
+    def import_session_state(
+        self,
+        *,
+        session_id: str,
+        config: DiagESMTPSessionConfig,
+        snapshot: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Restore one absent session without advancing optimizer state."""
+
+        self._validate_session_id(session_id)
+        self._validated_config_payload(config)
+        if self._active_acceptance_batch is not None:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES session state cannot be imported during an "
+                "active acceptance batch reservation"
+            )
+        if session_id in self._sessions:
+            raise DiagESMTPSessionError(
+                f"MTP diagonal-ES session {session_id!r} is already registered"
+            )
+        if not self._free_slots:
+            raise RuntimeError("MTP diagonal-ES session capacity is exhausted")
+
+        state = self._decode_session_snapshot(
+            session_id=session_id, config=config, snapshot=snapshot
+        )
+        slot = self._free_slots.pop(0)
+        state.resident_slot = slot
+        try:
+            if config.sigma == 0.0:
+                self._clear_resident_slot(slot)
+                self._initialize_identity_candidate(state)
+            else:
+                self._upload_candidate(state)
+            status = self._session_status(state)
+            self._sessions[session_id] = state
+        except BaseException:
+            self._sessions.pop(session_id, None)
+            try:
+                self._clear_resident_slot(slot)
+            except BaseException as cleanup_error:
+                raise DiagESMTPSessionError(
+                    "MTP session restore failed and its resident slot could not be "
+                    "cleaned; the slot was quarantined"
+                ) from cleanup_error
+            self._free_slots.append(slot)
+            self._free_slots.sort()
+            raise
+
+        return status
 
     def register_session(
         self, *, session_id: str, config: DiagESMTPSessionConfig
@@ -800,6 +1668,13 @@ class DiagESMTPSessionManager:
             try:
                 self._upload_candidate(state)
             except BaseException:
+                try:
+                    self._clear_resident_slot(slot)
+                except BaseException as cleanup_error:
+                    raise DiagESMTPSessionError(
+                        "MTP session registration failed and its resident slot "
+                        "could not be cleaned; the slot was quarantined"
+                    ) from cleanup_error
                 self._free_slots.append(slot)
                 self._free_slots.sort()
                 raise
@@ -868,13 +1743,8 @@ class DiagESMTPSessionManager:
                 f"MTP diagonal-ES session {session_id!r} still owns live request "
                 f"{state.active_rid!r}"
             )
-        self._wait_for_slot(state.resident_slot)
-        with torch.cuda.stream(self._upload_stream):
-            for bank in self._dense_delta_banks.values():
-                bank[state.resident_slot].zero_()
-        self._upload_stream.synchronize()
+        self._clear_resident_slot(state.resident_slot)
         del self._sessions[session_id]
-        self._slot_last_read_events[state.resident_slot] = None
         self._free_slots.append(state.resident_slot)
         self._free_slots.sort()
         return {"session_id": session_id, "state": "FREE"}
@@ -934,9 +1804,7 @@ class DiagESMTPSessionManager:
         self._active_acceptance_batch_cursor = 0
 
     @staticmethod
-    def _accumulate_noise(
-        state: _MTPSessionState, candidate_reward: float
-    ) -> None:
+    def _accumulate_noise(state: _MTPSessionState, candidate_reward: float) -> None:
         for name, noise in state.current_noise_dense.items():
             state.noise_sum_dense[name].add_(noise)
             state.rewarded_noise_sum_dense[name].add_(noise, alpha=candidate_reward)
@@ -971,9 +1839,7 @@ class DiagESMTPSessionManager:
             rewarded: Mapping[str, torch.Tensor], noise_sum: Mapping[str, torch.Tensor]
         ) -> dict[str, torch.Tensor]:
             return {
-                name: rewarded[name]
-                .add(noise_sum[name], alpha=-reward_mean)
-                .mul(scale)
+                name: rewarded[name].add(noise_sum[name], alpha=-reward_mean).mul(scale)
                 for name in rewarded
             }
 
@@ -1531,9 +2397,7 @@ class DiagESMTPSessionManager:
             "pending_event_count": len(self._events),
             "draft_kv_replay": {
                 "batch_count": self._kv_replay_batch_count,
-                "transitioned_request_count": (
-                    self._kv_replay_transitioned_requests
-                ),
+                "transitioned_request_count": (self._kv_replay_transitioned_requests),
                 "replayed_rows": self._kv_replayed_rows,
                 "enqueue_time_ms": self._kv_replay_enqueue_time_ms,
             },
@@ -1622,9 +2486,7 @@ class DiagESMTPSessionManager:
             "latest_accept_length": state.latest_accept_length,
             "latest_accepted_drafts": state.latest_accepted_drafts,
             "latest_attempt_theta_version": state.latest_attempt_theta_version,
-            "latest_attempt_population_index": (
-                state.latest_attempt_population_index
-            ),
+            "latest_attempt_population_index": (state.latest_attempt_population_index),
             "latest_attempt_perturbation_seed": (
                 state.latest_attempt_perturbation_seed
             ),
