@@ -1394,6 +1394,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 priority=obj.priority,
                 extra_key=obj.extra_key,
                 es_candidate_id=obj.es_candidate_id,
+                diag_es_mtp_session_id=obj.diag_es_mtp_session_id,
                 routing_key=obj.routing_key,
                 token_type_ids=token_type_ids,
                 need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,
@@ -2299,6 +2300,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     meta_info["indexer_topk"] = val
             if getattr(recv_obj, "dp_ranks", None):
                 meta_info["dp_rank"] = recv_obj.dp_ranks[i]
+            if getattr(recv_obj, "diag_es_mtp_status", None):
+                diag_es_mtp_status = recv_obj.diag_es_mtp_status[i]
+                if diag_es_mtp_status is not None:
+                    meta_info["diag_es_mtp"] = diag_es_mtp_status
 
             state.finished = recv_obj.finished_reasons[i] is not None
             if isinstance(recv_obj, BatchStrOutput):

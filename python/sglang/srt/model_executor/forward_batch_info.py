@@ -103,7 +103,12 @@ def _build_diag_es_candidate_slots(
     if not model_runner.diag_es_enabled:
         return None, None
 
-    request_slots_cpu = tuple(req.es_candidate_slot for req in batch.reqs)
+    slot_attr = (
+        "diag_es_mtp_slot"
+        if getattr(model_runner, "is_draft_worker", False)
+        else "es_candidate_slot"
+    )
+    request_slots_cpu = tuple(getattr(req, slot_attr) for req in batch.reqs)
     request_slots = torch.tensor(
         request_slots_cpu,
         dtype=torch.int32,

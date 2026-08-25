@@ -3384,9 +3384,24 @@ class ServerArgs:
     ] = "off"
     diag_es_mtp_placement: A[
         Literal["off", "pre", "post", "both"],
-        "MTP-drafter diagonal-ES placement reserved for a future acceptance-rate objective. Non-off modes are not yet implemented.",
+        "MTP-drafter acceptance-length diagonal-ES placement. JoyAI MTP currently supports post only.",
         NS("exec.features"),
     ] = "off"
+    diag_es_mtp_schema_id: A[
+        Optional[str],
+        "Exact MTP diagonal-ES site schema ID; required when MTP steering is enabled.",
+        NS("exec.features"),
+    ] = None
+    diag_es_mtp_model_artifact_id: A[
+        Optional[str],
+        "Stable MTP model artifact identity reported for experiment provenance; it never namespaces target KV.",
+        NS("exec.features"),
+    ] = None
+    diag_es_mtp_max_sessions: A[
+        int,
+        "Maximum persistent local MTP diagonal-ES sessions per engine/GPU.",
+        NS("exec.features"),
+    ] = 64
     diag_es_model_artifact_id: A[
         Optional[str],
         "Stable model artifact identity used by diagonal-ES cache digests.",
@@ -3719,11 +3734,36 @@ class ServerArgs:
         if self.diag_es_mtp_placement not in supported:
             raise ValueError("diag_es_mtp_placement must be off, pre, post, or both")
         if self.diag_es_mtp_placement != "off":
-            raise NotImplementedError(
-                "MTP diagonal-ES steering for an acceptance-rate objective is "
-                "interface-only and not implemented; "
-                "diag_es_mtp_placement must remain 'off'"
+            if self.diag_es_mtp_placement != "post":
+                raise ValueError("MTP diagonal ES currently supports post placement only")
+            requested_algorithm = (
+                self.speculative_algorithm.upper()
+                if isinstance(self.speculative_algorithm, str)
+                else None
             )
+            if requested_algorithm not in ("EAGLE", "NEXTN"):
+                raise ValueError(
+                    "MTP diagonal ES requires --speculative-algorithm EAGLE or NEXTN"
+                )
+            if (
+                self.diag_es_mtp_schema_id
+                != "joyai-llm-flash-mtp-diag-es-v1"
+            ):
+                raise ValueError(
+                    "MTP diagonal ES requires "
+                    "diag_es_mtp_schema_id='joyai-llm-flash-mtp-diag-es-v1'"
+                )
+            if (
+                not isinstance(self.diag_es_mtp_model_artifact_id, str)
+                or not self.diag_es_mtp_model_artifact_id.strip()
+                or "\0" in self.diag_es_mtp_model_artifact_id
+            ):
+                raise ValueError(
+                    "MTP diagonal ES requires a non-empty "
+                    "diag_es_mtp_model_artifact_id without NUL bytes"
+                )
+            if self.diag_es_mtp_max_sessions < 1:
+                raise ValueError("diag_es_mtp_max_sessions must be positive")
         if self.diag_es_target_placement == "off":
             return
         requested_speculative_algorithm = (
@@ -3757,6 +3797,13 @@ class ServerArgs:
     def _handle_diag_es_runtime_contract(self):
         """Validate the final, materialized execution topology for diagonal ES."""
 
+        if (
+            self.diag_es_target_placement == "off"
+            and self.diag_es_mtp_placement == "off"
+        ):
+            return
+        if self.diag_es_mtp_placement != "off":
+            self._handle_diag_es_mtp_runtime_contract()
         if self.diag_es_target_placement == "off":
             return
         view = self._resolved()
@@ -3841,6 +3888,64 @@ class ServerArgs:
             raise ValueError(
                 "diagonal ES supports only the exact TP1/DP1/PP1/EP1 Triton "
                 "runtime contract: " + ", ".join(mismatches)
+            )
+
+    def _handle_diag_es_mtp_runtime_contract(self):
+        """Validate the local, KV-neutral JoyAI MTP steering topology."""
+
+        view = self._resolved()
+        exact_values = {
+            "device": (view.device, "cuda"),
+            "nnodes": (view.nnodes, 1),
+            "node_rank": (view.node_rank, 0),
+            "tp_size": (view.tp_size, 1),
+            "dp_size": (view.dp_size, 1),
+            "pp_size": (view.pp_size, 1),
+            "ep_size": (view.ep_size, 1),
+            "dcp_size": (view.dcp_size, 1),
+            "attn_cp_size": (view.attn_cp_size, 1),
+            "moe_dp_size": (view.moe_dp_size, 1),
+            "dwdp_size": (view.dwdp_size, 1),
+            "enable_dp_attention": (view.enable_dp_attention, False),
+            "moe_a2a_backend": (view.moe_a2a_backend, "none"),
+            "bf16_gemm_backend": (view.bf16_gemm_backend, "triton"),
+            "quantization": (view.quantization, None),
+            "enable_torch_compile": (view.enable_torch_compile, False),
+            "disable_overlap_schedule": (view.disable_overlap_schedule, True),
+            "speculative_algorithm": (view.speculative_algorithm, "EAGLE"),
+            "speculative_eagle_topk": (view.speculative_eagle_topk, 1),
+            "speculative_adaptive": (view.speculative_adaptive, False),
+            "enable_multi_layer_eagle": (view.enable_multi_layer_eagle, False),
+            "disaggregation_mode": (view.disaggregation_mode, "null"),
+            "enable_two_batch_overlap": (view.enable_two_batch_overlap, False),
+        }
+        mismatches = [
+            f"{name}={actual!r} (requires {expected!r})"
+            for name, (actual, expected) in exact_values.items()
+            if actual != expected
+        ]
+        if view.speculative_num_steps < 1:
+            mismatches.append(
+                f"speculative_num_steps={view.speculative_num_steps!r} "
+                "(requires a positive value)"
+            )
+        if view.speculative_num_draft_tokens != view.speculative_num_steps + 1:
+            mismatches.append(
+                "speculative_num_draft_tokens must equal speculative_num_steps + 1"
+            )
+        if view.max_running_requests is None or view.max_running_requests > (
+            self.diag_es_mtp_max_sessions
+        ):
+            mismatches.append(
+                f"max_running_requests={view.max_running_requests!r} must be <= "
+                f"diag_es_mtp_max_sessions={self.diag_es_mtp_max_sessions}"
+            )
+        if view.enable_lora or view.lora_paths:
+            mismatches.append("LoRA is enabled (requires no LoRA adapters)")
+        if mismatches:
+            raise ValueError(
+                "MTP diagonal ES supports only the local TP1/DP1 post-only "
+                "JoyAI Triton BF16 runtime contract: " + ", ".join(mismatches)
             )
 
     def _handle_model_capability_adjustments(self):

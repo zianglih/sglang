@@ -16,9 +16,11 @@ the raw value must be restored once replay finishes.
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import sglang.srt.speculative.eagle_draft_cuda_graph_runner as draft_graph_module
 import torch
-
+from sglang.srt.model_executor.forward_context import get_forward_context
 from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
     EAGLEDraftCudaGraphRunner,
 )
@@ -75,6 +77,7 @@ class TestEagleDraftCudaGraphRunner(CustomTestCase):
             req_pool_indices=torch.empty(CAPTURE_BS, dtype=torch.int32),
             seq_lens_cpu=torch.empty(CAPTURE_BS, dtype=torch.int32),
             dsa_seed_topk=None,
+            es_candidate_slots=None,
         )
         runner.capture_bs = [1, CAPTURE_BS]
         runner.captured_req_width = 1
@@ -112,6 +115,7 @@ class TestEagleDraftCudaGraphRunner(CustomTestCase):
             rids_int=None,
             bootstrap_room_ids_int=None,
             sampling_info=None,
+            es_candidate_slots=None,
             spec_info=SimpleNamespace(
                 topk_p=torch.ones(raw_bs, 1, dtype=torch.float32),
                 topk_index=torch.zeros(raw_bs, 1, dtype=torch.int64),
@@ -193,6 +197,101 @@ class TestEagleDraftCudaGraphRunner(CustomTestCase):
         for observation in backend.observations:
             self.assertIsNone(observation.seq_lens_sum, msg=observation.phase)
         self.assertIsNone(forward_batch.seq_lens_sum)
+
+    def test_mtp_slots_copy_into_static_graph_buffer_and_pad_with_identity(self):
+        backend = _RecordingDraftBackend()
+        runner = self._build_runner(backend)
+        runner.buffers.es_candidate_slots = torch.full(
+            (CAPTURE_BS,), -1, dtype=torch.int32
+        )
+        forward_batch = self._build_forward_batch([10, 11], 21)
+        forward_batch.es_candidate_slots = torch.tensor([5, 7], dtype=torch.int32)
+
+        runner.execute(forward_batch)
+
+        torch.testing.assert_close(
+            runner.buffers.es_candidate_slots,
+            torch.tensor([5, 7, 0, 0], dtype=torch.int32),
+        )
+
+    def test_mtp_capture_warmup_has_identity_cpu_slots(self):
+        class _CaptureBackend(_RecordingDraftBackend):
+            def init_forward_metadata_in_graph(self, _forward_batch):
+                pass
+
+            def init_forward_metadata_out_graph(
+                self, forward_batch, in_capture=False
+            ):
+                assert in_capture
+                self.capture_batch = forward_batch
+
+        class _GraphBackend:
+            @staticmethod
+            def capture_one(_shape_key, run_once, **_kwargs):
+                run_once()
+
+        class _Manager:
+            seen = []
+
+            @classmethod
+            def note_slots_read(cls, slots):
+                cls.seen.append(slots)
+
+        backend = _CaptureBackend()
+        runner = self._build_runner(backend)
+        runner.buffers.input_ids = torch.zeros(CAPTURE_BS, dtype=torch.int64)
+        runner.buffers.extend_seq_lens = torch.ones(CAPTURE_BS, dtype=torch.int32)
+        runner.buffers.mrope_positions = torch.zeros(
+            3, CAPTURE_BS, dtype=torch.int64
+        )
+        runner.buffers.es_candidate_slots = torch.zeros(
+            CAPTURE_BS, dtype=torch.int32
+        )
+        runner.buffers.global_num_tokens_gpu = None
+        runner.buffers.global_num_tokens_for_logprob_gpu = None
+        runner.extend_seq_lens_cpu = [1] * CAPTURE_BS
+        runner.require_attn_tp_gather = False
+        runner.temperatures = torch.ones(CAPTURE_BS, 1)
+        runner.model_runner.spec_algorithm = SimpleNamespace(
+            is_standalone=lambda: False
+        )
+        runner.model_runner.diag_es_enabled = True
+        runner.model_runner.diag_es_manager = _Manager()
+
+        def draft_forward(forward_batch):
+            assert get_forward_context().es_candidate_slots is (
+                forward_batch.es_candidate_slots
+            )
+            runner.model_runner.diag_es_manager.note_slots_read(
+                forward_batch.es_candidate_slots_cpu
+            )
+            return None
+
+        runner.eagle_worker = SimpleNamespace(
+            draft_forward=draft_forward,
+            speculative_num_steps=NUM_STEPS,
+        )
+        runner.deepep_adapter = SimpleNamespace(capture=lambda **_kwargs: None)
+        runner.backend = _GraphBackend()
+        runner._make_graph_key = lambda size: size
+
+        with (
+            patch.object(
+                draft_graph_module,
+                "maybe_flashinfer_autotune_speculative_draft",
+                lambda *_args, **_kwargs: None,
+            ),
+            patch.object(
+                draft_graph_module, "set_dp_buffer_len", lambda *_args: None
+            ),
+            patch.object(
+                draft_graph_module, "set_is_extend_in_batch", lambda *_args: None
+            ),
+        ):
+            runner.capture_one_shape(2, forward=None)
+
+        self.assertEqual(_Manager.seen, [(0, 0)])
+        self.assertEqual(backend.capture_batch.es_candidate_slots_cpu, (0, 0))
 
 
 if __name__ == "__main__":

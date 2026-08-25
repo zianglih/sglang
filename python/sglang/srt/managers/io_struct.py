@@ -291,6 +291,9 @@ class GenerateReqInput:
     extra_key: Optional[Union[List[str], str]] = None
     # Immutable diagonal-ES candidate bound to this request.
     es_candidate_id: Optional[Union[List[str], str]] = None
+    # Persistent MTP-only diagonal-ES state. This is deliberately distinct
+    # from SGLang's session_id and carries no target KV/cache semantics.
+    diag_es_mtp_session_id: Optional[Union[List[str], str]] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -476,6 +479,10 @@ class GenerateReqInput:
 
     def _normalize_single_inputs(self):
         """Normalize inputs for a single example."""
+        if self.diag_es_mtp_session_id is not None and not isinstance(
+            self.diag_es_mtp_session_id, str
+        ):
+            raise ValueError("diag_es_mtp_session_id should be a string")
         if self.sampling_params is None:
             self.sampling_params = {}
         if self.rid is None:
@@ -513,6 +520,7 @@ class GenerateReqInput:
         self._normalize_custom_logit_processor(num)
         self._normalize_extra_key(num)
         self._normalize_es_candidate_id(num)
+        self._normalize_diag_es_mtp_session_id(num)
         self._normalize_bootstrap_params(num)
 
     def _expand_inputs(self, num):
@@ -730,6 +738,26 @@ class GenerateReqInput:
         else:
             raise ValueError("es_candidate_id should be a list or a string.")
 
+    def _normalize_diag_es_mtp_session_id(self, num):
+        if self.diag_es_mtp_session_id is None:
+            return
+        if self.parallel_sample_num != 1:
+            raise ValueError(
+                "diag_es_mtp_session_id does not support parallel sampling; "
+                "each persistent session permits exactly one live request"
+            )
+        if isinstance(self.diag_es_mtp_session_id, str):
+            self.diag_es_mtp_session_id = [self.diag_es_mtp_session_id] * num
+        elif isinstance(self.diag_es_mtp_session_id, list):
+            if len(self.diag_es_mtp_session_id) != self.batch_size:
+                raise ValueError(
+                    "The length of diag_es_mtp_session_id should equal the batch size."
+                )
+        else:
+            raise ValueError(
+                "diag_es_mtp_session_id should be a list or a string."
+            )
+
     def _normalize_bootstrap_params(self, num):
         """Normalize bootstrap parameters for batch processing."""
         # Normalize bootstrap_host
@@ -859,6 +887,11 @@ class GenerateReqInput:
                 if isinstance(self.es_candidate_id, list)
                 else self.es_candidate_id
             ),
+            diag_es_mtp_session_id=(
+                self.diag_es_mtp_session_id[i]
+                if isinstance(self.diag_es_mtp_session_id, list)
+                else self.diag_es_mtp_session_id
+            ),
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
             return_bytes=self.return_bytes,
@@ -950,6 +983,7 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
     # Extra cache key for classifying the request (e.g. cache_salt)
     extra_key: Optional[str] = None
     es_candidate_id: Optional[str] = None
+    diag_es_mtp_session_id: Optional[str] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -1435,6 +1469,8 @@ class BatchTokenIDOutput(BaseBatchReq, kw_only=True):
     input_top_logprobs_val_flat: Optional[List[Optional[np.ndarray]]] = None
     input_top_logprobs_idx_flat: Optional[List[Optional[np.ndarray]]] = None
     input_top_logprobs_flat_null_prefix: Optional[List[Optional[int]]] = None
+    # Latest per-request MTP diagonal-ES state after the most recent verify.
+    diag_es_mtp_status: Optional[List[Optional[Dict[str, Any]]]] = None
 
 
 class BatchStrOutput(BaseBatchReq, kw_only=True):
@@ -1502,6 +1538,9 @@ class BatchStrOutput(BaseBatchReq, kw_only=True):
     # For observability
     # Pickled Optional[List[SchedulerReqTimeStats]]
     time_stats: Optional[PickleWrapper] = None
+
+    # Detokenizer pass-through for BatchTokenIDOutput.diag_es_mtp_status.
+    diag_es_mtp_status: Optional[List[Optional[Dict[str, Any]]]] = None
 
     # Multimodal prompt token counts (image/audio/video). None when not applicable.
     image_tokens: Optional[List[int]] = None
@@ -1777,6 +1816,36 @@ class DiagESRegistryReqInput(BaseReq, kw_only=True):
 
 
 class DiagESRegistryReqOutput(BaseReq, kw_only=True):
+    success: bool
+    message: str
+    status: Dict[str, Any]
+
+
+class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
+    action: Literal["register", "retire", "status", "drain_events"]
+    session_id: Optional[str] = None
+    seed: Optional[int] = None
+    population_size: int = 16
+    sigma: float = 0.01
+    learning_rate: float = 0.0
+    attempts_per_candidate: int = 4
+    estimator: str = "population_zscore"
+    reward_zscore_epsilon: float = 1e-8
+    max_update_rms_ratio: float = 10.0
+    max_update_abs_max_ratio: float = 100.0
+
+    def __post_init__(self) -> None:
+        if self.action == "register":
+            if self.session_id is None or self.seed is None:
+                raise ValueError("MTP session register requires session_id and seed")
+        elif self.action == "retire":
+            if self.session_id is None:
+                raise ValueError("MTP session retire requires session_id")
+        elif self.action not in ("status", "drain_events"):
+            raise ValueError(f"unsupported MTP session action: {self.action!r}")
+
+
+class DiagESMTPSessionReqOutput(BaseReq, kw_only=True):
     success: bool
     message: str
     status: Dict[str, Any]

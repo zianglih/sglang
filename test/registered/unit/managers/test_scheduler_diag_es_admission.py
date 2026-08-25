@@ -2,7 +2,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-
 from sglang.srt.diag_es import (
     DiagESCandidateNotFoundError,
     DiagESCandidateRetiringError,
@@ -23,6 +22,12 @@ class _FakeReq:
         self.rid = rid
         self.es_candidate_id = kwargs.get("es_candidate_id")
         self.es_candidate_released = True
+        self.es_candidate_slot = 0
+        self.diag_es_mtp_session_id = kwargs.get("diag_es_mtp_session_id")
+        self.diag_es_mtp_session_released = True
+        self.diag_es_mtp_slot = 0
+        self.diag_es_mtp_status = None
+        self.extra_key = kwargs.get("extra_key")
         self.finished_reason = None
         self.tokenizer = None
 
@@ -49,6 +54,7 @@ def _request(**overrides):
         input_ids=[1],
         sampling_params=object(),
         es_candidate_id="missing",
+        diag_es_mtp_session_id=None,
         session_params=None,
         session_id=None,
         input_embeds=None,
@@ -98,7 +104,7 @@ def test_diag_es_sessions_fail_before_session_state_is_touched(session_fields):
         scheduler.handle_generate_request(recv_req)
 
     queued_req = scheduler._add_request_to_queue.call_args.args[0]
-    assert "does not support sessions" in queued_req.finished_reason
+    assert "does not use SGLang KV sessions" in queued_req.finished_reason
     assert queued_req.es_candidate_released
     scheduler.init_req_max_new_tokens.assert_called_once_with(queued_req)
 
@@ -145,3 +151,69 @@ def test_blank_candidate_id_is_request_local(monkeypatch, candidate_id):
     queued_req = scheduler._add_request_to_queue.call_args.args[0]
     assert queued_req.es_candidate_released
     assert "non-empty" in queued_req.finished_reason
+
+
+def test_mtp_admission_binds_independent_slot_without_target_cache_key(monkeypatch):
+    req = _FakeReq(
+        "rid", "hello", [1], object(), extra_key="tenant", es_candidate_id="main"
+    )
+    status = {"resident_slot": 7, "population_index": 3}
+    manager = SimpleNamespace(bind_request=Mock(return_value=status))
+
+    import sglang.srt.diag_es as diag_es
+
+    monkeypatch.setattr(diag_es, "get_diag_es_mtp_manager", lambda: manager)
+    Scheduler._bind_diag_es_mtp_request(req, "mtp-session")
+
+    manager.bind_request.assert_called_once_with(
+        session_id="mtp-session", rid="rid"
+    )
+    assert req.diag_es_mtp_slot == 7
+    assert req.es_candidate_slot == 0
+    assert req.extra_key == "tenant"
+    assert not req.diag_es_mtp_session_released
+
+
+def test_mtp_id_on_clean_server_is_request_local(monkeypatch):
+    scheduler = _scheduler()
+    recv_req = _request(
+        es_candidate_id=None, diag_es_mtp_session_id="mtp-session"
+    )
+
+    import sglang.srt.diag_es as diag_es
+
+    def disabled():
+        raise DiagESNotEnabledError("MTP diagonal ES is not enabled")
+
+    monkeypatch.setattr(diag_es, "get_diag_es_mtp_manager", disabled)
+    with patch.object(scheduler_module, "Req", _FakeReq):
+        scheduler.handle_generate_request(recv_req)
+
+    queued_req = scheduler._add_request_to_queue.call_args.args[0]
+    assert queued_req.finished_reason == "MTP diagonal ES is not enabled"
+    assert queued_req.diag_es_mtp_session_released
+
+
+@pytest.mark.parametrize("session_id", ["", "   ", "bad\0id"])
+def test_invalid_mtp_session_id_is_request_local(monkeypatch, session_id):
+    scheduler = _scheduler()
+    recv_req = _request(
+        es_candidate_id=None, diag_es_mtp_session_id=session_id
+    )
+
+    class _Manager:
+        @staticmethod
+        def bind_request(*, session_id, rid):
+            from sglang.srt.diag_es.mtp import DiagESMTPSessionManager
+
+            DiagESMTPSessionManager._validate_session_id(session_id)
+
+    import sglang.srt.diag_es as diag_es
+
+    monkeypatch.setattr(diag_es, "get_diag_es_mtp_manager", lambda: _Manager())
+    with patch.object(scheduler_module, "Req", _FakeReq):
+        scheduler.handle_generate_request(recv_req)
+
+    queued_req = scheduler._add_request_to_queue.call_args.args[0]
+    assert "non-empty string without NUL bytes" in queued_req.finished_reason
+    assert queued_req.diag_es_mtp_session_released

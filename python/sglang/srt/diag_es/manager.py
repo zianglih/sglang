@@ -5,14 +5,16 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 import torch
-
 from sglang.srt.diag_es.manifest import (
+    JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
     DiagESManifest,
     DiagESPlacement,
     compute_effective_model_digest,
+    register_joyai_llm_flash_mtp_manifest,
     register_qwen3_30b_a3b_manifest,
 )
+from sglang.srt.diag_es.mtp import DiagESMTPSessionManager
 
 
 class DiagESCandidateError(RuntimeError):
@@ -389,7 +391,8 @@ class DiagESManager:
         }
 
 
-_manager: DiagESManager | None = None
+_target_manager: DiagESManager | None = None
+_mtp_manager: DiagESMTPSessionManager | None = None
 
 
 def register_diag_es_model(
@@ -399,8 +402,45 @@ def register_diag_es_model(
     resident_candidate_slots: int,
     model_artifact_id: str,
     placement: DiagESPlacement,
-) -> DiagESManager:
-    global _manager
+    is_draft_worker: bool = False,
+    mtp_max_sessions: int | None = None,
+    mtp_max_correct_drafts: int | None = None,
+) -> DiagESManager | DiagESMTPSessionManager:
+    global _mtp_manager, _target_manager
+    if is_draft_worker:
+        if schema_id != JOYAI_LLM_FLASH_MTP_SCHEMA_ID:
+            raise ValueError(f"unsupported MTP diagonal-ES schema ID: {schema_id!r}")
+        if mtp_max_sessions is None or mtp_max_correct_drafts is None:
+            raise ValueError(
+                "MTP diagonal ES requires max_sessions and max_correct_drafts"
+            )
+        manifest = register_joyai_llm_flash_mtp_manifest(
+            model, placement=placement
+        )
+        mtp_manager = DiagESMTPSessionManager(
+            manifest=manifest,
+            max_sessions=mtp_max_sessions,
+            model_artifact_id=model_artifact_id,
+            device=next(model.parameters()).device,
+            max_correct_drafts=mtp_max_correct_drafts,
+        )
+
+        decoder = model.model.decoder
+        dense_linears = (
+            decoder.self_attn.fused_qkv_a_proj_with_mqa,
+            decoder.self_attn.q_b_proj,
+            decoder.self_attn.o_proj,
+            decoder.mlp.gate_up_proj,
+            decoder.mlp.down_proj,
+        )
+        for linear in dense_linears:
+            linear.es_post_delta_bank = mtp_manager.get_dense_delta_bank(
+                linear.es_post_site_id
+            )
+
+        _mtp_manager = mtp_manager
+        return mtp_manager
+
     if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
         raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
     manifest = register_qwen3_30b_a3b_manifest(model, placement=placement)
@@ -447,19 +487,36 @@ def register_diag_es_model(
 
     # Publish only after validation, allocation, and all hot-path bindings
     # succeed. A failed startup cannot expose a partially initialized manager.
-    _manager = manager
+    _target_manager = manager
     return manager
 
 
 def get_diag_es_manager() -> DiagESManager:
-    if _manager is None:
+    if _target_manager is None:
         raise DiagESNotEnabledError(
-            "diagonal ES is not enabled or has not been initialized"
+            "target diagonal ES is not enabled or has not been initialized"
         )
-    return _manager
+    return _target_manager
+
+
+def get_diag_es_mtp_manager() -> DiagESMTPSessionManager:
+    if _mtp_manager is None:
+        raise DiagESNotEnabledError(
+            "MTP diagonal ES is not enabled or has not been initialized"
+        )
+    return _mtp_manager
 
 
 def release_req_candidate(req: Any) -> None:
     if req.es_candidate_id is not None and not req.es_candidate_released:
         get_diag_es_manager().release(req.es_candidate_id)
         req.es_candidate_released = True
+    if (
+        getattr(req, "diag_es_mtp_session_id", None) is not None
+        and not getattr(req, "diag_es_mtp_session_released", True)
+    ):
+        get_diag_es_mtp_manager().release_request(
+            session_id=req.diag_es_mtp_session_id,
+            rid=req.rid,
+        )
+        req.diag_es_mtp_session_released = True

@@ -1,11 +1,12 @@
 import unittest
+from array import array
 
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import maybe_stub_sgl_kernel
 
 maybe_stub_sgl_kernel()
 
-from sglang.srt.managers.io_struct import BatchStrOutput
+from sglang.srt.managers.io_struct import BatchStrOutput, BatchTokenIDOutput
 from sglang.srt.managers.multi_tokenizer_mixin import (
     TokenizerWorker,
     _handle_output_by_index,
@@ -76,6 +77,53 @@ def _make_batch_str_output() -> BatchStrOutput:
         placeholder_tokens_idx=[None, None],
         placeholder_tokens_val=[None, None],
         retraction_counts=[0, 0],
+        diag_es_mtp_status=[
+            {"session_id": "session-0", "population_index": 3},
+            {"session_id": "session-1", "population_index": 7},
+        ],
+    )
+
+
+def _make_batch_token_id_output() -> BatchTokenIDOutput:
+    n = 2
+    return BatchTokenIDOutput(
+        rids=["rid-0", "rid-1"],
+        finished_reasons=[None] * n,
+        decoded_texts=["", ""],
+        decode_ids=[array("q", [1]), array("q", [2])],
+        read_offsets=[0] * n,
+        output_ids=None,
+        skip_special_tokens=[True] * n,
+        spaces_between_special_tokens=[True] * n,
+        no_stop_trim=[False] * n,
+        prompt_tokens=[5] * n,
+        reasoning_tokens=[0] * n,
+        completion_tokens=[1] * n,
+        cached_tokens=[0] * n,
+        input_token_logprobs_val=[[], []],
+        input_token_logprobs_idx=[[], []],
+        output_token_logprobs_val=[[], []],
+        output_token_logprobs_idx=[[], []],
+        input_top_logprobs_val=[[], []],
+        input_top_logprobs_idx=[[], []],
+        output_top_logprobs_val=[[], []],
+        output_top_logprobs_idx=[[], []],
+        input_token_ids_logprobs_val=[[], []],
+        input_token_ids_logprobs_idx=[[], []],
+        output_token_ids_logprobs_val=[[], []],
+        output_token_ids_logprobs_idx=[[], []],
+        output_token_entropy_val=None,
+        output_token_sampling_mask=None,
+        output_token_sampling_logprobs=None,
+        output_hidden_states=None,
+        routed_experts=None,
+        indexer_topk=None,
+        placeholder_tokens_idx=None,
+        placeholder_tokens_val=None,
+        diag_es_mtp_status=[
+            {"session_id": "session-0", "population_index": 3},
+            {"session_id": "session-1", "population_index": 7},
+        ],
     )
 
 
@@ -90,6 +138,22 @@ class TestMultiTokenizerMixin(unittest.TestCase):
         self.assertEqual(
             single_output.cached_tokens_details,
             [{"device": 1, "host": 3}],
+        )
+
+    def test_batch_str_output_preserves_diag_es_mtp_status(self):
+        single_output = _handle_output_by_index(_make_batch_str_output(), 1)
+
+        self.assertEqual(
+            single_output.diag_es_mtp_status,
+            [{"session_id": "session-1", "population_index": 7}],
+        )
+
+    def test_batch_token_id_output_preserves_diag_es_mtp_status(self):
+        single_output = _handle_output_by_index(_make_batch_token_id_output(), 0)
+
+        self.assertEqual(
+            single_output.diag_es_mtp_status,
+            [{"session_id": "session-0", "population_index": 3}],
         )
 
     def test_get_tokenizer_worker_class_uses_default(self):

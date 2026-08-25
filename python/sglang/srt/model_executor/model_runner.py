@@ -1124,13 +1124,26 @@ class ModelRunner:
 
             self.diag_es_manager = register_diag_es_model(
                 self.model,
-                schema_id=self.server_args.diag_es_schema_id,
+                schema_id=(
+                    self.server_args.diag_es_mtp_schema_id
+                    if self.is_draft_worker
+                    else self.server_args.diag_es_schema_id
+                ),
                 resident_candidate_slots=(
                     self.server_args.diag_es_resident_candidate_slots
                 ),
-                model_artifact_id=self.server_args.diag_es_model_artifact_id,
+                model_artifact_id=(
+                    self.server_args.diag_es_mtp_model_artifact_id
+                    if self.is_draft_worker
+                    else self.server_args.diag_es_model_artifact_id
+                ),
                 placement=get_diag_es_placement(
                     self.server_args, is_draft_worker=self.is_draft_worker
+                ),
+                is_draft_worker=self.is_draft_worker,
+                mtp_max_sessions=self.server_args.diag_es_mtp_max_sessions,
+                mtp_max_correct_drafts=(
+                    self.server_args.speculative_num_draft_tokens - 1
                 ),
             )
 

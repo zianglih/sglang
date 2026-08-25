@@ -128,6 +128,8 @@ from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
     DetachHiCacheStorageReqInput,
     DetachHiCacheStorageReqOutput,
+    DiagESMTPSessionReqInput,
+    DiagESMTPSessionReqOutput,
     DiagESRegistryReqInput,
     DiagESRegistryReqOutput,
     DumperControlReqInput,
@@ -1600,6 +1602,7 @@ class Scheduler(
                 (ScaleElasticEPReqInput, self.handle_scale_elastic_ep),
                 (DumperControlReqInput, self.handle_dumper_control),
                 (DiagESRegistryReqInput, self.handle_diag_es_registry),
+                (DiagESMTPSessionReqInput, self.handle_diag_es_mtp_session),
                 (AddExternalCorpusReqInput, self.add_external_corpus),
                 (
                     RemoveExternalCorpusReqInput,
@@ -2356,11 +2359,27 @@ class Scheduler(
             mm_inputs.release_features()
             req.multimodal_inputs = None
 
+    @staticmethod
+    def _bind_diag_es_mtp_request(req: Req, session_id: str) -> None:
+        from sglang.srt.diag_es import get_diag_es_mtp_manager
+
+        status = get_diag_es_mtp_manager().bind_request(
+            session_id=session_id,
+            rid=req.rid,
+        )
+        req.diag_es_mtp_session_id = session_id
+        req.diag_es_mtp_session_released = False
+        req.diag_es_mtp_status = status
+        req.diag_es_mtp_slot = status["resident_slot"]
+
     def handle_generate_request(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
-        if recv_req.es_candidate_id is not None and (
+        if (
+            recv_req.es_candidate_id is not None
+            or recv_req.diag_es_mtp_session_id is not None
+        ) and (
             recv_req.session_params is not None or recv_req.session_id is not None
         ):
             req = Req(
@@ -2374,11 +2393,12 @@ class Scheduler(
                 recv_req.sampling_params,
                 vocab_size=self.model_config.vocab_size,
                 es_candidate_id=recv_req.es_candidate_id,
+                diag_es_mtp_session_id=recv_req.diag_es_mtp_session_id,
                 http_worker_ipc=recv_req.http_worker_ipc,
             )
             req.tokenizer = self.tokenizer
             req.set_finish_with_abort(
-                "Invalid request: diagonal ES does not support sessions"
+                "Invalid request: diagonal ES does not use SGLang KV sessions"
             )
             self.init_req_max_new_tokens(req)
             self._add_request_to_queue(req)
@@ -2443,6 +2463,7 @@ class Scheduler(
                 routing_key=recv_req.routing_key,
                 extra_key=recv_req.extra_key,
                 es_candidate_id=recv_req.es_candidate_id,
+                diag_es_mtp_session_id=recv_req.diag_es_mtp_session_id,
                 http_worker_ipc=recv_req.http_worker_ipc,
                 dllm_config=self.dllm_config,
                 time_stats=recv_req.time_stats,
@@ -2542,6 +2563,22 @@ class Scheduler(
             req.extra_key = compose_diag_es_extra_key(
                 req.extra_key, candidate.effective_model_digest
             )
+
+        if recv_req.diag_es_mtp_session_id is not None:
+            from sglang.srt.diag_es import DiagESNotEnabledError
+            from sglang.srt.diag_es.mtp import DiagESMTPSessionError
+
+            try:
+                self._bind_diag_es_mtp_request(
+                    req, recv_req.diag_es_mtp_session_id
+                )
+            except (DiagESMTPSessionError, DiagESNotEnabledError, ValueError) as exc:
+                req.set_finish_with_abort(str(exc))
+                self.init_req_max_new_tokens(req)
+                self._add_request_to_queue(req)
+                return
+            # MTP steering changes only the draft policy. Deliberately leave
+            # req.extra_key untouched so target radix/KV identity is unchanged.
 
         self._maybe_namespace_elastic_radix_cache(req)
 
@@ -4912,6 +4949,19 @@ class Scheduler(
             return DiagESRegistryReqOutput(success=True, message="", status=status)
         except Exception as exc:
             return DiagESRegistryReqOutput(success=False, message=str(exc), status={})
+
+    def handle_diag_es_mtp_session(
+        self, recv_req: DiagESMTPSessionReqInput
+    ) -> DiagESMTPSessionReqOutput:
+        try:
+            status = self.tp_worker.diag_es_mtp_session(recv_req)
+            return DiagESMTPSessionReqOutput(
+                success=True, message="", status=status
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            return DiagESMTPSessionReqOutput(
+                success=False, message=str(exc), status={}
+            )
 
     def handle_dumper_control(self, recv_req: DumperControlReqInput):
         from sglang.srt.debug_utils.dumper import dumper

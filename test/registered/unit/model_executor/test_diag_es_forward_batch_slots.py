@@ -4,25 +4,31 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-
+from sglang.srt.model_executor.cuda_graph_buffer_registry import build_decode_registry
 from sglang.srt.model_executor.forward_batch_info import (
     ForwardMode,
     _build_diag_es_candidate_slots,
 )
-from sglang.srt.model_executor.cuda_graph_buffer_registry import build_decode_registry
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=1, suite="base-a-test-cpu")
 
 
-def _runner(enabled: bool):
-    return SimpleNamespace(diag_es_enabled=enabled, device=torch.device("cpu"))
+def _runner(enabled: bool, *, is_draft_worker=False):
+    return SimpleNamespace(
+        diag_es_enabled=enabled,
+        is_draft_worker=is_draft_worker,
+        device=torch.device("cpu"),
+    )
 
 
 def _batch(mode: ForwardMode, slots, *, token_count, extend_lens=None, width=None):
     return SimpleNamespace(
         forward_mode=mode,
-        reqs=[SimpleNamespace(es_candidate_slot=slot) for slot in slots],
+        reqs=[
+            SimpleNamespace(es_candidate_slot=slot, diag_es_mtp_slot=slot + 10)
+            for slot in slots
+        ],
         input_ids=torch.zeros(token_count, dtype=torch.int64),
         extend_lens=extend_lens,
         extend_num_tokens=token_count,
@@ -53,6 +59,17 @@ class TestDiagESForwardBatchSlots(unittest.TestCase):
 
         torch.testing.assert_close(token_slots, torch.tensor([3, 1], dtype=torch.int32))
         self.assertEqual(request_slots, (3, 1))
+
+    def test_draft_role_uses_independent_mtp_slots(self):
+        token_slots, request_slots = _build_diag_es_candidate_slots(
+            _batch(ForwardMode.DECODE, [3, 1], token_count=2),
+            _runner(True, is_draft_worker=True),
+        )
+
+        torch.testing.assert_close(
+            token_slots, torch.tensor([13, 11], dtype=torch.int32)
+        )
+        self.assertEqual(request_slots, (13, 11))
 
     def test_prefill_expands_slots_by_extend_lengths(self):
         token_slots, request_slots = _build_diag_es_candidate_slots(

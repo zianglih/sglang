@@ -12,7 +12,6 @@ from typing import (
 
 import torch
 import zmq
-
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.environ import envs
@@ -300,6 +299,9 @@ class _GenerationStreamAccumulator:
     spec_num_cap_tokens: list = field(default_factory=list)
     spec_correct_drafts_histogram: list = field(default_factory=list)
     spec_cap_lens_histogram: list = field(default_factory=list)
+    # Lazily allocated only for a batch containing at least one MTP-steered
+    # request, so default serving keeps the existing payload ABI and hot path.
+    diag_es_mtp_status: Optional[list] = None
     retraction_counts: list = field(default_factory=list)
     output_hidden_states: Optional[list] = None
     routed_experts: Optional[list] = None
@@ -455,6 +457,13 @@ class _GenerationStreamAccumulator:
             self.spec_num_cap_tokens.append(req.spec_num_cap_tokens)
             self.spec_correct_drafts_histogram.append(req.spec_correct_drafts_histogram)
             self.spec_cap_lens_histogram.append(req.spec_cap_lens_histogram)
+        mtp_status = getattr(req, "diag_es_mtp_status", None)
+        if mtp_status is not None:
+            if self.diag_es_mtp_status is None:
+                self.diag_es_mtp_status = [None] * (len(self.rids) - 1)
+            self.diag_es_mtp_status.append(mtp_status)
+        elif self.diag_es_mtp_status is not None:
+            self.diag_es_mtp_status.append(None)
 
         if self.return_logprob:
             if (
@@ -621,6 +630,7 @@ class _GenerationStreamAccumulator:
             spec_num_cap_tokens=self.spec_num_cap_tokens,
             spec_correct_drafts_histogram=self.spec_correct_drafts_histogram,
             spec_cap_lens_histogram=self.spec_cap_lens_histogram,
+            diag_es_mtp_status=self.diag_es_mtp_status,
             time_stats=wrap_as_pickle(self.time_stats),
             finished_reasons=self.finished_reasons,
             decoded_texts=self.decoded_texts,

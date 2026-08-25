@@ -639,7 +639,8 @@ class EagleDraftWorker(EagleDraftWorkerBase):
                 with (
                     forward_context(
                         ForwardContext(
-                            attn_backend=self.draft_attn_backend.attn_backends[i]
+                            attn_backend=self.draft_attn_backend.attn_backends[i],
+                            es_candidate_slots=forward_batch.es_candidate_slots,
                         )
                     ),
                     canary_index_ctx,
@@ -1013,6 +1014,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
 
         # Parse arguments
         self.server_args = server_args
+        self._diag_es_mtp_enabled = server_args.diag_es_mtp_placement != "off"
         self.topk = server_args.speculative_eagle_topk
         self.speculative_num_steps = server_args.speculative_num_steps
         self.speculative_num_draft_tokens = server_args.speculative_num_draft_tokens
@@ -1173,6 +1175,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
             assert verify_input.is_verify_input()
             batch.spec_info = verify_input
             batch_output = self.verify(batch, grammar_barrier=grammar_barrier)
+            self._record_diag_es_mtp_feedback(batch, batch_output)
             # Publish before draft_extend so the fence is at verify-end.
             if on_publish is not None:
                 on_publish(batch_output.new_seq_lens)
@@ -1191,6 +1194,7 @@ class EAGLEWorkerV2(BaseSpecWorker):
                     spec_stage_span("draft_extend"),
                 ):
                     self.draft_worker._draft_extend_for_decode(batch, batch_output)
+                    self._note_diag_es_mtp_draft_read(batch)
 
             return batch_output
 

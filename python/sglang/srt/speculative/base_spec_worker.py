@@ -6,7 +6,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Optional
 
 import torch
-
 from sglang.srt.model_executor.graph_memory_usage import (
     merge_graph_memory_usage,
     merge_graph_time_usage,
@@ -150,6 +149,10 @@ class BaseSpecWorker(ABC):
     def __init__(self) -> None:
         self._additional_graph_memory_usage: dict[str, float] = {}
         self._additional_graph_time_usage: dict[str, float] = {}
+        # Draft-owning workers enable this after ServerArgs are available. Keep
+        # clean speculative serving to one predictable branch: no request scan
+        # and no diagonal-ES runtime import when MTP steering is disabled.
+        self._diag_es_mtp_enabled = False
 
     @property
     def hicache_draft_plan(self) -> HiCacheDraftPlan:
@@ -224,6 +227,67 @@ class BaseSpecWorker(ABC):
         """Attn backends touched by spec_v2 forward; OR-ed by decide_needs_cpu_seq_lens.
         Default returns target only; subclasses extend with draft backends."""
         return (self.target_worker.model_runner.attn_backend,)
+
+    def _record_diag_es_mtp_feedback(self, batch, batch_output) -> None:
+        """Switch MTP candidates after verify and before the next draft extend.
+
+        The draft extend constructs state for the next proposal. Delaying this
+        feedback to scheduler result processing would run that proposal with
+        the previous candidate and misattribute one attempt per transition.
+        """
+
+        if not self._diag_es_mtp_enabled:
+            return
+        session_reqs = [
+            req
+            for req in batch.reqs
+            if getattr(req, "diag_es_mtp_session_id", None) is not None
+        ]
+        if not session_reqs:
+            return
+        if batch_output.accept_lens is None:
+            raise RuntimeError("MTP diagonal ES verify output is missing accept_lens")
+
+        accept_lens = batch_output.accept_lens.tolist()
+        if len(accept_lens) != len(batch.reqs):
+            raise RuntimeError(
+                "MTP diagonal ES verify accept_lens does not match batch size"
+            )
+
+        from sglang.srt.diag_es import get_diag_es_mtp_manager
+
+        manager = get_diag_es_mtp_manager()
+        for req, accept_len in zip(batch.reqs, accept_lens):
+            if req.diag_es_mtp_session_id is None:
+                continue
+            req.diag_es_mtp_status = manager.record_acceptance(
+                session_id=req.diag_es_mtp_session_id,
+                rid=req.rid,
+                accepted_drafts=int(accept_len) - 1,
+            )
+
+    def _note_diag_es_mtp_draft_read(self, batch) -> None:
+        """Fence the last draft-model read before its bank slot is reused.
+
+        Multi-layer draft-extend CUDA graphs replay below ModelRunner.forward,
+        so the generic ModelRunner fence cannot cover that path. Record one
+        event after the complete eager/graph draft-extend phase on its compute
+        stream; the next candidate upload waits before mutating that slot.
+        """
+
+        if not self._diag_es_mtp_enabled:
+            return
+        slots = tuple(
+            req.diag_es_mtp_slot
+            for req in batch.reqs
+            if getattr(req, "diag_es_mtp_session_id", None) is not None
+        )
+        if not slots:
+            return
+
+        from sglang.srt.diag_es import get_diag_es_mtp_manager
+
+        get_diag_es_mtp_manager().note_slots_read(slots)
 
     def clear_cache_pool(self):
         """Default no-op: the allocator and kv cache pool are shared with the

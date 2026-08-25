@@ -3,7 +3,6 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
-
 from sglang.srt.model_executor.forward_context import get_forward_context
 
 
@@ -105,10 +104,20 @@ def maybe_apply_diag_es_pre(layer: torch.nn.Module, x: torch.Tensor) -> torch.Te
     delta_bank = layer.es_pre_delta_bank
     if delta_bank is None:
         return x
-    return apply_dense_delta(x, delta_bank, get_forward_context().es_candidate_slots)
+    candidate_slots = get_forward_context().es_candidate_slots
+    if candidate_slots is None:
+        raise RuntimeError(
+            "diagonal-ES pre perturbation is active but candidate slots are missing"
+        )
+    return apply_dense_delta(x, delta_bank, candidate_slots)
 
 
 def get_diag_es_post_inputs(
     layer: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return layer.es_post_delta_bank, get_forward_context().es_candidate_slots
+    candidate_slots = get_forward_context().es_candidate_slots
+    if candidate_slots is None:
+        raise RuntimeError(
+            "diagonal-ES post perturbation is active but candidate slots are missing"
+        )
+    return layer.es_post_delta_bank, candidate_slots

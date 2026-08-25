@@ -847,6 +847,7 @@ class Req(ReqDllmMixin):
         metrics_collector: Optional[SchedulerMetricsCollector] = None,
         extra_key: Optional[str] = None,
         es_candidate_id: Optional[str] = None,
+        diag_es_mtp_session_id: Optional[str] = None,
         routing_key: Optional[str] = None,
         dimensions: Optional[int] = None,
         http_worker_ipc: Optional[str] = None,
@@ -937,6 +938,10 @@ class Req(ReqDllmMixin):
         # The scheduler flips this only after the resident manager acquire.
         # Requests rejected before that point must not release an unheld ref.
         self.es_candidate_released = True
+        self.diag_es_mtp_session_id = diag_es_mtp_session_id
+        self.diag_es_mtp_slot = 0
+        self.diag_es_mtp_session_released = True
+        self.diag_es_mtp_status: Optional[Dict[str, Any]] = None
         self.lora_id = lora_id
         self.routing_key = routing_key
 

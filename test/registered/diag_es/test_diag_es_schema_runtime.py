@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from sglang.srt.diag_es.manager import (
     DiagESCandidateNotFoundError,
     DiagESCandidateRetiringError,
@@ -10,10 +9,12 @@ from sglang.srt.diag_es.manager import (
     DiagESManager,
 )
 from sglang.srt.diag_es.manifest import (
+    JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
     DenseSite,
     DiagESManifest,
     compute_effective_model_digest,
+    register_joyai_llm_flash_mtp_manifest,
     register_qwen3_30b_a3b_manifest,
 )
 from sglang.srt.diag_es.protocol import (
@@ -40,6 +41,7 @@ class _Linear:
         self.weight = torch.empty((output_size, input_size), dtype=dtype, device="meta")
         self.es_pre_site_id = None
         self.es_post_site_id = None
+        self.calls = []
         if block_fp8:
             self.weight_scale_inv = torch.empty(
                 (output_size // 128, input_size // 128),
@@ -47,6 +49,17 @@ class _Linear:
                 device="meta",
             )
             self.input_scale = None
+
+    def __call__(self, value):
+        self.calls.append(value.shape[0])
+        return (
+            torch.zeros(
+                (value.shape[0], self.output_size),
+                dtype=value.dtype,
+                device=value.device,
+            ),
+            None,
+        )
 
 
 class _Experts:
@@ -129,6 +142,112 @@ class Qwen3MoeForCausalLM:
                 for layer_id in range(num_layers)
             ]
         )
+
+
+class DeepseekV2MLP:
+    def __init__(self):
+        self.gate_up_proj = _Linear(2048, 14336)
+        self.down_proj = _Linear(7168, 2048)
+
+
+class JoyAIDenseNextNDecoderLayer:
+    def __init__(self):
+        self.self_attn = SimpleNamespace(
+            fused_qkv_a_proj_with_mqa=_Linear(2048, 2112),
+            q_b_proj=_Linear(1536, 6144),
+            kv_b_proj=_Linear(512, 8192),
+            o_proj=_Linear(4096, 2048),
+        )
+        self.mlp = DeepseekV2MLP()
+
+
+class JoyAILLMFlashForCausalLMNextN:
+    def __init__(self):
+        self.quant_config = None
+        self.config = SimpleNamespace(
+            num_hidden_layers=40,
+            hidden_size=2048,
+            num_attention_heads=32,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            intermediate_size=7168,
+            num_nextn_predict_layers=1,
+        )
+        self.model = SimpleNamespace(decoder=JoyAIDenseNextNDecoderLayer())
+
+
+def test_joyai_mtp_manifest_is_exact_dense_kv_neutral_search_space():
+    model = JoyAILLMFlashForCausalLMNextN()
+    model.model.decoder.self_attn.kv_b_proj.es_post_delta_bank = object()
+    manifest = register_joyai_llm_flash_mtp_manifest(model, placement="post")
+
+    assert manifest.schema_id == JOYAI_LLM_FLASH_MTP_SCHEMA_ID
+    assert manifest.grouped_delta_shapes == {}
+    assert [
+        (site.site_id, site.width, site.active_width)
+        for site in manifest.dense_sites
+    ] == [
+        ("model.decoder.self_attn.q_a_proj.output", 2112, 1536),
+        ("model.decoder.self_attn.q_b_proj.output", 6144, None),
+        ("model.decoder.self_attn.o_proj.output", 2048, None),
+        ("model.decoder.mlp.gate_up_proj.output", 14336, None),
+        ("model.decoder.mlp.down_proj.output", 2048, None),
+    ]
+    attention = model.model.decoder.self_attn
+    assert attention._use_min_latency_fused_a_gemm is False
+    assert attention._use_min_latency_q_b_gemm is False
+    assert attention.kv_b_proj.es_post_site_id is None
+    assert attention.kv_b_proj.es_post_delta_bank is None
+    assert attention.fused_qkv_a_proj_with_mqa.es_post_site_id.endswith(
+        "q_a_proj.output"
+    )
+    with pytest.raises(ValueError, match="post placement only"):
+        register_joyai_llm_flash_mtp_manifest(model, placement="pre")
+
+
+@pytest.mark.parametrize("num_tokens", [1, 64])
+def test_joyai_mtp_query_sites_never_bypass_bound_linear_epilogue(
+    monkeypatch, num_tokens
+):
+    import sglang.srt.models.deepseek_v2 as deepseek_v2
+
+    model = JoyAILLMFlashForCausalLMNextN()
+    register_joyai_llm_flash_mtp_manifest(model, placement="post")
+    attention = model.model.decoder.self_attn
+    attention.q_lora_rank = 1536
+    attention.num_local_heads = 32
+    attention.qk_head_dim = 192
+
+    def bypass_is_forbidden(*_args, **_kwargs):
+        raise AssertionError("min-latency fused-A bypassed the ES epilogue")
+
+    monkeypatch.setattr(
+        deepseek_v2, "linear_with_fused_a_gemm", bypass_is_forbidden
+    )
+    q_a = deepseek_v2.DeepseekV2AttentionMLA.prepare_qkv_latent(
+        attention,
+        torch.zeros(num_tokens, 2048, dtype=torch.bfloat16),
+        forward_batch=None,
+    )
+    q_b = deepseek_v2.DeepseekV2AttentionMLA.q_b_proj_forward(
+        attention,
+        torch.zeros(num_tokens, 1536, dtype=torch.bfloat16),
+    )
+
+    assert q_a.shape == (num_tokens, 2112)
+    assert q_b.shape == (num_tokens, 32, 192)
+    assert attention.fused_qkv_a_proj_with_mqa.calls == [num_tokens]
+    assert attention.q_b_proj.calls == [num_tokens]
+
+
+def test_joyai_mtp_manifest_fails_closed_on_generic_sparse_nextn_layout():
+    model = JoyAILLMFlashForCausalLMNextN()
+    model.model.decoder.mlp = SimpleNamespace(experts=object())
+    with pytest.raises(TypeError, match="dense NextN decoder layout"):
+        register_joyai_llm_flash_mtp_manifest(model, placement="post")
 
 
 @pytest.mark.parametrize(

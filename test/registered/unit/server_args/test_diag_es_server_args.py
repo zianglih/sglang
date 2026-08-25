@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import pytest
-
 from sglang.srt.server_args import ServerArgs
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -45,6 +44,13 @@ def _runtime_view(**overrides):
         "enable_lora": None,
         "lora_paths": None,
         "speculative_algorithm": None,
+        "speculative_num_steps": 3,
+        "speculative_num_draft_tokens": 4,
+        "speculative_eagle_topk": 1,
+        "speculative_adaptive": False,
+        "enable_multi_layer_eagle": False,
+        "disable_overlap_schedule": True,
+        "max_running_requests": 64,
         "disaggregation_mode": "null",
         "enable_two_batch_overlap": False,
     }
@@ -55,6 +61,7 @@ def _runtime_view(**overrides):
 def _validate_runtime(view, *, placement="pre"):
     subject = SimpleNamespace(
         diag_es_target_placement=placement,
+        diag_es_mtp_placement="off",
         _resolved=lambda: view,
     )
     ServerArgs._handle_diag_es_runtime_contract(subject)
@@ -123,6 +130,9 @@ def _validate_identity(**overrides):
         "diag_es_schema_id": None,
         "diag_es_model_artifact_id": None,
         "diag_es_resident_candidate_slots": 0,
+        "diag_es_mtp_schema_id": None,
+        "diag_es_mtp_model_artifact_id": None,
+        "diag_es_mtp_max_sessions": 64,
         "speculative_algorithm": None,
     }
     values.update(overrides)
@@ -155,10 +165,61 @@ def test_diag_es_identity_is_role_scoped():
         )
 
 
-@pytest.mark.parametrize("placement", ["pre", "post", "both"])
-def test_mtp_diag_es_interface_fails_closed(placement):
-    with pytest.raises(NotImplementedError, match="interface-only"):
-        _validate_identity(diag_es_mtp_placement=placement)
+def test_mtp_diag_es_identity_is_exact_and_allows_independent_target_role():
+    values = dict(
+        diag_es_mtp_placement="post",
+        diag_es_mtp_schema_id="joyai-llm-flash-mtp-diag-es-v1",
+        diag_es_mtp_model_artifact_id="joyai@sha256:abc",
+        speculative_algorithm="EAGLE",
+    )
+    _validate_identity(**values)
+    _validate_identity(
+        **{
+            **values,
+            "diag_es_target_placement": "post",
+            "diag_es_schema_id": "qwen3-30b-a3b-diag-es-v2",
+            "diag_es_model_artifact_id": "target",
+            "diag_es_resident_candidate_slots": 2,
+            "speculative_algorithm": "NEXTN",
+        }
+    )
+    with pytest.raises(ValueError, match="post placement only"):
+        _validate_identity(**{**values, "diag_es_mtp_placement": "pre"})
+    with pytest.raises(ValueError, match="schema_id"):
+        _validate_identity(**{**values, "diag_es_mtp_schema_id": "wrong"})
+
+
+def test_mtp_diag_es_runtime_allows_target_moe_backend_auto():
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="post",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            moe_runner_backend="auto",
+        ),
+    )
+    subject._handle_diag_es_mtp_runtime_contract = lambda: (
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
+    )
+    ServerArgs._handle_diag_es_runtime_contract(subject)
+
+
+def test_mtp_diag_es_rejects_multi_layer_eagle():
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="post",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            enable_multi_layer_eagle=True,
+        ),
+    )
+    subject._handle_diag_es_mtp_runtime_contract = lambda: (
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
+    )
+    with pytest.raises(ValueError, match="enable_multi_layer_eagle"):
+        ServerArgs._handle_diag_es_runtime_contract(subject)
 
 
 def test_invalid_role_placement_is_rejected():

@@ -68,6 +68,7 @@ from sglang.srt.managers.detokenizer_manager import run_detokenizer_process
 from sglang.srt.managers.io_struct import (
     CloseSessionReqInput,
     DestroyWeightsUpdateGroupReqInput,
+    DiagESMTPSessionReqInput,
     DiagESRegistryReqInput,
     EmbeddingReqInput,
     GenerateReqInput,
@@ -399,6 +400,7 @@ class Engine(EngineScoreMixin, EngineBase):
         priority: Optional[int] = None,
         session_id: Optional[str] = None,
         es_candidate_id: Optional[Union[List[str], str]] = None,
+        diag_es_mtp_session_id: Optional[Union[List[str], str]] = None,
     ) -> Union[Dict, Iterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -438,6 +440,7 @@ class Engine(EngineScoreMixin, EngineBase):
             session_params=session_params,
             priority=priority,
             es_candidate_id=es_candidate_id,
+            diag_es_mtp_session_id=diag_es_mtp_session_id,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -507,6 +510,7 @@ class Engine(EngineScoreMixin, EngineBase):
         priority: Optional[int] = None,
         session_id: Optional[str] = None,
         es_candidate_id: Optional[Union[List[str], str]] = None,
+        diag_es_mtp_session_id: Optional[Union[List[str], str]] = None,
     ) -> Union[Dict, AsyncIterator[Dict]]:
         """
         The arguments of this function is the same as `sglang/srt/managers/io_struct.py::GenerateReqInput`.
@@ -546,6 +550,7 @@ class Engine(EngineScoreMixin, EngineBase):
             session_params=session_params,
             priority=priority,
             es_candidate_id=es_candidate_id,
+            diag_es_mtp_session_id=diag_es_mtp_session_id,
         )
         generator = self.tokenizer_manager.generate_request(obj, None)
 
@@ -1504,6 +1509,115 @@ class Engine(EngineScoreMixin, EngineBase):
             DiagESRegistryReqInput(action="status")
         )
         return self._unwrap_diag_es_registry_result(result)
+
+    @staticmethod
+    def _unwrap_diag_es_mtp_result(result: Any) -> Dict[str, Any]:
+        if not result.success:
+            raise RuntimeError(result.message)
+        return result.status
+
+    def register_diag_es_mtp_session(
+        self,
+        session_id: str,
+        seed: int,
+        population_size: int = 16,
+        sigma: float = 0.01,
+        learning_rate: float = 0.0,
+        attempts_per_candidate: int = 4,
+        estimator: str = "population_zscore",
+        reward_zscore_epsilon: float = 1e-8,
+        max_update_rms_ratio: float = 10.0,
+        max_update_abs_max_ratio: float = 100.0,
+    ) -> Dict[str, Any]:
+        return self.loop.run_until_complete(
+            self.async_register_diag_es_mtp_session(
+                session_id=session_id,
+                seed=seed,
+                population_size=population_size,
+                sigma=sigma,
+                learning_rate=learning_rate,
+                attempts_per_candidate=attempts_per_candidate,
+                estimator=estimator,
+                reward_zscore_epsilon=reward_zscore_epsilon,
+                max_update_rms_ratio=max_update_rms_ratio,
+                max_update_abs_max_ratio=max_update_abs_max_ratio,
+            )
+        )
+
+    async def async_register_diag_es_mtp_session(
+        self,
+        session_id: str,
+        seed: int,
+        population_size: int = 16,
+        sigma: float = 0.01,
+        learning_rate: float = 0.0,
+        attempts_per_candidate: int = 4,
+        estimator: str = "population_zscore",
+        reward_zscore_epsilon: float = 1e-8,
+        max_update_rms_ratio: float = 10.0,
+        max_update_abs_max_ratio: float = 100.0,
+    ) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(
+                action="register",
+                session_id=session_id,
+                seed=seed,
+                population_size=population_size,
+                sigma=sigma,
+                learning_rate=learning_rate,
+                attempts_per_candidate=attempts_per_candidate,
+                estimator=estimator,
+                reward_zscore_epsilon=reward_zscore_epsilon,
+                max_update_rms_ratio=max_update_rms_ratio,
+                max_update_abs_max_ratio=max_update_abs_max_ratio,
+            )
+        )
+        return self._unwrap_diag_es_mtp_result(result)
+
+    def retire_diag_es_mtp_session(self, session_id: str) -> Dict[str, Any]:
+        return self.loop.run_until_complete(
+            self.async_retire_diag_es_mtp_session(session_id)
+        )
+
+    async def async_retire_diag_es_mtp_session(
+        self, session_id: str
+    ) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(action="retire", session_id=session_id)
+        )
+        return self._unwrap_diag_es_mtp_result(result)
+
+    def get_diag_es_mtp_status(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.loop.run_until_complete(
+            self.async_get_diag_es_mtp_status(session_id)
+        )
+
+    async def async_get_diag_es_mtp_status(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(action="status", session_id=session_id)
+        )
+        return self._unwrap_diag_es_mtp_result(result)
+
+    def drain_diag_es_mtp_events(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        return self.loop.run_until_complete(
+            self.async_drain_diag_es_mtp_events(session_id)
+        )
+
+    async def async_drain_diag_es_mtp_events(
+        self, session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(
+                action="drain_events", session_id=session_id
+            )
+        )
+        return self._unwrap_diag_es_mtp_result(result)
 
     def update_weights_from_disk(
         self,

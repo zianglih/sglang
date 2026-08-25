@@ -35,7 +35,6 @@ import psutil
 import setproctitle
 import zmq
 import zmq.asyncio
-
 from sglang.srt.disaggregation.utils import TransferBackend
 from sglang.srt.managers.disagg_service import start_disagg_service
 from sglang.srt.managers.io_struct import (
@@ -170,6 +169,9 @@ def _handle_output_by_index(output, i):
             spec_cap_lens_histogram=_extract_field_by_index(
                 output, "spec_cap_lens_histogram", i
             ),
+            diag_es_mtp_status=_extract_field_by_index(
+                output, "diag_es_mtp_status", i
+            ),
             time_stats=_extract_field_by_index(output, "time_stats", i),
             finished_reasons=_extract_field_by_index(output, "finished_reasons", i),
             decoded_texts=_extract_field_by_index(output, "decoded_texts", i),
@@ -295,6 +297,9 @@ def _handle_output_by_index(output, i):
             ),
             spec_cap_lens_histogram=_extract_field_by_index(
                 output, "spec_cap_lens_histogram", i
+            ),
+            diag_es_mtp_status=_extract_field_by_index(
+                output, "diag_es_mtp_status", i
             ),
             time_stats=_extract_field_by_index(output, "time_stats", i),
             finished_reasons=_extract_field_by_index(output, "finished_reasons", i),

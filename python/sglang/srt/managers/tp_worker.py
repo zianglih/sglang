@@ -25,6 +25,7 @@ from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.distributed.parallel_state_wrapper import ParallelState
 from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
+    DiagESMTPSessionReqInput,
     DiagESRegistryReqInput,
     GetWeightsByNameReqInput,
     InitWeightsSendGroupForRemoteInstanceReqInput,
@@ -229,6 +230,34 @@ class BaseTpWorker(ABC):
             dense_deltas=dense_deltas,
             grouped_deltas=grouped_deltas,
             effective_model_digest=recv_req.effective_model_digest,
+        )
+
+    def diag_es_mtp_session(self, recv_req: DiagESMTPSessionReqInput):
+        from sglang.srt.diag_es import (
+            DiagESMTPSessionConfig,
+            get_diag_es_mtp_manager,
+        )
+
+        manager = get_diag_es_mtp_manager()
+        if recv_req.action == "status":
+            return manager.status(recv_req.session_id)
+        if recv_req.action == "drain_events":
+            return manager.drain_events(recv_req.session_id)
+        if recv_req.action == "retire":
+            return manager.retire_session(recv_req.session_id)
+        return manager.register_session(
+            session_id=recv_req.session_id,
+            config=DiagESMTPSessionConfig(
+                seed=recv_req.seed,
+                population_size=recv_req.population_size,
+                sigma=recv_req.sigma,
+                learning_rate=recv_req.learning_rate,
+                attempts_per_candidate=recv_req.attempts_per_candidate,
+                estimator=recv_req.estimator,
+                reward_zscore_epsilon=recv_req.reward_zscore_epsilon,
+                max_update_rms_ratio=recv_req.max_update_rms_ratio,
+                max_update_abs_max_ratio=recv_req.max_update_abs_max_ratio,
+            ),
         )
 
     def update_weights_from_ipc(self, recv_req: UpdateWeightsFromIPCReqInput):

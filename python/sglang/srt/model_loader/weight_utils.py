@@ -38,8 +38,6 @@ import safetensors.torch
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
-from tqdm.auto import tqdm
-
 from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import REQUANTIZATION_METHODS, ModelConfig
 from sglang.srt.distributed import (
@@ -65,6 +63,7 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.common import is_cuda_alike
 from sglang.utils import is_in_ci
+from tqdm.auto import tqdm
 
 try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
@@ -754,13 +753,31 @@ def maybe_add_mtp_safetensors(
     baseten-admin/glm-4.7-fp4 where mtp.safetensors exists but
     isn't referenced in model.safetensors.index.json.
     """
-    # Only apply for GLM4Moe architecture with nextn layers
+    # JoyAI packages its dense NextN layer in a separate shard that is not
+    # referenced by the target model's safetensors index. It is a complete
+    # NextN shard, so draft loading must select it exclusively: streaming the
+    # 40 target shards only to discard their names is both wasteful and risks
+    # obscuring a missing draft tensor.
     arch = getattr(hf_config, "architectures", [None])[0]
     num_nextn_layers = getattr(
         getattr(hf_config, "text_config", hf_config),
         "num_nextn_predict_layers",
         getattr(hf_config, "num_nextn_predict_layers", 0),
     )
+    if arch == "JoyAILLMFlashForCausalLMNextN":
+        mtp_path = os.path.join(hf_folder, "mtp-1-of-1.safetensors")
+        if not os.path.isfile(mtp_path):
+            raise RuntimeError(
+                "JoyAI NextN draft loading requires mtp-1-of-1.safetensors in "
+                f"{hf_folder}"
+            )
+        logger.info(
+            "Selecting JoyAI dense NextN shard mtp-1-of-1.safetensors as the "
+            "only draft weight file."
+        )
+        return [mtp_path]
+
+    # Only apply the legacy mtp.safetensors workaround for GLM4Moe models.
     if not (
         arch
         in [

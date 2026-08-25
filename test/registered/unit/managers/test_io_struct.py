@@ -618,6 +618,28 @@ class TestGenerateReqInputNormalization(CustomTestCase):
                 session_params={"id": "legacy"},
             ).normalize_batch_and_arguments()
 
+    def test_diag_es_mtp_session_id_normalization_is_one_live_request_per_id(self):
+        req = GenerateReqInput(
+            text=["Hello", "World"],
+            diag_es_mtp_session_id=["mtp-a", "mtp-b"],
+        )
+        req.normalize_batch_and_arguments()
+        self.assertEqual(req.diag_es_mtp_session_id, ["mtp-a", "mtp-b"])
+        self.assertEqual(req[1].diag_es_mtp_session_id, "mtp-b")
+
+        with self.assertRaisesRegex(ValueError, "parallel sampling"):
+            GenerateReqInput(
+                text="Hello",
+                sampling_params={"n": 2},
+                diag_es_mtp_session_id="mtp-a",
+            ).normalize_batch_and_arguments()
+
+        with self.assertRaisesRegex(ValueError, "batch size"):
+            GenerateReqInput(
+                text=["Hello", "World"],
+                diag_es_mtp_session_id=["mtp-a"],
+            ).normalize_batch_and_arguments()
+
     def test_getitem_method(self):
         """Test the __getitem__ method."""
         req = GenerateReqInput(

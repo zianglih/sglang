@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
-
 from sglang.srt.compilation.torch_compile_decoration import set_torch_compile_config
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import (
@@ -70,6 +69,7 @@ class EagleDraftInputBuffers(ForwardInputBuffers):
     hidden_states: Optional[torch.Tensor]
     global_num_tokens_gpu: Optional[torch.Tensor]
     global_num_tokens_for_logprob_gpu: Optional[torch.Tensor]
+    es_candidate_slots: Optional[torch.Tensor]
     dsa_seed_topk: Optional[torch.Tensor] = None
 
 
@@ -208,6 +208,11 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
                 if _hidden_size is not None
                 else None
             )
+            es_candidate_slots = (
+                torch.zeros((self.max_num_token,), dtype=torch.int32)
+                if model_runner.diag_es_enabled
+                else None
+            )
 
             self.temperatures = torch.ones((self.max_bs, 1), dtype=torch.float)
 
@@ -260,6 +265,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             hidden_states=hidden_states,
             global_num_tokens_gpu=global_num_tokens_gpu,
             global_num_tokens_for_logprob_gpu=global_num_tokens_for_logprob_gpu,
+            es_candidate_slots=es_candidate_slots,
             dsa_seed_topk=dsa_seed_topk,
         )
         self.buffers.share_buffers()
@@ -359,6 +365,11 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         draft_probs = (
             buffers.draft_probs[:num_seqs] if buffers.draft_probs is not None else None
         )
+        es_candidate_slots = (
+            buffers.es_candidate_slots[:num_tokens]
+            if buffers.es_candidate_slots is not None
+            else None
+        )
 
         if self.require_mlp_tp_gather:
             global_num_tokens_cpu = [num_tokens] * self.attn_dp_size
@@ -421,6 +432,10 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             extend_seq_lens=extend_seq_lens,
             extend_seq_lens_cpu=extend_seq_lens_cpu,
             out_cache_loc=out_cache_loc,
+            es_candidate_slots=es_candidate_slots,
+            es_candidate_slots_cpu=(
+                (0,) * num_seqs if es_candidate_slots is not None else None
+            ),
             seq_lens_sum=seq_lens.sum().item(),
             return_logprob=False,
             positions=positions,
@@ -463,7 +478,12 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             forward_batch.positions.sub_(self.eagle_worker.speculative_num_steps - 1)
             return ret
 
-        with forward_context(ForwardContext(attn_backend=self.draft_attn_backend)):
+        with forward_context(
+            ForwardContext(
+                attn_backend=self.draft_attn_backend,
+                es_candidate_slots=es_candidate_slots,
+            )
+        ):
             self.draft_attn_backend.init_forward_metadata_out_graph(
                 forward_batch, in_capture=True
             )
@@ -535,6 +555,8 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             if buffers.dsa_seed_topk is not None:
                 buffers.dsa_seed_topk.zero_()
             buffers.req_pool_indices.zero_()
+            if buffers.es_candidate_slots is not None:
+                buffers.es_candidate_slots.zero_()
 
         num_tokens = bs * self.captured_req_width
 
@@ -579,6 +601,13 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         ):
             copy_dsts.append(buffers.bootstrap_room_ids_int[:raw_bs])
             copy_srcs.append(forward_batch.bootstrap_room_ids_int)
+        if buffers.es_candidate_slots is not None:
+            if forward_batch.es_candidate_slots is None:
+                raise RuntimeError(
+                    "MTP diagonal ES draft CUDA-graph replay is missing candidate slots"
+                )
+            copy_dsts.append(buffers.es_candidate_slots[:raw_num_token])
+            copy_srcs.append(forward_batch.es_candidate_slots)
         _grouped_foreach_copy_(copy_dsts, copy_srcs)
 
         # hidden_states is large + contiguous: copy_() uses the cudaMemcpyAsync

@@ -25,6 +25,8 @@ from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqOutput,
     DetachHiCacheStorageReqInput,
     DetachHiCacheStorageReqOutput,
+    DiagESMTPSessionReqInput,
+    DiagESMTPSessionReqOutput,
     DiagESRegistryReqInput,
     DiagESRegistryReqOutput,
     DumperControlReqInput,
@@ -122,6 +124,7 @@ _COMMUNICATOR_SPECS = [
     ("update_lora_adapter", LoRAUpdateOutput),
     ("dumper_control", DumperControlReqOutput),
     ("diag_es_registry", DiagESRegistryReqOutput),
+    ("diag_es_mtp_session", DiagESMTPSessionReqOutput),
     ("scale_elastic_ep", ScaleElasticEPReqOutput),
 ]
 
@@ -192,6 +195,18 @@ class TokenizerControlMixin:
         if len(results) != 1:
             raise RuntimeError(
                 "diagonal ES requires exactly one DP worker result, got "
+                f"{len(results)}"
+            )
+        return results[0]
+
+    async def diag_es_mtp_session(
+        self: TokenizerManager, obj: DiagESMTPSessionReqInput
+    ) -> DiagESMTPSessionReqOutput:
+        self.auto_create_handle_loop()
+        results = await self.diag_es_mtp_session_communicator(obj)
+        if len(results) != 1:
+            raise RuntimeError(
+                "MTP diagonal ES requires exactly one DP worker result, got "
                 f"{len(results)}"
             )
         return results[0]
