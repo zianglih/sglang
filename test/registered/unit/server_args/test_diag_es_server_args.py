@@ -388,13 +388,24 @@ def test_invalid_role_placement_is_rejected():
 
 
 def test_diag_es_runner_role_helpers():
-    from sglang.srt.diag_es import get_diag_es_placement, is_diag_es_enabled
+    from sglang.srt.diag_es import (
+        get_diag_es_mtp_max_correct_drafts,
+        get_diag_es_placement,
+        is_diag_es_enabled,
+    )
 
     args = SimpleNamespace(
         diag_es_target_placement="both",
         diag_es_mtp_placement="off",
+        speculative_num_draft_tokens=None,
     )
     assert get_diag_es_placement(args, is_draft_worker=False) == "both"
     assert get_diag_es_placement(args, is_draft_worker=True) is None
     assert is_diag_es_enabled(args, is_draft_worker=False)
     assert not is_diag_es_enabled(args, is_draft_worker=True)
+    assert get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=False) is None
+    with pytest.raises(ValueError, match="speculative_num_draft_tokens"):
+        get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=True)
+
+    args.speculative_num_draft_tokens = 4
+    assert get_diag_es_mtp_max_correct_drafts(args, is_draft_worker=True) == 3
