@@ -1529,7 +1529,12 @@ class Engine(EngineScoreMixin, EngineBase):
         reward_zscore_epsilon: float = 1e-8,
         max_update_rms_ratio: float = 10.0,
         max_update_abs_max_ratio: float = 100.0,
-        candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous",
+        candidate_schedule: Literal[
+            "contiguous", "round_robin", "block_interleaved"
+        ] = "contiguous",
+        candidate_dwell_attempts: int | None = None,
+        schedule_seed: int | None = None,
+        schedule_lane: int | None = None,
     ) -> Dict[str, Any]:
         return self.loop.run_until_complete(
             self.async_register_diag_es_mtp_session(
@@ -1544,6 +1549,9 @@ class Engine(EngineScoreMixin, EngineBase):
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
                 candidate_schedule=candidate_schedule,
+                candidate_dwell_attempts=candidate_dwell_attempts,
+                schedule_seed=schedule_seed,
+                schedule_lane=schedule_lane,
             )
         )
 
@@ -1559,7 +1567,12 @@ class Engine(EngineScoreMixin, EngineBase):
         reward_zscore_epsilon: float = 1e-8,
         max_update_rms_ratio: float = 10.0,
         max_update_abs_max_ratio: float = 100.0,
-        candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous",
+        candidate_schedule: Literal[
+            "contiguous", "round_robin", "block_interleaved"
+        ] = "contiguous",
+        candidate_dwell_attempts: int | None = None,
+        schedule_seed: int | None = None,
+        schedule_lane: int | None = None,
     ) -> Dict[str, Any]:
         result = await self.tokenizer_manager.diag_es_mtp_session(
             DiagESMTPSessionReqInput(
@@ -1575,6 +1588,9 @@ class Engine(EngineScoreMixin, EngineBase):
                 max_update_rms_ratio=max_update_rms_ratio,
                 max_update_abs_max_ratio=max_update_abs_max_ratio,
                 candidate_schedule=candidate_schedule,
+                candidate_dwell_attempts=candidate_dwell_attempts,
+                schedule_seed=schedule_seed,
+                schedule_lane=schedule_lane,
             )
         )
         return self._unwrap_diag_es_mtp_result(result)

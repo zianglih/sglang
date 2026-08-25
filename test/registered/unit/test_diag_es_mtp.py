@@ -14,6 +14,7 @@ from sglang.srt.diag_es.mtp import (
     _delta_stats,
     _MTPSessionState,
     _require_finite_delta_stats,
+    mtp_block_interleaved_orders,
     mtp_candidate_seed,
     mtp_normal_for_site,
 )
@@ -420,6 +421,147 @@ def test_contiguous_default_keeps_candidate_and_event_sequence():
     assert activations == [(0, 0), (0, 1), (0, 2), (1, 0)]
 
 
+def test_block_interleaved_p4_b4_k8_schedule_and_boundary_transitions():
+    order_seed, visit_0, visit_1 = mtp_block_interleaved_orders(
+        schedule_seed=8,
+        theta_version=0,
+        population_size=4,
+        schedule_lane=0,
+    )
+    assert order_seed == 17395538561835657799
+    assert visit_0 == (0, 1, 2, 3)
+    assert visit_1 == (2, 3, 1, 0)
+    _, lane_1_visit_0, lane_1_visit_1 = mtp_block_interleaved_orders(
+        schedule_seed=8,
+        theta_version=0,
+        population_size=4,
+        schedule_lane=1,
+    )
+    assert lane_1_visit_0 == (1, 2, 3, 0)
+    assert lane_1_visit_1 == (3, 0, 2, 1)
+
+    state = _state(rewards=[])
+    state.config = DiagESMTPSessionConfig(
+        seed=1234,
+        population_size=4,
+        sigma=0.1,
+        learning_rate=0.0,
+        attempts_per_candidate=8,
+        candidate_schedule="block_interleaved",
+        candidate_dwell_attempts=4,
+        schedule_seed=8,
+        schedule_lane=0,
+    )
+    state.active_rid = "rid"
+    state.block_interleaved_accept_sums = [0, 0, 0, 0]
+    state.block_interleaved_attempt_counts = [0, 0, 0, 0]
+    DiagESMTPSessionManager._activate_block_schedule_position(state, 0)
+    manager, activations = _recording_manager(state)
+
+    expected_candidate_blocks = [0, 1, 2, 3, 2, 3, 1, 0]
+    for attempt in range(32):
+        previous_status = manager._session_status(state)
+        reservation = manager.preflight_acceptance_batch([("s", "rid", 1)])
+        block_boundary = (attempt + 1) % 4 == 0
+        assert reservation.expects_kv_replay is block_boundary
+        candidate_completion = block_boundary and attempt >= 16
+        population_completion = attempt == 31
+        assert reservation.acceptance_event_count == (
+            1 + int(candidate_completion) + int(population_completion)
+        )
+        next_status = manager.record_acceptance(
+            session_id="s", rid="rid", accepted_drafts=1
+        )
+        assert (
+            mtp_candidate_requires_kv_replay(previous_status, next_status)
+            is block_boundary
+        )
+        if attempt == 0:
+            assert next_status["candidate_dwell_attempts"] == 4
+            assert next_status["schedule_seed"] == 8
+            assert next_status["schedule_lane"] == 0
+            assert next_status["schedule_order_seed"] == order_seed
+            assert next_status["candidate_visit_orders"] == [
+                [0, 1, 2, 3],
+                [2, 3, 1, 0],
+            ]
+            assert next_status["schedule_position"] == 0
+            assert next_status["visit_index"] == 0
+            assert next_status["block_attempt_index"] == 1
+            assert next_status["latest_attempt_block_attempt_index"] == 1
+        if block_boundary:
+            manager.record_kv_replay(
+                acceptance_batch_reservation=reservation,
+                session_ids=["s"],
+                request_rows=[5],
+                replayed_rows=5,
+                enqueue_time_ms=0.1,
+            )
+        else:
+            manager.finish_acceptance_batch(reservation)
+
+    events = manager.drain_events()["events"]
+    verify_events = [event for event in events if event["event"] == "verify_attempt"]
+    completed_events = [
+        event for event in events if event["event"] == "candidate_completed"
+    ]
+    update_events = [event for event in events if event["event"] == "update_committed"]
+    replay_events = [
+        event for event in events if event["event"] == "draft_kv_prefix_replay"
+    ]
+    assert [event["population_index"] for event in verify_events] == [
+        candidate for candidate in expected_candidate_blocks for _ in range(4)
+    ]
+    assert [event["visit_index"] for event in verify_events] == [0] * 16 + [1] * 16
+    assert [event["block_attempt_index"] for event in verify_events] == [
+        1,
+        2,
+        3,
+        4,
+    ] * 8
+    assert [event["schedule_position"] for event in verify_events] == [
+        position for position in range(8) for _ in range(4)
+    ]
+    assert {event["schedule_order_seed"] for event in verify_events} == {order_seed}
+    assert [event["attempt_index"] for event in verify_events] == (
+        [1, 2, 3, 4] * 4 + [5, 6, 7, 8] * 4
+    )
+    assert [event["population_index"] for event in completed_events] == [2, 3, 1, 0]
+    assert all(event["attempts"] == 8 for event in completed_events)
+    assert len(update_events) == 1
+    assert update_events[0]["theta_version"] == 0
+    assert len(replay_events) == 8
+    assert activations[:8] == [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (0, 2),
+        (0, 3),
+        (0, 1),
+        (0, 0),
+    ]
+    assert len(activations) == 9
+    assert activations[-1][0] == 1
+    assert all(
+        event["perturbation_seed"]
+        == mtp_candidate_seed(1234, 0, event["population_index"])
+        for event in verify_events
+    )
+    assert state.theta_version == 1
+    assert state.total_attempts == 32
+    assert state.block_schedule_position == 0
+    assert state.block_attempt_index == 0
+    theta_1_order_seed, theta_1_visit_0, _ = mtp_block_interleaved_orders(
+        schedule_seed=8,
+        theta_version=1,
+        population_size=4,
+        schedule_lane=0,
+    )
+    assert state.block_schedule_order_seed == theta_1_order_seed
+    assert state.population_index == theta_1_visit_0[0]
+
+
 def test_theta_stats_are_recomputed_at_population_update_only(monkeypatch):
     state = _state(rewards=[])
     state.config = DiagESMTPSessionConfig(
@@ -470,6 +612,43 @@ def test_round_robin_registration_io_and_config_validation():
     with pytest.raises(ValueError, match="candidate_schedule"):
         DiagESMTPSessionConfig(seed=1, candidate_schedule="invalid")
 
+    block_request = DiagESMTPSessionReqInput(
+        action="register",
+        session_id="block",
+        seed=1,
+        attempts_per_candidate=8,
+        candidate_schedule="block_interleaved",
+        candidate_dwell_attempts=4,
+        schedule_seed=-9,
+        schedule_lane=3,
+    )
+    assert block_request.candidate_dwell_attempts == 4
+    assert block_request.schedule_seed == -9
+    assert block_request.schedule_lane == 3
+    with pytest.raises(ValueError, match="provided together"):
+        DiagESMTPSessionReqInput(
+            action="register",
+            session_id="block",
+            seed=1,
+            candidate_schedule="block_interleaved",
+            schedule_seed=9,
+        )
+    with pytest.raises(ValueError, match=r"2 \* candidate_dwell_attempts"):
+        DiagESMTPSessionConfig(
+            seed=1,
+            attempts_per_candidate=7,
+            candidate_schedule="block_interleaved",
+            candidate_dwell_attempts=4,
+            schedule_seed=9,
+            schedule_lane=0,
+        )
+    with pytest.raises(ValueError, match="block scheduling fields"):
+        DiagESMTPSessionConfig(
+            seed=1,
+            schedule_seed=9,
+            schedule_lane=0,
+        )
+
 
 def test_engine_api_propagates_round_robin_registration():
     from sglang.srt.entrypoints.engine import Engine
@@ -493,6 +672,23 @@ def test_engine_api_propagates_round_robin_registration():
 
     assert status == {"ok": True}
     assert captured["request"].candidate_schedule == "round_robin"
+
+    status = asyncio.run(
+        engine.async_register_diag_es_mtp_session(
+            session_id="block",
+            seed=1,
+            attempts_per_candidate=8,
+            candidate_schedule="block_interleaved",
+            candidate_dwell_attempts=4,
+            schedule_seed=88,
+            schedule_lane=2,
+        )
+    )
+    assert status == {"ok": True}
+    assert captured["request"].candidate_schedule == "block_interleaved"
+    assert captured["request"].candidate_dwell_attempts == 4
+    assert captured["request"].schedule_seed == 88
+    assert captured["request"].schedule_lane == 2
 
 
 def test_target_and_mtp_managers_are_role_keyed(monkeypatch):

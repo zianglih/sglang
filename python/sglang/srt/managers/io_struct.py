@@ -1833,16 +1833,64 @@ class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
     reward_zscore_epsilon: float = 1e-8
     max_update_rms_ratio: float = 10.0
     max_update_abs_max_ratio: float = 100.0
-    candidate_schedule: Literal["contiguous", "round_robin"] = "contiguous"
+    candidate_schedule: Literal["contiguous", "round_robin", "block_interleaved"] = (
+        "contiguous"
+    )
+    candidate_dwell_attempts: Optional[int] = None
+    schedule_seed: Optional[int] = None
+    schedule_lane: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.action == "register":
             if self.session_id is None or self.seed is None:
                 raise ValueError("MTP session register requires session_id and seed")
-            if self.candidate_schedule not in ("contiguous", "round_robin"):
+            if self.candidate_schedule not in (
+                "contiguous",
+                "round_robin",
+                "block_interleaved",
+            ):
                 raise ValueError(
-                    "MTP session candidate_schedule must be 'contiguous' or "
-                    "'round_robin'"
+                    "MTP session candidate_schedule must be 'contiguous', "
+                    "'round_robin', or 'block_interleaved'"
+                )
+            schedule_pair = (self.schedule_seed, self.schedule_lane)
+            if (schedule_pair[0] is None) != (schedule_pair[1] is None):
+                raise ValueError(
+                    "MTP session schedule_seed and schedule_lane must be provided "
+                    "together"
+                )
+            for name, value in zip(("schedule_seed", "schedule_lane"), schedule_pair):
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool)
+                ):
+                    raise ValueError(f"MTP session {name} must be an integer")
+            if self.candidate_schedule == "block_interleaved":
+                if self.schedule_seed is None:
+                    raise ValueError(
+                        "MTP session block_interleaved requires schedule_seed and "
+                        "schedule_lane"
+                    )
+                if (
+                    not isinstance(self.candidate_dwell_attempts, int)
+                    or isinstance(self.candidate_dwell_attempts, bool)
+                    or self.candidate_dwell_attempts < 1
+                ):
+                    raise ValueError(
+                        "MTP session block_interleaved candidate_dwell_attempts "
+                        "must be a positive integer"
+                    )
+                if self.attempts_per_candidate != 2 * self.candidate_dwell_attempts:
+                    raise ValueError(
+                        "MTP session block_interleaved currently requires "
+                        "attempts_per_candidate == 2 * candidate_dwell_attempts"
+                    )
+            elif (
+                self.candidate_dwell_attempts is not None
+                or self.schedule_seed is not None
+            ):
+                raise ValueError(
+                    "MTP session block scheduling fields require "
+                    "candidate_schedule='block_interleaved'"
                 )
         elif self.action == "retire":
             if self.session_id is None:

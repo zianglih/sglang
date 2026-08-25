@@ -12,8 +12,9 @@ import torch
 from sglang.srt.diag_es.manifest import DiagESManifest
 
 MTP_RNG_VERSION = "numpy-philox-site-v1"
+MTP_SCHEDULE_RNG_VERSION = "numpy-philox-block-interleaved-v1"
 MTP_MAX_PENDING_EVENTS = 1_000_000
-MTPCandidateSchedule = Literal["contiguous", "round_robin"]
+MTPCandidateSchedule = Literal["contiguous", "round_robin", "block_interleaved"]
 
 
 class DiagESMTPSessionError(RuntimeError):
@@ -42,6 +43,43 @@ def mtp_candidate_seed(root_seed: int, theta_version: int, population_index: int
     return _stable_u64("candidate", root_seed, theta_version, population_index)
 
 
+def mtp_schedule_order_seed(schedule_seed: int, theta_version: int) -> int:
+    """Derive the Philox seed for one theta's candidate-order permutation."""
+
+    return _stable_u64(MTP_SCHEDULE_RNG_VERSION, schedule_seed, theta_version)
+
+
+def mtp_block_interleaved_orders(
+    *,
+    schedule_seed: int,
+    theta_version: int,
+    population_size: int,
+    schedule_lane: int,
+) -> tuple[int, tuple[int, ...], tuple[int, ...]]:
+    """Build a deterministic two-visit, boundary-safe candidate schedule.
+
+    Lanes are left rotations of one paired base permutation. The second visit
+    reverses the first and swaps its first two entries, so the two visits never
+    put the same candidate on both sides of their shared boundary.
+    """
+
+    order_seed = mtp_schedule_order_seed(schedule_seed, theta_version)
+    generator = np.random.Generator(np.random.Philox(order_seed))
+    base_order = tuple(
+        int(index) for index in generator.permutation(population_size).tolist()
+    )
+    offset = schedule_lane % population_size
+    visit_0 = base_order[offset:] + base_order[:offset]
+    visit_1_values = list(reversed(visit_0))
+    visit_1_values[0], visit_1_values[1] = visit_1_values[1], visit_1_values[0]
+    visit_1 = tuple(visit_1_values)
+    if visit_0[-1] == visit_1[0]:
+        raise DiagESMTPSessionError(
+            "MTP block-interleaved schedule repeated a candidate at the visit boundary"
+        )
+    return order_seed, visit_0, visit_1
+
+
 def mtp_normal_for_site(
     seed: int, site_id: str, shape: tuple[int, ...]
 ) -> torch.Tensor:
@@ -62,6 +100,9 @@ class DiagESMTPSessionConfig:
     max_update_rms_ratio: float = 10.0
     max_update_abs_max_ratio: float = 100.0
     candidate_schedule: MTPCandidateSchedule = "contiguous"
+    candidate_dwell_attempts: int | None = None
+    schedule_seed: int | None = None
+    schedule_lane: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
@@ -76,10 +117,49 @@ class DiagESMTPSessionConfig:
             raise ValueError(
                 "MTP diagonal ES supports only estimator='population_zscore'"
             )
-        if self.candidate_schedule not in ("contiguous", "round_robin"):
+        valid_schedules = ("contiguous", "round_robin", "block_interleaved")
+        if self.candidate_schedule not in valid_schedules:
             raise ValueError(
-                "MTP diagonal-ES candidate_schedule must be 'contiguous' or "
-                "'round_robin'"
+                "MTP diagonal-ES candidate_schedule must be 'contiguous', "
+                "'round_robin', or 'block_interleaved'"
+            )
+        schedule_pair = (self.schedule_seed, self.schedule_lane)
+        if (schedule_pair[0] is None) != (schedule_pair[1] is None):
+            raise ValueError(
+                "MTP diagonal-ES schedule_seed and schedule_lane must be provided "
+                "together"
+            )
+        for name, value in zip(("schedule_seed", "schedule_lane"), schedule_pair):
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool)
+            ):
+                raise ValueError(f"MTP diagonal-ES {name} must be an integer")
+        if self.candidate_schedule == "block_interleaved":
+            if self.schedule_seed is None:
+                raise ValueError(
+                    "MTP diagonal-ES block_interleaved requires schedule_seed and "
+                    "schedule_lane"
+                )
+            if (
+                not isinstance(self.candidate_dwell_attempts, int)
+                or isinstance(self.candidate_dwell_attempts, bool)
+                or self.candidate_dwell_attempts < 1
+            ):
+                raise ValueError(
+                    "MTP diagonal-ES block_interleaved candidate_dwell_attempts "
+                    "must be a positive integer"
+                )
+            if self.attempts_per_candidate != 2 * self.candidate_dwell_attempts:
+                raise ValueError(
+                    "MTP diagonal-ES block_interleaved currently requires "
+                    "attempts_per_candidate == 2 * candidate_dwell_attempts"
+                )
+        elif (
+            self.candidate_dwell_attempts is not None or self.schedule_seed is not None
+        ):
+            raise ValueError(
+                "MTP diagonal-ES block scheduling fields require "
+                "candidate_schedule='block_interleaved'"
             )
         for name, value, allow_zero in (
             ("sigma", self.sigma, True),
@@ -123,6 +203,17 @@ class _MTPSessionState:
     last_released_rid: str | None = None
     round_robin_accept_sums: list[int] = field(default_factory=list)
     round_robin_attempt_counts: list[int] = field(default_factory=list)
+    block_interleaved_accept_sums: list[int] = field(default_factory=list)
+    block_interleaved_attempt_counts: list[int] = field(default_factory=list)
+    block_schedule_position: int = 0
+    block_attempt_index: int = 0
+    block_schedule_order_seed: int | None = None
+    block_visit_0: tuple[int, ...] = ()
+    block_visit_1: tuple[int, ...] = ()
+    latest_attempt_visit_index: int | None = None
+    latest_attempt_block_attempt_index: int | None = None
+    latest_attempt_schedule_position: int | None = None
+    latest_attempt_schedule_order_seed: int | None = None
     theta_stats: dict[str, Any] = field(default_factory=dict)
     effective_delta_stats: dict[str, Any] = field(default_factory=dict)
 
@@ -431,6 +522,76 @@ class DiagESMTPSessionManager:
         return state
 
     @staticmethod
+    def _block_interleaved_schedule(
+        state: _MTPSessionState,
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...]]:
+        config = state.config
+        if config.schedule_seed is None or config.schedule_lane is None:
+            raise DiagESMTPSessionError(
+                "MTP block-interleaved session is missing its paired schedule "
+                "configuration"
+            )
+        order_seed = mtp_schedule_order_seed(config.schedule_seed, state.theta_version)
+        if (
+            state.block_schedule_order_seed == order_seed
+            and len(state.block_visit_0) == config.population_size
+            and len(state.block_visit_1) == config.population_size
+        ):
+            return order_seed, state.block_visit_0, state.block_visit_1
+        result = mtp_block_interleaved_orders(
+            schedule_seed=config.schedule_seed,
+            theta_version=state.theta_version,
+            population_size=config.population_size,
+            schedule_lane=config.schedule_lane,
+        )
+        state.block_schedule_order_seed, state.block_visit_0, state.block_visit_1 = (
+            result
+        )
+        return result
+
+    @staticmethod
+    def _prepare_block_interleaved_tracking(state: _MTPSessionState) -> None:
+        population_size = state.config.population_size
+        if (
+            not state.block_interleaved_accept_sums
+            and not state.block_interleaved_attempt_counts
+        ):
+            state.block_interleaved_accept_sums = [0] * population_size
+            state.block_interleaved_attempt_counts = [0] * population_size
+        if (
+            len(state.block_interleaved_accept_sums) != population_size
+            or len(state.block_interleaved_attempt_counts) != population_size
+        ):
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES block-interleaved accounting does not match the "
+                f"population size {population_size}"
+            )
+
+    @classmethod
+    def _activate_block_schedule_position(
+        cls, state: _MTPSessionState, schedule_position: int
+    ) -> None:
+        population_size = state.config.population_size
+        if schedule_position < 0 or schedule_position >= 2 * population_size:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES block schedule position is out of range"
+            )
+        cls._prepare_block_interleaved_tracking(state)
+        _, visit_0, visit_1 = cls._block_interleaved_schedule(state)
+        visit_index, visit_position = divmod(schedule_position, population_size)
+        order = visit_0 if visit_index == 0 else visit_1
+        population_index = order[visit_position]
+        state.block_schedule_position = schedule_position
+        state.block_attempt_index = 0
+        state.population_index = population_index
+        state.candidate_attempts = state.block_interleaved_attempt_counts[
+            population_index
+        ]
+        state.candidate_accept_sum = state.block_interleaved_accept_sums[
+            population_index
+        ]
+
+    @staticmethod
     def _acceptance_event_plan(state: _MTPSessionState) -> tuple[int, bool]:
         if state.config.candidate_schedule == "round_robin":
             counts = state.round_robin_attempt_counts
@@ -454,6 +615,25 @@ class DiagESMTPSessionManager:
             # Round-robin advances to a different population member after every
             # attempt. Sigma-zero controls are the sole effective-identity case.
             changes_candidate = state.config.sigma != 0.0
+        elif state.config.candidate_schedule == "block_interleaved":
+            dwell_attempts = state.config.candidate_dwell_attempts
+            if dwell_attempts is None:
+                raise DiagESMTPSessionError(
+                    "MTP block-interleaved session is missing dwell attempts"
+                )
+            completing_block = state.block_attempt_index + 1 == dwell_attempts
+            if state.block_attempt_index + 1 > dwell_attempts:
+                raise DiagESMTPSessionError(
+                    "MTP diagonal-ES block attempt count exceeded its limit"
+                )
+            visit_index = state.block_schedule_position // state.config.population_size
+            completing_candidate = completing_block and visit_index == 1
+            completing_population = (
+                completing_candidate
+                and state.block_schedule_position
+                == 2 * state.config.population_size - 1
+            )
+            changes_candidate = state.config.sigma != 0.0 and completing_block
         else:
             completing_candidate = (
                 state.candidate_attempts + 1
@@ -577,8 +757,12 @@ class DiagESMTPSessionManager:
             rewarded_noise_sum_dense=_zeros_like_map(theta_dense),
             round_robin_accept_sums=[0] * config.population_size,
             round_robin_attempt_counts=[0] * config.population_size,
+            block_interleaved_accept_sums=[0] * config.population_size,
+            block_interleaved_attempt_counts=[0] * config.population_size,
             theta_stats=_delta_stats(theta_dense),
         )
+        if config.candidate_schedule == "block_interleaved":
+            self._activate_block_schedule_position(state, 0)
         if config.sigma == 0.0:
             # Banks are allocated as exact zeros and retired slots are zeroed
             # before reuse. Identity controls therefore need no upload/sync.
@@ -596,8 +780,19 @@ class DiagESMTPSessionManager:
             state,
             resident_slot=slot,
             theta_version=0,
-            population_index=0,
+            population_index=state.population_index,
             perturbation_seed=state.perturbation_seed,
+            **(
+                {
+                    "candidate_schedule": config.candidate_schedule,
+                    "candidate_dwell_attempts": config.candidate_dwell_attempts,
+                    "schedule_seed": config.schedule_seed,
+                    "schedule_lane": config.schedule_lane,
+                    "schedule_order_seed": state.block_schedule_order_seed,
+                }
+                if config.candidate_schedule == "block_interleaved"
+                else {}
+            ),
         )
         return self._session_status(state)
 
@@ -866,6 +1061,12 @@ class DiagESMTPSessionManager:
         state.candidate_accept_sum = 0
         state.round_robin_accept_sums = [0] * state.config.population_size
         state.round_robin_attempt_counts = [0] * state.config.population_size
+        state.block_interleaved_accept_sums = [0] * state.config.population_size
+        state.block_interleaved_attempt_counts = [0] * state.config.population_size
+        state.block_schedule_position = 0
+        state.block_attempt_index = 0
+        if state.config.candidate_schedule == "block_interleaved":
+            self._activate_block_schedule_position(state, 0)
         self._clear_accumulators(state)
         if state.config.sigma != 0.0:
             self._upload_candidate(state)
@@ -964,6 +1165,131 @@ class DiagESMTPSessionManager:
             self._upload_candidate(state)
         return self._session_status(state)
 
+    def _record_acceptance_block_interleaved(
+        self,
+        *,
+        state: _MTPSessionState,
+        rid: str,
+        accepted_drafts: int,
+    ) -> dict[str, Any]:
+        """Record one attempt in a two-visit candidate schedule.
+
+        ``schedule_position`` is the zero-based global block ordinal in
+        ``[0, 2 * population_size)``; it does not reset for visit 1.
+        """
+
+        self._prepare_block_interleaved_tracking(state)
+        config = state.config
+        dwell_attempts = config.candidate_dwell_attempts
+        if dwell_attempts is None:
+            raise DiagESMTPSessionError(
+                "MTP block-interleaved session is missing dwell attempts"
+            )
+        order_seed, visit_0, visit_1 = self._block_interleaved_schedule(state)
+        visit_index, visit_position = divmod(
+            state.block_schedule_position, config.population_size
+        )
+        order = visit_0 if visit_index == 0 else visit_1
+        population_index = order[visit_position]
+        if state.population_index != population_index:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES active candidate disagrees with its block schedule"
+            )
+
+        block_attempt_index = state.block_attempt_index + 1
+        attempt_count = state.block_interleaved_attempt_counts[population_index] + 1
+        completing_block = block_attempt_index == dwell_attempts
+        completing_candidate = completing_block and visit_index == 1
+        completing_population = (
+            completing_candidate
+            and state.block_schedule_position == 2 * config.population_size - 1
+        )
+        if block_attempt_index > dwell_attempts:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES block attempt count exceeded its limit"
+            )
+        if attempt_count > config.attempts_per_candidate:
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES candidate attempt count exceeded its limit"
+            )
+        if completing_candidate != (attempt_count == config.attempts_per_candidate):
+            raise DiagESMTPSessionError(
+                "MTP diagonal-ES block schedule candidate completion is inconsistent"
+            )
+        self._reserve_event_capacity(
+            1 + int(completing_candidate) + int(completing_population)
+        )
+
+        state.block_interleaved_attempt_counts[population_index] = attempt_count
+        state.block_interleaved_accept_sums[population_index] += accepted_drafts
+        state.block_attempt_index = block_attempt_index
+        state.candidate_attempts = attempt_count
+        state.candidate_accept_sum = state.block_interleaved_accept_sums[
+            population_index
+        ]
+        state.total_attempts += 1
+        state.latest_accept_length = accepted_drafts + 1
+        state.latest_accepted_drafts = accepted_drafts
+        state.latest_attempt_theta_version = state.theta_version
+        state.latest_attempt_population_index = population_index
+        state.latest_attempt_perturbation_seed = state.perturbation_seed
+        state.latest_attempt_visit_index = visit_index
+        state.latest_attempt_block_attempt_index = block_attempt_index
+        state.latest_attempt_schedule_position = state.block_schedule_position
+        state.latest_attempt_schedule_order_seed = order_seed
+        self._emit(
+            "verify_attempt",
+            state,
+            rid=rid,
+            theta_version=state.theta_version,
+            population_index=population_index,
+            perturbation_seed=state.perturbation_seed,
+            attempt_index=attempt_count,
+            visit_index=visit_index,
+            block_attempt_index=block_attempt_index,
+            schedule_position=state.block_schedule_position,
+            schedule_order_seed=order_seed,
+            accepted_drafts=accepted_drafts,
+            accept_length=accepted_drafts + 1,
+            total_attempts=state.total_attempts,
+        )
+
+        if completing_candidate:
+            candidate_reward = (
+                state.block_interleaved_accept_sums[population_index]
+                / config.attempts_per_candidate
+            )
+            state.candidate_rewards.append(candidate_reward)
+            self._accumulate_noise(state, candidate_reward)
+            self._emit(
+                "candidate_completed",
+                state,
+                rid=rid,
+                theta_version=state.theta_version,
+                population_index=population_index,
+                perturbation_seed=state.perturbation_seed,
+                attempts=attempt_count,
+                visit_index=visit_index,
+                schedule_position=state.block_schedule_position,
+                schedule_order_seed=order_seed,
+                candidate_reward_mean=candidate_reward,
+                candidate_rewards=list(state.candidate_rewards),
+                effective_delta_stats_aggregate=state.effective_delta_stats.get(
+                    "aggregate", {}
+                ),
+            )
+
+        if completing_population:
+            return self._finish_population_update(state=state, rid=rid)
+
+        if completing_block:
+            self._activate_block_schedule_position(
+                state, state.block_schedule_position + 1
+            )
+            if config.sigma != 0.0:
+                self._upload_candidate(state)
+        return self._session_status(state)
+
     def record_acceptance(
         self,
         *,
@@ -1021,6 +1347,12 @@ class DiagESMTPSessionManager:
 
         if state.config.candidate_schedule == "round_robin":
             return self._record_acceptance_round_robin(
+                state=state,
+                rid=rid,
+                accepted_drafts=accepted_drafts,
+            )
+        if state.config.candidate_schedule == "block_interleaved":
+            return self._record_acceptance_block_interleaved(
                 state=state,
                 rid=rid,
                 accepted_drafts=accepted_drafts,
@@ -1154,9 +1486,44 @@ class DiagESMTPSessionManager:
             },
         }
 
-    @staticmethod
-    def _session_status(state: _MTPSessionState) -> dict[str, Any]:
+    @classmethod
+    def _session_status(cls, state: _MTPSessionState) -> dict[str, Any]:
         config = state.config
+        block_status: dict[str, Any] = {}
+        if config.candidate_schedule == "block_interleaved":
+            order_seed, visit_0, visit_1 = cls._block_interleaved_schedule(state)
+            block_status = {
+                "candidate_dwell_attempts": config.candidate_dwell_attempts,
+                "schedule_seed": config.schedule_seed,
+                "schedule_lane": config.schedule_lane,
+                "schedule_rng_version": MTP_SCHEDULE_RNG_VERSION,
+                "schedule_order_seed": order_seed,
+                "schedule_position": state.block_schedule_position,
+                "visit_index": (
+                    state.block_schedule_position // config.population_size
+                ),
+                "visit_schedule_position": (
+                    state.block_schedule_position % config.population_size
+                ),
+                "block_attempt_index": state.block_attempt_index,
+                "candidate_visit_orders": [list(visit_0), list(visit_1)],
+                "block_interleaved_attempt_counts": list(
+                    state.block_interleaved_attempt_counts
+                ),
+                "block_interleaved_accept_sums": list(
+                    state.block_interleaved_accept_sums
+                ),
+                "latest_attempt_visit_index": state.latest_attempt_visit_index,
+                "latest_attempt_block_attempt_index": (
+                    state.latest_attempt_block_attempt_index
+                ),
+                "latest_attempt_schedule_position": (
+                    state.latest_attempt_schedule_position
+                ),
+                "latest_attempt_schedule_order_seed": (
+                    state.latest_attempt_schedule_order_seed
+                ),
+            }
         return {
             "session_id": state.session_id,
             "resident_slot": state.resident_slot,
@@ -1215,4 +1582,5 @@ class DiagESMTPSessionManager:
                 if config.candidate_schedule == "round_robin"
                 else {}
             ),
+            **block_status,
         }
