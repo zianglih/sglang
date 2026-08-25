@@ -3908,7 +3908,7 @@ class ServerArgs:
             "moe_a2a_backend": (view.moe_a2a_backend, "none"),
             "bf16_gemm_backend": (view.bf16_gemm_backend, "triton"),
             "quantization": (view.quantization, None),
-            "attention_backend": (view.attention_backend, "flashinfer"),
+            "attention_backend": (view.attention_backend, "triton"),
             "decode_attention_backend": (view.decode_attention_backend, None),
             "prefill_attention_backend": (view.prefill_attention_backend, None),
             "enable_torch_compile": (view.enable_torch_compile, False),
@@ -3962,7 +3962,7 @@ class ServerArgs:
         if mismatches:
             raise ValueError(
                 "MTP diagonal ES supports only the local TP1/DP1 "
-                "JoyAI BF16 FlashInfer-attention/Triton-GEMM runtime contract: "
+                "JoyAI BF16 Triton-attention/GEMM runtime contract: "
                 + ", ".join(mismatches)
             )
 

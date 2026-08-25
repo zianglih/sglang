@@ -196,7 +196,7 @@ def test_mtp_diag_es_runtime_allows_target_moe_backend_auto():
         _resolved=lambda: _runtime_view(
             speculative_algorithm="EAGLE",
             moe_runner_backend="auto",
-            attention_backend="flashinfer",
+            attention_backend="triton",
         ),
     )
     subject._handle_diag_es_mtp_runtime_contract = lambda: (
@@ -215,7 +215,7 @@ def test_mtp_diag_es_runtime_allows_official_topk2_shape():
             speculative_num_steps=2,
             speculative_num_draft_tokens=3,
             speculative_eagle_topk=2,
-            attention_backend="flashinfer",
+            attention_backend="triton",
             page_size=64,
         ),
     )
@@ -223,6 +223,23 @@ def test_mtp_diag_es_runtime_allows_official_topk2_shape():
         ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
     )
     ServerArgs._handle_diag_es_runtime_contract(subject)
+
+
+def test_mtp_diag_es_rejects_flashinfer_tree_path():
+    subject = SimpleNamespace(
+        diag_es_target_placement="off",
+        diag_es_mtp_placement="both",
+        diag_es_mtp_max_sessions=64,
+        _resolved=lambda: _runtime_view(
+            speculative_algorithm="EAGLE",
+            speculative_num_steps=2,
+            speculative_num_draft_tokens=3,
+            speculative_eagle_topk=2,
+            attention_backend="flashinfer",
+        ),
+    )
+    with pytest.raises(ValueError, match="attention_backend='flashinfer'"):
+        ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
 
 
 def test_mtp_diag_es_rejects_topk2_trtllm_mla_page_tree():
@@ -259,11 +276,11 @@ def test_mtp_diag_es_rejects_external_cache_backends(field, value):
         diag_es_mtp_max_sessions=64,
         _resolved=lambda: _runtime_view(
             speculative_algorithm="EAGLE",
-            attention_backend="flashinfer",
+            attention_backend="triton",
             **{field: value},
         ),
     )
-    with pytest.raises(ValueError, match="FlashInfer-attention/Triton-GEMM"):
+    with pytest.raises(ValueError, match="Triton-attention/GEMM"):
         ServerArgs._handle_diag_es_mtp_runtime_contract(subject)
 
 
@@ -274,7 +291,7 @@ def test_mtp_diag_es_rejects_multi_layer_eagle():
         diag_es_mtp_max_sessions=64,
         _resolved=lambda: _runtime_view(
             speculative_algorithm="EAGLE",
-            attention_backend="flashinfer",
+            attention_backend="triton",
             enable_multi_layer_eagle=True,
         ),
     )
