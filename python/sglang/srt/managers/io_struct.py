@@ -37,6 +37,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    Mapping,
     Optional,
     Tuple,
     Type,
@@ -1822,7 +1823,15 @@ class DiagESRegistryReqOutput(BaseReq, kw_only=True):
 
 
 class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
-    action: Literal["register", "retire", "status", "drain_events"]
+    action: Literal[
+        "register",
+        "retire",
+        "status",
+        "read_events",
+        "ack_events",
+        "export_state",
+        "import_state",
+    ]
     session_id: Optional[str] = None
     seed: Optional[int] = None
     population_size: int = 16
@@ -1841,11 +1850,31 @@ class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
     schedule_lane: Optional[int] = None
     max_theta_rms_ratio: Optional[float] = None
     max_theta_abs_max_ratio: Optional[float] = None
+    # Appended to preserve the existing array-like IPC field order.
+    session_state: Optional[PickleWrapper] = None
+    engine_epoch: Optional[str] = None
+    after_event_id: Optional[int] = None
+    event_limit: Optional[int] = None
+    through_event_id: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.action == "register":
+        event_fields = (
+            self.engine_epoch,
+            self.after_event_id,
+            self.event_limit,
+            self.through_event_id,
+        )
+        if self.action not in ("read_events", "ack_events") and any(
+            value is not None for value in event_fields
+        ):
+            raise ValueError(
+                f"MTP session {self.action} does not accept event cursor fields"
+            )
+        if self.action in ("register", "import_state"):
             if self.session_id is None or self.seed is None:
-                raise ValueError("MTP session register requires session_id and seed")
+                raise ValueError(
+                    f"MTP session {self.action} requires session_id and seed"
+                )
             if self.candidate_schedule not in (
                 "contiguous",
                 "round_robin",
@@ -1894,10 +1923,82 @@ class DiagESMTPSessionReqInput(BaseReq, kw_only=True):
                     "MTP session block scheduling fields require "
                     "candidate_schedule='block_interleaved'"
                 )
+            if self.action == "import_state":
+                materialized_state = unwrap_from_pickle(self.session_state)
+                if not isinstance(materialized_state, Mapping):
+                    raise ValueError(
+                        "MTP session import_state requires a session_state mapping"
+                    )
+                if not isinstance(self.session_state, PickleWrapper):
+                    self.session_state = wrap_as_pickle(materialized_state)
+            elif self.session_state is not None:
+                raise ValueError("MTP session register does not accept session_state")
         elif self.action == "retire":
             if self.session_id is None:
                 raise ValueError("MTP session retire requires session_id")
-        elif self.action not in ("status", "drain_events"):
+            if self.session_state is not None:
+                raise ValueError("MTP session retire does not accept session_state")
+        elif self.action == "export_state":
+            if self.session_id is None:
+                raise ValueError("MTP session export_state requires session_id")
+            if self.session_state is not None:
+                raise ValueError(
+                    "MTP session export_state does not accept session_state"
+                )
+        elif self.action == "read_events":
+            if self.session_id is not None or self.session_state is not None:
+                raise ValueError(
+                    "MTP session read_events is engine-global and does not accept "
+                    "session_id or session_state"
+                )
+            if (
+                not isinstance(self.engine_epoch, str)
+                or not self.engine_epoch.strip()
+                or "\0" in self.engine_epoch
+            ):
+                raise ValueError(
+                    "MTP session read_events requires a non-empty engine_epoch"
+                )
+            if type(self.after_event_id) is not int or self.after_event_id < 0:
+                raise ValueError(
+                    "MTP session read_events requires a non-negative after_event_id"
+                )
+            if type(self.event_limit) is not int or self.event_limit < 1:
+                raise ValueError(
+                    "MTP session read_events requires a positive event_limit"
+                )
+            if self.through_event_id is not None:
+                raise ValueError(
+                    "MTP session read_events does not accept through_event_id"
+                )
+        elif self.action == "ack_events":
+            if self.session_id is not None or self.session_state is not None:
+                raise ValueError(
+                    "MTP session ack_events is engine-global and does not accept "
+                    "session_id or session_state"
+                )
+            if (
+                not isinstance(self.engine_epoch, str)
+                or not self.engine_epoch.strip()
+                or "\0" in self.engine_epoch
+            ):
+                raise ValueError(
+                    "MTP session ack_events requires a non-empty engine_epoch"
+                )
+            if type(self.through_event_id) is not int or self.through_event_id < 0:
+                raise ValueError(
+                    "MTP session ack_events requires a non-negative through_event_id"
+                )
+            if self.after_event_id is not None or self.event_limit is not None:
+                raise ValueError(
+                    "MTP session ack_events does not accept read cursor fields"
+                )
+        elif self.action == "status":
+            if self.session_state is not None:
+                raise ValueError(
+                    f"MTP session {self.action} does not accept session_state"
+                )
+        else:
             raise ValueError(f"unsupported MTP session action: {self.action!r}")
 
 
@@ -1905,6 +2006,7 @@ class DiagESMTPSessionReqOutput(BaseReq, kw_only=True):
     success: bool
     message: str
     status: Dict[str, Any]
+    session_state_export: Optional[PickleWrapper] = None
 
 
 class InitWeightsSendGroupForRemoteInstanceReqInput(BaseReq, kw_only=True):

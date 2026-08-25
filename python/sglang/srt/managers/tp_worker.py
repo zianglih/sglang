@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Mapping, Optional, Tuple
 
 import torch
 
@@ -38,6 +38,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    unwrap_from_pickle,
 )
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
@@ -241,29 +242,63 @@ class BaseTpWorker(ABC):
         manager = get_diag_es_mtp_manager()
         if recv_req.action == "status":
             return manager.status(recv_req.session_id)
-        if recv_req.action == "drain_events":
-            return manager.drain_events(recv_req.session_id)
         if recv_req.action == "retire":
             return manager.retire_session(recv_req.session_id)
+        if recv_req.action in (
+            "read_events",
+            "ack_events",
+            "export_state",
+            "import_state",
+        ):
+            tp_size = getattr(getattr(self, "ps", None), "tp_size", None)
+            if tp_size != 1:
+                raise RuntimeError(
+                    "MTP diagonal-ES event/state control supports only TP1; "
+                    f"got tp_size={tp_size!r}"
+                )
+        if recv_req.action == "read_events":
+            return manager.read_events(
+                engine_epoch=recv_req.engine_epoch,
+                after_event_id=recv_req.after_event_id,
+                limit=recv_req.event_limit,
+            )
+        if recv_req.action == "ack_events":
+            return manager.ack_events(
+                engine_epoch=recv_req.engine_epoch,
+                through_event_id=recv_req.through_event_id,
+            )
+        if recv_req.action == "export_state":
+            return manager.export_session_state_with_frontier(recv_req.session_id)
+
+        config = DiagESMTPSessionConfig(
+            seed=recv_req.seed,
+            population_size=recv_req.population_size,
+            sigma=recv_req.sigma,
+            learning_rate=recv_req.learning_rate,
+            attempts_per_candidate=recv_req.attempts_per_candidate,
+            estimator=recv_req.estimator,
+            reward_zscore_epsilon=recv_req.reward_zscore_epsilon,
+            max_update_rms_ratio=recv_req.max_update_rms_ratio,
+            max_update_abs_max_ratio=recv_req.max_update_abs_max_ratio,
+            max_theta_rms_ratio=recv_req.max_theta_rms_ratio,
+            max_theta_abs_max_ratio=recv_req.max_theta_abs_max_ratio,
+            candidate_schedule=recv_req.candidate_schedule,
+            candidate_dwell_attempts=recv_req.candidate_dwell_attempts,
+            schedule_seed=recv_req.schedule_seed,
+            schedule_lane=recv_req.schedule_lane,
+        )
+        if recv_req.action == "import_state":
+            snapshot = unwrap_from_pickle(recv_req.session_state)
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("MTP session_state must materialize to a mapping")
+            return manager.import_session_state(
+                session_id=recv_req.session_id,
+                config=config,
+                snapshot=snapshot,
+            )
         return manager.register_session(
             session_id=recv_req.session_id,
-            config=DiagESMTPSessionConfig(
-                seed=recv_req.seed,
-                population_size=recv_req.population_size,
-                sigma=recv_req.sigma,
-                learning_rate=recv_req.learning_rate,
-                attempts_per_candidate=recv_req.attempts_per_candidate,
-                estimator=recv_req.estimator,
-                reward_zscore_epsilon=recv_req.reward_zscore_epsilon,
-                max_update_rms_ratio=recv_req.max_update_rms_ratio,
-                max_update_abs_max_ratio=recv_req.max_update_abs_max_ratio,
-                max_theta_rms_ratio=recv_req.max_theta_rms_ratio,
-                max_theta_abs_max_ratio=recv_req.max_theta_abs_max_ratio,
-                candidate_schedule=recv_req.candidate_schedule,
-                candidate_dwell_attempts=recv_req.candidate_dwell_attempts,
-                schedule_seed=recv_req.schedule_seed,
-                schedule_lane=recv_req.schedule_lane,
-            ),
+            config=config,
         )
 
     def update_weights_from_ipc(self, recv_req: UpdateWeightsFromIPCReqInput):

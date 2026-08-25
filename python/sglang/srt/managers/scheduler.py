@@ -179,6 +179,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
     sock_send,
+    wrap_as_pickle,
 )
 from sglang.srt.managers.load_snapshot import create_load_snapshot_writer
 from sglang.srt.managers.min_free_slots_delayer import (
@@ -4965,14 +4966,17 @@ class Scheduler(
         self, recv_req: DiagESMTPSessionReqInput
     ) -> DiagESMTPSessionReqOutput:
         try:
-            status = self.tp_worker.diag_es_mtp_session(recv_req)
-            return DiagESMTPSessionReqOutput(
-                success=True, message="", status=status
-            )
+            result = self.tp_worker.diag_es_mtp_session(recv_req)
+            if recv_req.action == "export_state":
+                return DiagESMTPSessionReqOutput(
+                    success=True,
+                    message="",
+                    status={},
+                    session_state_export=wrap_as_pickle(result),
+                )
+            return DiagESMTPSessionReqOutput(success=True, message="", status=result)
         except (RuntimeError, TypeError, ValueError) as exc:
-            return DiagESMTPSessionReqOutput(
-                success=False, message=str(exc), status={}
-            )
+            return DiagESMTPSessionReqOutput(success=False, message=str(exc), status={})
 
     def handle_dumper_control(self, recv_req: DumperControlReqInput):
         from sglang.srt.debug_utils.dumper import dumper

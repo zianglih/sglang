@@ -93,6 +93,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromTensorReqInput,
     sock_recv,
     sock_send,
+    unwrap_from_pickle,
 )
 from sglang.srt.managers.multi_tokenizer_mixin import (
     MultiTokenizerRouter,
@@ -1631,19 +1632,187 @@ class Engine(EngineScoreMixin, EngineBase):
         )
         return self._unwrap_diag_es_mtp_result(result)
 
-    def drain_diag_es_mtp_events(
-        self, session_id: Optional[str] = None
+    def read_diag_es_mtp_events(
+        self,
+        engine_epoch: str,
+        after_event_id: int,
+        limit: int,
     ) -> Dict[str, Any]:
         return self.loop.run_until_complete(
-            self.async_drain_diag_es_mtp_events(session_id)
+            self.async_read_diag_es_mtp_events(
+                engine_epoch=engine_epoch,
+                after_event_id=after_event_id,
+                limit=limit,
+            )
         )
 
-    async def async_drain_diag_es_mtp_events(
-        self, session_id: Optional[str] = None
+    async def async_read_diag_es_mtp_events(
+        self,
+        engine_epoch: str,
+        after_event_id: int,
+        limit: int,
     ) -> Dict[str, Any]:
+        """Read one retained engine-global page without acknowledging it."""
+
         result = await self.tokenizer_manager.diag_es_mtp_session(
             DiagESMTPSessionReqInput(
-                action="drain_events", session_id=session_id
+                action="read_events",
+                engine_epoch=engine_epoch,
+                after_event_id=after_event_id,
+                event_limit=limit,
+            )
+        )
+        return self._unwrap_diag_es_mtp_result(result)
+
+    def ack_diag_es_mtp_events(
+        self,
+        engine_epoch: str,
+        through_event_id: int,
+    ) -> Dict[str, Any]:
+        return self.loop.run_until_complete(
+            self.async_ack_diag_es_mtp_events(
+                engine_epoch=engine_epoch,
+                through_event_id=through_event_id,
+            )
+        )
+
+    async def async_ack_diag_es_mtp_events(
+        self,
+        engine_epoch: str,
+        through_event_id: int,
+    ) -> Dict[str, Any]:
+        """Acknowledge an already-read retained event prefix."""
+
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(
+                action="ack_events",
+                engine_epoch=engine_epoch,
+                through_event_id=through_event_id,
+            )
+        )
+        return self._unwrap_diag_es_mtp_result(result)
+
+    @staticmethod
+    def _unwrap_diag_es_mtp_state_result(result: Any) -> Dict[str, Any]:
+        if not result.success:
+            raise RuntimeError(result.message)
+        state_export = unwrap_from_pickle(result.session_state_export)
+        if not isinstance(state_export, Mapping):
+            raise RuntimeError(
+                "MTP diagonal-ES export returned an invalid state envelope"
+            )
+        return dict(state_export)
+
+    def export_diag_es_mtp_session_state(self, session_id: str) -> Dict[str, Any]:
+        """Return portable state and its atomically paired telemetry frontier."""
+
+        return self.loop.run_until_complete(
+            self.async_export_diag_es_mtp_session_state(session_id)
+        )
+
+    async def async_export_diag_es_mtp_session_state(
+        self, session_id: str
+    ) -> Dict[str, Any]:
+        """Return portable state and its atomically paired telemetry frontier."""
+
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(
+                action="export_state",
+                session_id=session_id,
+            )
+        )
+        return self._unwrap_diag_es_mtp_state_result(result)
+
+    def import_diag_es_mtp_session_state(
+        self,
+        session_id: str,
+        session_state: Mapping[str, Any],
+        seed: int,
+        population_size: int = 16,
+        sigma: float = 0.01,
+        learning_rate: float = 0.0,
+        attempts_per_candidate: int = 4,
+        estimator: str = "population_zscore",
+        reward_zscore_epsilon: float = 1e-8,
+        max_update_rms_ratio: float = 10.0,
+        max_update_abs_max_ratio: float = 100.0,
+        candidate_schedule: Literal[
+            "contiguous", "round_robin", "block_interleaved"
+        ] = "contiguous",
+        candidate_dwell_attempts: int | None = None,
+        schedule_seed: int | None = None,
+        schedule_lane: int | None = None,
+        max_theta_rms_ratio: float | None = None,
+        max_theta_abs_max_ratio: float | None = None,
+    ) -> Dict[str, Any]:
+        """Restore the portable ``session_state`` member of an export envelope."""
+
+        return self.loop.run_until_complete(
+            self.async_import_diag_es_mtp_session_state(
+                session_id=session_id,
+                session_state=session_state,
+                seed=seed,
+                population_size=population_size,
+                sigma=sigma,
+                learning_rate=learning_rate,
+                attempts_per_candidate=attempts_per_candidate,
+                estimator=estimator,
+                reward_zscore_epsilon=reward_zscore_epsilon,
+                max_update_rms_ratio=max_update_rms_ratio,
+                max_update_abs_max_ratio=max_update_abs_max_ratio,
+                max_theta_rms_ratio=max_theta_rms_ratio,
+                max_theta_abs_max_ratio=max_theta_abs_max_ratio,
+                candidate_schedule=candidate_schedule,
+                candidate_dwell_attempts=candidate_dwell_attempts,
+                schedule_seed=schedule_seed,
+                schedule_lane=schedule_lane,
+            )
+        )
+
+    async def async_import_diag_es_mtp_session_state(
+        self,
+        session_id: str,
+        session_state: Mapping[str, Any],
+        seed: int,
+        population_size: int = 16,
+        sigma: float = 0.01,
+        learning_rate: float = 0.0,
+        attempts_per_candidate: int = 4,
+        estimator: str = "population_zscore",
+        reward_zscore_epsilon: float = 1e-8,
+        max_update_rms_ratio: float = 10.0,
+        max_update_abs_max_ratio: float = 100.0,
+        candidate_schedule: Literal[
+            "contiguous", "round_robin", "block_interleaved"
+        ] = "contiguous",
+        candidate_dwell_attempts: int | None = None,
+        schedule_seed: int | None = None,
+        schedule_lane: int | None = None,
+        max_theta_rms_ratio: float | None = None,
+        max_theta_abs_max_ratio: float | None = None,
+    ) -> Dict[str, Any]:
+        """Restore the portable ``session_state`` member of an export envelope."""
+
+        result = await self.tokenizer_manager.diag_es_mtp_session(
+            DiagESMTPSessionReqInput(
+                action="import_state",
+                session_id=session_id,
+                session_state=session_state,
+                seed=seed,
+                population_size=population_size,
+                sigma=sigma,
+                learning_rate=learning_rate,
+                attempts_per_candidate=attempts_per_candidate,
+                estimator=estimator,
+                reward_zscore_epsilon=reward_zscore_epsilon,
+                max_update_rms_ratio=max_update_rms_ratio,
+                max_update_abs_max_ratio=max_update_abs_max_ratio,
+                max_theta_rms_ratio=max_theta_rms_ratio,
+                max_theta_abs_max_ratio=max_theta_abs_max_ratio,
+                candidate_schedule=candidate_schedule,
+                candidate_dwell_attempts=candidate_dwell_attempts,
+                schedule_seed=schedule_seed,
+                schedule_lane=schedule_lane,
             )
         )
         return self._unwrap_diag_es_mtp_result(result)
