@@ -42,6 +42,7 @@ class MoeRunnerConfig:
     hidden_size: Optional[int] = None
     intermediate_size_per_partition: Optional[int] = None
     layer_id: Optional[int] = None
+    # Holds either diagonal multiplier banks or target-only rank-1 factor banks.
     diag_es_delta_banks: Optional[MoeDeltaBanks] = None
     top_k: Optional[int] = None
     num_fused_shared_experts: Optional[int] = None

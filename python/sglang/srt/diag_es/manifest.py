@@ -8,10 +8,13 @@ from typing import Literal, Mapping
 import torch
 
 QWEN3_30B_A3B_SCHEMA_ID = "qwen3-30b-a3b-diag-es-v2"
+QWEN3_30B_A3B_RANK1_SCHEMA_ID = "qwen3-30b-a3b-rank1-es-v1"
 JOYAI_LLM_FLASH_MTP_SCHEMA_ID = "joyai-llm-flash-mtp-diag-es-v2"
-DiagESPlacement = Literal["pre", "post", "both"]
+DiagESPlacement = Literal["pre", "post", "both", "rank1"]
+DiagESMTPPlacement = Literal["pre", "post", "both"]
 
-_SUPPORTED_PLACEMENTS = frozenset(("pre", "post", "both"))
+_SUPPORTED_TARGET_PLACEMENTS = frozenset(("pre", "post", "both", "rank1"))
+_SUPPORTED_MTP_PLACEMENTS = frozenset(("pre", "post", "both"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,21 @@ def _grouped_delta_shapes(
     hidden_size: int,
     moe_intermediate_size: int,
 ) -> dict[str, tuple[int, ...]]:
+    if placement == "rank1":
+        return {
+            "moe_fc1_rank1_down": (num_layers, num_experts, hidden_size),
+            "moe_fc1_rank1_up": (
+                num_layers,
+                num_experts,
+                2 * moe_intermediate_size,
+            ),
+            "moe_fc2_rank1_down": (
+                num_layers,
+                num_experts,
+                moe_intermediate_size,
+            ),
+            "moe_fc2_rank1_up": (num_layers, num_experts, hidden_size),
+        }
     shapes: dict[str, tuple[int, ...]] = {}
     if placement in ("pre", "both"):
         shapes.update(
@@ -66,6 +84,7 @@ def _grouped_delta_shapes(
 def _schema_digest(
     dense_sites: tuple[DenseSite, ...],
     *,
+    schema_id: str,
     placement: DiagESPlacement,
     grouped_delta_shapes: Mapping[str, tuple[int, ...]],
 ) -> str:
@@ -73,7 +92,7 @@ def _schema_digest(
     # codec. Renaming this JSON field would silently change every persisted
     # schema digest and wrapper checkpoint identity.
     payload = {
-        "version": QWEN3_30B_A3B_SCHEMA_ID,
+        "version": schema_id,
         "placement": placement,
         "dense_sites": [(site.site_id, site.width) for site in dense_sites],
         "grouped_gate_shapes": dict(grouped_delta_shapes),
@@ -111,8 +130,8 @@ def _is_deepseek_block_fp8_model(
     quant_config = getattr(model, "quant_config", None)
     if quant_config is None:
         return False
-    if placement != "post":
-        raise ValueError("block-FP8 diagonal ES supports post placement only")
+    if placement not in ("post", "rank1"):
+        raise ValueError("block-FP8 target steering supports post or rank1 only")
     expected = {
         "is_checkpoint_fp8_serialized": True,
         "activation_scheme": "dynamic",
@@ -145,8 +164,8 @@ def register_qwen3_30b_a3b_manifest(
 ) -> DiagESManifest:
     """Validate and register the exact Qwen3-30B-A3B diagonal-ES sites."""
 
-    if placement not in _SUPPORTED_PLACEMENTS:
-        raise ValueError("diagonal-ES placement must be pre, post, or both")
+    if placement not in _SUPPORTED_TARGET_PLACEMENTS:
+        raise ValueError("target steering placement must be pre, post, both, or rank1")
     if model.__class__.__name__ != "Qwen3MoeForCausalLM":
         raise TypeError("Qwen3 diagonal ES requires Qwen3MoeForCausalLM")
     block_fp8 = _is_deepseek_block_fp8_model(model, placement=placement)
@@ -171,6 +190,11 @@ def register_qwen3_30b_a3b_manifest(
         actual = None if layers is None else len(layers)
         raise ValueError(f"Qwen3 diagonal ES requires 48 layers, got {actual}")
 
+    schema_id = (
+        QWEN3_30B_A3B_RANK1_SCHEMA_ID
+        if placement == "rank1"
+        else QWEN3_30B_A3B_SCHEMA_ID
+    )
     dense_sites: list[DenseSite] = []
     for layer_id, decoder_layer in enumerate(layers):
         layer_path = f"model.layers.{layer_id}"
@@ -249,15 +273,29 @@ def register_qwen3_30b_a3b_manifest(
             (out, "self_attn.o_proj", 4096, 2048),
         ):
             linear.es_pre_site_id = None
+            linear.es_pre_delta_bank = None
             linear.es_post_site_id = None
-            if placement in ("pre", "both"):
-                site_id = f"{layer_path}.{path}.input"
-                linear.es_pre_site_id = site_id
-                dense_sites.append(DenseSite(site_id, input_width))
-            if placement in ("post", "both"):
-                site_id = f"{layer_path}.{path}.output"
-                linear.es_post_site_id = site_id
-                dense_sites.append(DenseSite(site_id, output_width))
+            linear.es_post_delta_bank = None
+            linear.es_rank1_down_site_id = None
+            linear.es_rank1_down_bank = None
+            linear.es_rank1_up_site_id = None
+            linear.es_rank1_up_bank = None
+            if placement == "rank1":
+                down_site_id = f"{layer_path}.{path}.rank1.down"
+                up_site_id = f"{layer_path}.{path}.rank1.up"
+                linear.es_rank1_down_site_id = down_site_id
+                linear.es_rank1_up_site_id = up_site_id
+                dense_sites.append(DenseSite(down_site_id, input_width))
+                dense_sites.append(DenseSite(up_site_id, output_width))
+            else:
+                if placement in ("pre", "both"):
+                    site_id = f"{layer_path}.{path}.input"
+                    linear.es_pre_site_id = site_id
+                    dense_sites.append(DenseSite(site_id, input_width))
+                if placement in ("post", "both"):
+                    site_id = f"{layer_path}.{path}.output"
+                    linear.es_post_site_id = site_id
+                    dense_sites.append(DenseSite(site_id, output_width))
 
     dense_sites_tuple = tuple(dense_sites)
     grouped_shapes = _grouped_delta_shapes(
@@ -268,12 +306,13 @@ def register_qwen3_30b_a3b_manifest(
         moe_intermediate_size=768,
     )
     return DiagESManifest(
-        schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+        schema_id=schema_id,
         placement=placement,
         dense_sites=dense_sites_tuple,
         grouped_delta_shapes=grouped_shapes,
         schema_digest=_schema_digest(
             dense_sites_tuple,
+            schema_id=schema_id,
             placement=placement,
             grouped_delta_shapes=grouped_shapes,
         ),
@@ -283,7 +322,7 @@ def register_qwen3_30b_a3b_manifest(
 def _joyai_mtp_schema_digest(
     dense_sites: tuple[DenseSite, ...],
     *,
-    placement: DiagESPlacement,
+    placement: DiagESMTPPlacement,
 ) -> str:
     payload = {
         "version": JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
@@ -305,7 +344,7 @@ def _joyai_mtp_schema_digest(
 def register_joyai_llm_flash_mtp_manifest(
     model: torch.nn.Module,
     *,
-    placement: DiagESPlacement,
+    placement: DiagESMTPPlacement,
 ) -> DiagESManifest:
     """Register the pre/post search space for JoyAI's dense MTP layer.
 
@@ -316,7 +355,7 @@ def register_joyai_llm_flash_mtp_manifest(
     MTP placement changes target-model values or target KV contents.
     """
 
-    if placement not in _SUPPORTED_PLACEMENTS:
+    if placement not in _SUPPORTED_MTP_PLACEMENTS:
         raise ValueError("JoyAI MTP diagonal ES placement must be pre, post, or both")
     if model.__class__.__name__ != "JoyAILLMFlashForCausalLMNextN":
         raise TypeError("JoyAI MTP diagonal ES requires JoyAILLMFlashForCausalLMNextN")
@@ -495,7 +534,13 @@ def compute_effective_model_digest(
     """Hash the exact CPU FP32 residual deltas used as the KV namespace."""
 
     _validate_digest_identity("model_artifact_id", model_artifact_id)
-    if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
+    if schema_id == QWEN3_30B_A3B_SCHEMA_ID:
+        digest_domain = b"diag-es-effective-model-fp32-delta-v4\0"
+        tensor_marker = b"fp32-delta"
+    elif schema_id == QWEN3_30B_A3B_RANK1_SCHEMA_ID:
+        digest_domain = b"rank1-es-effective-model-fp32-factor-v1\0"
+        tensor_marker = b"fp32-factor"
+    else:
         raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
     validate_sha256_digest("schema_digest", schema_digest)
     if not isinstance(dense_deltas, Mapping):
@@ -504,7 +549,7 @@ def compute_effective_model_digest(
         raise TypeError("grouped_deltas must be a mapping")
 
     digest = hashlib.sha256()
-    digest.update(b"diag-es-effective-model-fp32-delta-v4\0")
+    digest.update(digest_domain)
     digest.update(model_artifact_id.encode())
     digest.update(b"\0")
     digest.update(schema_id.encode())
@@ -516,7 +561,7 @@ def compute_effective_model_digest(
         digest.update(name.encode())
         digest.update(b"\0")
         digest.update(str(tuple(value.shape)).encode())
-        digest.update(b"\0fp32-delta\0")
+        digest.update(b"\0" + tensor_marker + b"\0")
         digest.update(value.view(torch.uint8).numpy().tobytes())
 
     for site_id in sorted(dense_deltas):

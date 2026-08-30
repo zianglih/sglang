@@ -179,6 +179,10 @@ class LinearBase(torch.nn.Module):
         self.es_pre_delta_bank: Optional[torch.Tensor] = None
         self.es_post_site_id: Optional[str] = None
         self.es_post_delta_bank: Optional[torch.Tensor] = None
+        self.es_rank1_down_site_id: Optional[str] = None
+        self.es_rank1_down_bank: Optional[torch.Tensor] = None
+        self.es_rank1_up_site_id: Optional[str] = None
+        self.es_rank1_up_bank: Optional[torch.Tensor] = None
         if quant_config is None:
             from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 

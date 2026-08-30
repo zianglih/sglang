@@ -961,6 +961,19 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if getattr(layer, "es_rank1_down_bank", None) is not None:
+            from sglang.srt.diag_es.ops import maybe_apply_rank1_es
+
+            output = triton_w8a8_block_fp8_linear(
+                input=x,
+                weight=layer.weight,
+                block_size=self.weight_block_size,
+                weight_scale=layer.weight_scale_inv,
+                input_scale=None,
+                bias=bias,
+            )
+            return maybe_apply_rank1_es(layer, x, output)
+
         post_delta_bank = layer.es_post_delta_bank
         if post_delta_bank is not None:
             from sglang.srt.diag_es.ops import get_diag_es_post_inputs

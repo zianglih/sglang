@@ -4,12 +4,13 @@ from typing import Literal, Protocol, cast
 
 from sglang.srt.diag_es.manifest import DiagESPlacement
 
-DiagESRolePlacement = Literal["off", "pre", "post", "both"]
+DiagESTargetRolePlacement = Literal["off", "pre", "post", "both", "rank1"]
+DiagESMTPRolePlacement = Literal["off", "pre", "post", "both"]
 
 
 class _DiagESRoleArgs(Protocol):
-    diag_es_target_placement: DiagESRolePlacement
-    diag_es_mtp_placement: DiagESRolePlacement
+    diag_es_target_placement: DiagESTargetRolePlacement
+    diag_es_mtp_placement: DiagESMTPRolePlacement
 
 
 def get_diag_es_placement(

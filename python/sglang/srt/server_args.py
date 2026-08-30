@@ -3374,12 +3374,12 @@ class ServerArgs:
     ] = False
     diag_es_schema_id: A[
         Optional[str],
-        "Exact diagonal-ES site schema ID; required when target steering is enabled.",
+        "Exact ES site schema ID; required when target steering is enabled.",
         NS("exec.features"),
     ] = None
     diag_es_target_placement: A[
-        Literal["off", "pre", "post", "both"],
-        "Target-model reward-maximizing diagonal-ES placement: off, pre, post, or both.",
+        Literal["off", "pre", "post", "both", "rank1"],
+        "Target-model reward-maximizing ES mode: off, pre, post, both, or rank1.",
         NS("exec.features"),
     ] = "off"
     diag_es_mtp_placement: A[
@@ -3726,12 +3726,13 @@ class ServerArgs:
             self.enable_return_hidden_states = True
 
     def _handle_diag_es_identity(self):
-        supported = ("off", "pre", "post", "both")
-        if self.diag_es_target_placement not in supported:
+        target_supported = ("off", "pre", "post", "both", "rank1")
+        mtp_supported = ("off", "pre", "post", "both")
+        if self.diag_es_target_placement not in target_supported:
             raise ValueError(
-                "diag_es_target_placement must be off, pre, post, or both"
+                "diag_es_target_placement must be off, pre, post, both, or rank1"
             )
-        if self.diag_es_mtp_placement not in supported:
+        if self.diag_es_mtp_placement not in mtp_supported:
             raise ValueError("diag_es_mtp_placement must be off, pre, post, or both")
         if self.diag_es_mtp_placement != "off":
             requested_algorithm = (
@@ -3774,10 +3775,16 @@ class ServerArgs:
                 "target diagonal ES supports only --speculative-algorithm "
                 "NEXTN; other speculative algorithms are not supported"
             )
-        if self.diag_es_schema_id != "qwen3-30b-a3b-diag-es-v2":
+        expected_schema_id = (
+            "qwen3-30b-a3b-rank1-es-v1"
+            if self.diag_es_target_placement == "rank1"
+            else "qwen3-30b-a3b-diag-es-v2"
+        )
+        if self.diag_es_schema_id != expected_schema_id:
             raise ValueError(
-                "target diagonal ES requires "
-                "diag_es_schema_id='qwen3-30b-a3b-diag-es-v2'"
+                "target ES requires "
+                f"diag_es_schema_id={expected_schema_id!r} for "
+                f"diag_es_target_placement={self.diag_es_target_placement!r}"
             )
         if (
             not isinstance(self.diag_es_model_artifact_id, str)
@@ -3859,11 +3866,11 @@ class ServerArgs:
         if quantization is None:
             pass
         elif quantization == "fp8":
-            if self.diag_es_target_placement != "post":
+            if self.diag_es_target_placement not in ("post", "rank1"):
                 mismatches.append(
                     "diag_es_target_placement="
                     f"{self.diag_es_target_placement!r} "
-                    "(block-FP8 requires 'post')"
+                    "(block-FP8 requires 'post' or 'rank1')"
                 )
             if view.fp8_gemm_runner_backend != "triton":
                 mismatches.append(
@@ -3873,6 +3880,14 @@ class ServerArgs:
         else:
             mismatches.append(
                 f"quantization={quantization!r} (requires None or 'fp8')"
+            )
+        if (
+            self.diag_es_target_placement == "rank1"
+            and view.enable_fused_moe_sum_all_reduce
+        ):
+            mismatches.append(
+                "enable_fused_moe_sum_all_reduce=True "
+                "(rank1 requires per-route MoE outputs)"
             )
         for name in ("decode_attention_backend", "prefill_attention_backend"):
             actual = getattr(view, name)

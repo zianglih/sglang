@@ -1,16 +1,21 @@
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
+
+import sglang.srt.diag_es.manager as diag_es_manager_module
 from sglang.srt.diag_es.manager import (
     DiagESCandidateNotFoundError,
     DiagESCandidateRetiringError,
     DiagESInvalidCandidateError,
     DiagESManager,
+    register_diag_es_model,
 )
 from sglang.srt.diag_es.manifest import (
     JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
+    QWEN3_30B_A3B_RANK1_SCHEMA_ID,
     DenseSite,
     DiagESManifest,
     compute_effective_model_digest,
@@ -40,7 +45,13 @@ class _Linear:
         self.output_size = output_size
         self.weight = torch.empty((output_size, input_size), dtype=dtype, device="meta")
         self.es_pre_site_id = None
+        self.es_pre_delta_bank = None
         self.es_post_site_id = None
+        self.es_post_delta_bank = None
+        self.es_rank1_down_site_id = None
+        self.es_rank1_down_bank = None
+        self.es_rank1_up_site_id = None
+        self.es_rank1_up_bank = None
         self.calls = []
         if block_fp8:
             self.weight_scale_inv = torch.empty(
@@ -270,10 +281,11 @@ def test_joyai_mtp_v2_post_schema_digest_is_stable():
     )
 
 
-def test_joyai_mtp_manifest_rejects_unknown_placement():
+@pytest.mark.parametrize("placement", ["sideways", "rank1"])
+def test_joyai_mtp_manifest_rejects_unknown_placement(placement):
     with pytest.raises(ValueError, match="pre, post, or both"):
         register_joyai_llm_flash_mtp_manifest(
-            JoyAILLMFlashForCausalLMNextN(), placement="sideways"
+            JoyAILLMFlashForCausalLMNextN(), placement=placement
         )
 
 
@@ -546,13 +558,138 @@ def test_qwen3_v2_manifest_exact_contract(
     assert not hasattr(model.model.layers[0].self_attn.qkv_proj, "es_pre_site_width")
 
 
-def test_qwen3_v2_manifest_accepts_only_post_deepseek_block_fp8():
+def test_qwen3_rank1_v1_manifest_exact_contract():
+    model = Qwen3MoeForCausalLM()
+    manifest = register_qwen3_30b_a3b_manifest(model, placement="rank1")
+
+    assert manifest.schema_id == QWEN3_30B_A3B_RANK1_SCHEMA_ID
+    assert manifest.placement == "rank1"
+    assert manifest.schema_digest == (
+        "763fb8985f91d7938a5939d9069157fb849c6def691522b6af1bcbdac1c79ff0"
+    )
+    assert manifest.grouped_delta_shapes == {
+        "moe_fc1_rank1_down": (48, 128, 2048),
+        "moe_fc1_rank1_up": (48, 128, 1536),
+        "moe_fc2_rank1_down": (48, 128, 768),
+        "moe_fc2_rank1_up": (48, 128, 2048),
+    }
+    assert [
+        (site.site_id.removeprefix("model.layers.0.self_attn."), site.width)
+        for site in manifest.dense_sites[:4]
+    ] == [
+        ("qkv_proj.rank1.down", 2048),
+        ("qkv_proj.rank1.up", 5120),
+        ("o_proj.rank1.down", 4096),
+        ("o_proj.rank1.up", 2048),
+    ]
+    assert len(manifest.dense_sites) == 48 * 4
+    assert (
+        sum(site.width for site in manifest.dense_sites)
+        + sum(
+            shape[0] * shape[1] * shape[2]
+            for shape in manifest.grouped_delta_shapes.values()
+        )
+        == 39_960_576
+    )
+    qkv = model.model.layers[0].self_attn.qkv_proj
+    assert qkv.es_pre_site_id is None
+    assert qkv.es_post_site_id is None
+    assert qkv.es_rank1_down_site_id == ("model.layers.0.self_attn.qkv_proj.rank1.down")
+    assert qkv.es_rank1_up_site_id == "model.layers.0.self_attn.qkv_proj.rank1.up"
+
+
+def test_qwen3_rank1_manager_binds_separate_factor_banks(monkeypatch):
+    class _LayerBank:
+        def __init__(self, name):
+            self.name = name
+
+        def __getitem__(self, layer_id):
+            return self.name, layer_id
+
+    class _FakeManager:
+        def __init__(self, *, manifest, **_kwargs):
+            self.manifest = manifest
+
+        def get_dense_delta_bank(self, site_id):
+            return f"dense:{site_id}"
+
+        def get_grouped_delta_bank(self, name):
+            return _LayerBank(name)
+
+    class _MoeDeltaBanks:
+        def __init__(self, **banks):
+            self.__dict__.update(banks)
+
+    fake_moe_ops = ModuleType("sglang.srt.diag_es.moe_ops")
+    fake_moe_ops.MoeDeltaBanks = _MoeDeltaBanks
+    monkeypatch.setitem(sys.modules, "sglang.srt.diag_es.moe_ops", fake_moe_ops)
+    monkeypatch.setattr(diag_es_manager_module, "DiagESManager", _FakeManager)
+    monkeypatch.setattr(diag_es_manager_module, "_target_manager", None)
+    model = Qwen3MoeForCausalLM()
+    model.parameters = lambda: iter((torch.empty(0),))
+    manager = register_diag_es_model(
+        model,
+        schema_id=QWEN3_30B_A3B_RANK1_SCHEMA_ID,
+        resident_candidate_slots=8,
+        model_artifact_id="qwen3-artifact",
+        placement="rank1",
+    )
+
+    assert manager is diag_es_manager_module._target_manager
+    qkv = model.model.layers[0].self_attn.qkv_proj
+    assert qkv.es_pre_delta_bank is None
+    assert qkv.es_post_delta_bank is None
+    assert qkv.es_rank1_down_bank == (
+        "dense:model.layers.0.self_attn.qkv_proj.rank1.down"
+    )
+    assert qkv.es_rank1_up_bank == ("dense:model.layers.0.self_attn.qkv_proj.rank1.up")
+    moe_banks = model.model.layers[0].mlp.experts.moe_runner_config.diag_es_delta_banks
+    assert moe_banks.fc1_pre is None
+    assert moe_banks.fc1_post is None
+    assert moe_banks.fc2_pre is None
+    assert moe_banks.fc2_post is None
+    assert moe_banks.fc1_rank1_down == ("moe_fc1_rank1_down", 0)
+    assert moe_banks.fc1_rank1_up == ("moe_fc1_rank1_up", 0)
+    assert moe_banks.fc2_rank1_down == ("moe_fc2_rank1_down", 0)
+    assert moe_banks.fc2_rank1_up == ("moe_fc2_rank1_up", 0)
+
+
+def test_register_model_rejects_cross_mode_schema_and_mtp_rank1():
+    with pytest.raises(ValueError, match="rank1-es-v1"):
+        register_diag_es_model(
+            SimpleNamespace(),
+            schema_id=QWEN3_30B_A3B_SCHEMA_ID,
+            resident_candidate_slots=1,
+            model_artifact_id="artifact",
+            placement="rank1",
+        )
+    with pytest.raises(ValueError, match="not supported for MTP"):
+        register_diag_es_model(
+            SimpleNamespace(),
+            schema_id=JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
+            resident_candidate_slots=1,
+            model_artifact_id="artifact",
+            placement="rank1",
+            is_draft_worker=True,
+            mtp_max_sessions=1,
+            mtp_max_correct_drafts=1,
+        )
+
+
+def test_qwen3_manifest_accepts_post_and_rank1_deepseek_block_fp8():
     model = Qwen3MoeForCausalLM(block_fp8=True)
     manifest = register_qwen3_30b_a3b_manifest(model, placement="post")
     assert manifest.schema_digest == (
         "7502d6adee8003103476e4faf4bf9f3bef2ed19bf4a1a8bfd8e5e011da5b3342"
     )
-    with pytest.raises(ValueError, match="supports post placement only"):
+    rank1 = register_qwen3_30b_a3b_manifest(
+        Qwen3MoeForCausalLM(block_fp8=True), placement="rank1"
+    )
+    assert rank1.schema_id == QWEN3_30B_A3B_RANK1_SCHEMA_ID
+    assert rank1.schema_digest == (
+        "763fb8985f91d7938a5939d9069157fb849c6def691522b6af1bcbdac1c79ff0"
+    )
+    with pytest.raises(ValueError, match="supports post or rank1 only"):
         register_qwen3_30b_a3b_manifest(model, placement="pre")
 
 
@@ -631,6 +768,46 @@ def _cpu_manager() -> DiagESManager:
     manager._dense_delta_banks = {"dense": torch.zeros((3, 3))}
     manager._grouped_delta_banks = {"moe_fc1_pre": torch.zeros((2, 3, 3))}
     return manager
+
+
+def test_rank1_manager_reserves_exact_zero_identity_slot(monkeypatch):
+    manifest = DiagESManifest(
+        schema_id=QWEN3_30B_A3B_RANK1_SCHEMA_ID,
+        placement="rank1",
+        dense_sites=(
+            DenseSite("dense.rank1.down", 2),
+            DenseSite("dense.rank1.up", 3),
+        ),
+        grouped_delta_shapes={
+            "moe_fc1_rank1_down": (1, 2),
+            "moe_fc1_rank1_up": (1, 3),
+        },
+        schema_digest="ab" * 32,
+    )
+    real_zeros = torch.zeros
+
+    def cpu_zeros(*args, **kwargs):
+        return real_zeros(*args, **{**kwargs, "device": torch.device("cpu")})
+
+    monkeypatch.setattr(torch, "zeros", cpu_zeros)
+    monkeypatch.setattr(torch.cuda, "Stream", lambda **_kwargs: object())
+    manager = DiagESManager(
+        manifest=manifest,
+        resident_candidate_slots=2,
+        model_artifact_id="qwen3-artifact",
+        device=torch.device("cuda"),
+    )
+
+    assert manager.physical_slots == 3
+    assert manager._free_slots == [1, 2]
+    assert all(
+        torch.count_nonzero(bank[0]).item() == 0
+        for bank in manager._dense_delta_banks.values()
+    )
+    assert all(
+        torch.count_nonzero(bank[..., 0, :]).item() == 0
+        for bank in manager._grouped_delta_banks.values()
+    )
 
 
 def _digest(dense, grouped):
@@ -720,7 +897,7 @@ def test_effective_digest_requires_exact_cpu_fp32_payload():
         dense_deltas=dense,
         grouped_deltas=grouped,
     )
-    assert len(digest) == 64
+    assert digest == "dca8ce91ef2dba2e63f0f5fa6be9f23ecbf2114ba196b92abe389902a0a59be9"
     with pytest.raises(ValueError, match="float32"):
         compute_effective_model_digest(
             model_artifact_id="qwen3-artifact",
@@ -729,6 +906,23 @@ def test_effective_digest_requires_exact_cpu_fp32_payload():
             dense_deltas={"dense": dense["dense"].bfloat16()},
             grouped_deltas=grouped,
         )
+
+
+def test_rank1_effective_digest_uses_factor_specific_v1_contract():
+    digest = compute_effective_model_digest(
+        model_artifact_id="qwen3-artifact",
+        schema_id=QWEN3_30B_A3B_RANK1_SCHEMA_ID,
+        schema_digest="ab" * 32,
+        dense_deltas={
+            "dense.rank1.down": torch.arange(2, dtype=torch.float32),
+            "dense.rank1.up": torch.arange(2, 5, dtype=torch.float32),
+        },
+        grouped_deltas={
+            "moe_fc1_rank1_down": torch.arange(5, 7, dtype=torch.float32).reshape(1, 2),
+            "moe_fc1_rank1_up": torch.arange(7, 10, dtype=torch.float32).reshape(1, 3),
+        },
+    )
+    assert digest == "2ab8234ab62fcbfce59ea308c79ba06dc9a13cbbfabe75ff7c22b0090b3837a5"
 
 
 def test_register_protocol_round_trip_and_duplicate_rejection():

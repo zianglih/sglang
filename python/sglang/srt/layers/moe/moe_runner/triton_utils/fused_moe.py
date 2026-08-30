@@ -139,6 +139,10 @@ def inplace_fused_experts(
     diag_es_fc1_post: Optional[torch.Tensor] = None,
     diag_es_fc2_pre: Optional[torch.Tensor] = None,
     diag_es_fc2_post: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_up: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_up: Optional[torch.Tensor] = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -177,6 +181,10 @@ def inplace_fused_experts(
         diag_es_fc1_post=diag_es_fc1_post,
         diag_es_fc2_pre=diag_es_fc2_pre,
         diag_es_fc2_post=diag_es_fc2_post,
+        diag_es_fc1_rank1_down=diag_es_fc1_rank1_down,
+        diag_es_fc1_rank1_up=diag_es_fc1_rank1_up,
+        diag_es_fc2_rank1_down=diag_es_fc2_rank1_down,
+        diag_es_fc2_rank1_up=diag_es_fc2_rank1_up,
     )
 
 
@@ -217,6 +225,10 @@ def outplace_fused_experts(
     diag_es_fc1_post: Optional[torch.Tensor] = None,
     diag_es_fc2_pre: Optional[torch.Tensor] = None,
     diag_es_fc2_post: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_up: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_up: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -255,6 +267,10 @@ def outplace_fused_experts(
         diag_es_fc1_post=diag_es_fc1_post,
         diag_es_fc2_pre=diag_es_fc2_pre,
         diag_es_fc2_post=diag_es_fc2_post,
+        diag_es_fc1_rank1_down=diag_es_fc1_rank1_down,
+        diag_es_fc1_rank1_up=diag_es_fc1_rank1_up,
+        diag_es_fc2_rank1_down=diag_es_fc2_rank1_down,
+        diag_es_fc2_rank1_up=diag_es_fc2_rank1_up,
     )
 
 
@@ -323,6 +339,10 @@ def fused_experts(
             diag_es_fc1_post=delta_banks.fc1_post,
             diag_es_fc2_pre=delta_banks.fc2_pre,
             diag_es_fc2_post=delta_banks.fc2_post,
+            diag_es_fc1_rank1_down=delta_banks.fc1_rank1_down,
+            diag_es_fc1_rank1_up=delta_banks.fc1_rank1_up,
+            diag_es_fc2_rank1_down=delta_banks.fc2_rank1_down,
+            diag_es_fc2_rank1_up=delta_banks.fc2_rank1_up,
         )
         return hidden_states
     else:
@@ -362,6 +382,10 @@ def fused_experts(
             diag_es_fc1_post=delta_banks.fc1_post,
             diag_es_fc2_pre=delta_banks.fc2_pre,
             diag_es_fc2_post=delta_banks.fc2_post,
+            diag_es_fc1_rank1_down=delta_banks.fc1_rank1_down,
+            diag_es_fc1_rank1_up=delta_banks.fc1_rank1_up,
+            diag_es_fc2_rank1_down=delta_banks.fc2_rank1_down,
+            diag_es_fc2_rank1_up=delta_banks.fc2_rank1_up,
         )
 
 
@@ -524,17 +548,21 @@ def _fused_moe_kernel_sequence(
     in the GEMM epilogue while its accumulator is FP32, after bias and before
     router weighting and the existing BF16 store. DeepSeek-style block FP8 uses
     post placement only; its FP32 1x128 activation and 128x128 weight scales are
-    applied during accumulation before this shared epilogue.
+    applied during accumulation before this shared epilogue. Rank-1 ES leaves
+    both base GEMMs unchanged, then adds the expert/slot-selected residual from
+    the original BF16 GEMM input and resident FP32 factors. It follows the
+    native route-major or TMA expert-sorted intermediate layout.
     """
     num_tokens = hidden_states.shape[0]
     E, N, _ = w1.shape
     topk = topk_ids.shape[1]
     compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    fc1_rank1_active = delta_banks.fc1_rank1_down is not None
+    fc2_rank1_active = delta_banks.fc2_rank1_down is not None
 
     if delta_banks.fc2_pre is not None:
         # Standalone FC2 pre-steering addresses the activation buffer in
-        # original route order. TMA stores that buffer in expert-sorted,
-        # padded order, so the two layouts cannot be mixed.
+        # original route order. Rank-1 has a separate sorted-layout path.
         down_moe_use_tma = False
 
     # LoRA hooks consume and update route-major intermediate buffers. The TMA
@@ -586,6 +614,7 @@ def _fused_moe_kernel_sequence(
         and (topk > 2)
         and (not use_int8_w8a16)
         and (not use_int4_w4a16)
+        and (not fc2_rank1_active)
     )
 
     intermediate_cache1 = torch.empty(
@@ -642,6 +671,27 @@ def _fused_moe_kernel_sequence(
 
     if fc1_a_route_major:
         del fc1_input
+
+    if fc1_rank1_active:
+        from sglang.srt.diag_es.moe_ops import apply_moe_rank1_residual
+
+        apply_moe_rank1_residual(
+            hidden_states,
+            intermediate_cache1,
+            topk_ids,
+            topk_weights,
+            delta_banks.token_slots,
+            delta_banks.fc1_rank1_down,
+            delta_banks.fc1_rank1_up,
+            input_route_major=False,
+            apply_router_weight=apply_router_weight_on_input,
+            sorted_token_ids=sorted_token_ids if down_moe_use_tma else None,
+            num_tokens_post_padded=(
+                num_tokens_post_padded if down_moe_use_tma else None
+            ),
+            input_sorted=False,
+            output_sorted=down_moe_use_tma,
+        )
 
     if hooks and hooks.after_gate_up:
         # Hooks expect intermediate_cache1 shaped (num_tokens, topk, N); the
@@ -823,7 +873,7 @@ def _fused_moe_kernel_sequence(
 
     # LoRA hooks force the second kernel to write to intermediate_cache3 so
     # hooks.after_down can inspect/modify it before reduction.
-    _use_intermediate = not no_combine and (topk != 1 or hooks)
+    _use_intermediate = not no_combine and (topk != 1 or hooks or fc2_rank1_active)
 
     out_slice = None
     if use_fused_moe_sum_all_reduce:
@@ -871,6 +921,27 @@ def _fused_moe_kernel_sequence(
             delta_banks.token_slots if delta_banks.fc2_post is not None else None
         ),
     )
+
+    if fc2_rank1_active:
+        from sglang.srt.diag_es.moe_ops import apply_moe_rank1_residual
+
+        apply_moe_rank1_residual(
+            intermediate_cache2,
+            out_hidden_states if no_combine else intermediate_cache3,
+            topk_ids,
+            topk_weights,
+            delta_banks.token_slots,
+            delta_banks.fc2_rank1_down,
+            delta_banks.fc2_rank1_up,
+            input_route_major=True,
+            apply_router_weight=not apply_router_weight_on_input and not no_combine,
+            sorted_token_ids=sorted_token_ids if down_moe_use_tma else None,
+            num_tokens_post_padded=(
+                num_tokens_post_padded if down_moe_use_tma else None
+            ),
+            input_sorted=down_moe_use_tma,
+            output_sorted=False,
+        )
 
     if hooks and hooks.after_down:
         hooks.after_down(
@@ -996,6 +1067,10 @@ def fused_experts_impl(
     diag_es_fc1_post: Optional[torch.Tensor] = None,
     diag_es_fc2_pre: Optional[torch.Tensor] = None,
     diag_es_fc2_post: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc1_rank1_up: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_down: Optional[torch.Tensor] = None,
+    diag_es_fc2_rank1_up: Optional[torch.Tensor] = None,
 ):
     padded_size = padding_size
     if not (use_fp8_w8a8 or use_int8_w8a8) or block_shape is not None or _use_aiter:
@@ -1079,6 +1154,10 @@ def fused_experts_impl(
             fc1_post=diag_es_fc1_post,
             fc2_pre=diag_es_fc2_pre,
             fc2_post=diag_es_fc2_post,
+            fc1_rank1_down=diag_es_fc1_rank1_down,
+            fc1_rank1_up=diag_es_fc1_rank1_up,
+            fc2_rank1_down=diag_es_fc2_rank1_down,
+            fc2_rank1_up=diag_es_fc2_rank1_up,
         ),
     )
 

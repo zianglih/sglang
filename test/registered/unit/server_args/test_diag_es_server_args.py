@@ -54,6 +54,7 @@ def _runtime_view(**overrides):
         "max_running_requests": 64,
         "disaggregation_mode": "null",
         "enable_two_batch_overlap": False,
+        "enable_fused_moe_sum_all_reduce": False,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -80,12 +81,16 @@ def test_target_diag_es_may_coexist_with_clean_mtp():
         _validate_runtime(_runtime_view(speculative_algorithm="EAGLE3"))
 
 
-def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
+def test_diag_es_accepts_post_and_rank1_with_deepseek_block_fp8_triton():
     _validate_runtime(
         _runtime_view(quantization="fp8", fp8_gemm_runner_backend="triton"),
         placement="post",
     )
-    with pytest.raises(ValueError, match="block-FP8 requires 'post'"):
+    _validate_runtime(
+        _runtime_view(quantization="fp8", fp8_gemm_runner_backend="triton"),
+        placement="rank1",
+    )
+    with pytest.raises(ValueError, match="block-FP8 requires 'post' or 'rank1'"):
         _validate_runtime(
             _runtime_view(quantization="fp8", fp8_gemm_runner_backend="triton"),
             placement="pre",
@@ -100,6 +105,20 @@ def test_diag_es_accepts_only_post_with_deepseek_block_fp8_triton():
             _runtime_view(quantization="mxfp8", fp8_gemm_runner_backend="triton"),
             placement="post",
         )
+
+
+def test_rank1_rejects_fused_moe_sum_all_reduce():
+    with pytest.raises(ValueError, match="rank1 requires per-route MoE outputs"):
+        _validate_runtime(
+            _runtime_view(enable_fused_moe_sum_all_reduce=True),
+            placement="rank1",
+        )
+
+    # The restriction is specific to the standalone rank1 residual path.
+    _validate_runtime(
+        _runtime_view(enable_fused_moe_sum_all_reduce=True),
+        placement="post",
+    )
 
 
 @pytest.mark.parametrize(
@@ -157,6 +176,20 @@ def test_diag_es_identity_is_role_scoped():
         diag_es_resident_candidate_slots=1,
         speculative_algorithm="nextn",
     )
+    _validate_identity(
+        diag_es_target_placement="rank1",
+        diag_es_schema_id="qwen3-30b-a3b-rank1-es-v1",
+        diag_es_model_artifact_id="artifact",
+        diag_es_resident_candidate_slots=1,
+        speculative_algorithm="NEXTN",
+    )
+    with pytest.raises(ValueError, match="rank1-es-v1"):
+        _validate_identity(
+            diag_es_target_placement="rank1",
+            diag_es_schema_id="qwen3-30b-a3b-diag-es-v2",
+            diag_es_model_artifact_id="artifact",
+            diag_es_resident_candidate_slots=1,
+        )
 
     with pytest.raises(ValueError, match="only --speculative-algorithm NEXTN"):
         _validate_identity(
@@ -177,6 +210,16 @@ def test_mtp_diag_es_identity_is_exact_and_allows_independent_target_role():
             **values,
             "diag_es_target_placement": "post",
             "diag_es_schema_id": "qwen3-30b-a3b-diag-es-v2",
+            "diag_es_model_artifact_id": "target",
+            "diag_es_resident_candidate_slots": 2,
+            "speculative_algorithm": "NEXTN",
+        }
+    )
+    _validate_identity(
+        **{
+            **values,
+            "diag_es_target_placement": "rank1",
+            "diag_es_schema_id": "qwen3-30b-a3b-rank1-es-v1",
             "diag_es_model_artifact_id": "target",
             "diag_es_resident_candidate_slots": 2,
             "speculative_algorithm": "NEXTN",
@@ -307,6 +350,8 @@ def test_invalid_role_placement_is_rejected():
         _validate_identity(diag_es_target_placement="invalid")
     with pytest.raises(ValueError, match="diag_es_mtp_placement"):
         _validate_identity(diag_es_mtp_placement="invalid")
+    with pytest.raises(ValueError, match="diag_es_mtp_placement"):
+        _validate_identity(diag_es_mtp_placement="rank1")
 
 
 def test_diag_es_runner_role_helpers():
@@ -320,3 +365,17 @@ def test_diag_es_runner_role_helpers():
     assert get_diag_es_placement(args, is_draft_worker=True) is None
     assert is_diag_es_enabled(args, is_draft_worker=False)
     assert not is_diag_es_enabled(args, is_draft_worker=True)
+
+    rank1_args = SimpleNamespace(
+        diag_es_target_placement="rank1",
+        diag_es_mtp_placement="off",
+    )
+    assert get_diag_es_placement(rank1_args, is_draft_worker=False) == "rank1"
+    assert get_diag_es_placement(rank1_args, is_draft_worker=True) is None
+
+    mixed_args = SimpleNamespace(
+        diag_es_target_placement="rank1",
+        diag_es_mtp_placement="post",
+    )
+    assert get_diag_es_placement(mixed_args, is_draft_worker=False) == "rank1"
+    assert get_diag_es_placement(mixed_args, is_draft_worker=True) == "post"

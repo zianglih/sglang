@@ -8,6 +8,7 @@ import torch
 from sglang.srt.diag_es.manifest import (
     JOYAI_LLM_FLASH_MTP_SCHEMA_ID,
     QWEN3_30B_A3B_SCHEMA_ID,
+    QWEN3_30B_A3B_RANK1_SCHEMA_ID,
     DiagESManifest,
     DiagESPlacement,
     compute_effective_model_digest,
@@ -91,7 +92,7 @@ def compose_diag_es_mtp_request_extra_key(
 
 
 class DiagESManager:
-    """Fixed-address resident FP32 delta banks for one Qwen3 ES engine."""
+    """Fixed-address resident FP32 steering banks for one Qwen3 ES engine."""
 
     def __init__(
         self,
@@ -431,6 +432,8 @@ def register_diag_es_model(
 ) -> DiagESManager | DiagESMTPSessionManager:
     global _mtp_manager, _target_manager
     if is_draft_worker:
+        if placement == "rank1":
+            raise ValueError("rank1 steering is not supported for MTP drafters")
         if schema_id != JOYAI_LLM_FLASH_MTP_SCHEMA_ID:
             raise ValueError(f"unsupported MTP diagonal-ES schema ID: {schema_id!r}")
         if mtp_max_sessions is None or mtp_max_correct_drafts is None:
@@ -471,8 +474,16 @@ def register_diag_es_model(
         _mtp_manager = mtp_manager
         return mtp_manager
 
-    if schema_id != QWEN3_30B_A3B_SCHEMA_ID:
-        raise ValueError(f"unsupported diagonal-ES schema ID: {schema_id!r}")
+    expected_schema_id = (
+        QWEN3_30B_A3B_RANK1_SCHEMA_ID
+        if placement == "rank1"
+        else QWEN3_30B_A3B_SCHEMA_ID
+    )
+    if schema_id != expected_schema_id:
+        raise ValueError(
+            f"target ES placement {placement!r} requires schema ID "
+            f"{expected_schema_id!r}, got {schema_id!r}"
+        )
     manifest = register_qwen3_30b_a3b_manifest(model, placement=placement)
     manager = DiagESManager(
         manifest=manifest,
@@ -491,6 +502,8 @@ def register_diag_es_model(
         ):
             pre_site_id = linear.es_pre_site_id
             post_site_id = linear.es_post_site_id
+            rank1_down_site_id = linear.es_rank1_down_site_id
+            rank1_up_site_id = linear.es_rank1_up_site_id
             linear.es_pre_delta_bank = (
                 manager.get_dense_delta_bank(pre_site_id)
                 if pre_site_id is not None
@@ -499,6 +512,16 @@ def register_diag_es_model(
             linear.es_post_delta_bank = (
                 manager.get_dense_delta_bank(post_site_id)
                 if post_site_id is not None
+                else None
+            )
+            linear.es_rank1_down_bank = (
+                manager.get_dense_delta_bank(rank1_down_site_id)
+                if rank1_down_site_id is not None
+                else None
+            )
+            linear.es_rank1_up_bank = (
+                manager.get_dense_delta_bank(rank1_up_site_id)
+                if rank1_up_site_id is not None
                 else None
             )
 
@@ -513,6 +536,10 @@ def register_diag_es_model(
             fc1_post=layer_bank("moe_fc1_post"),
             fc2_pre=layer_bank("moe_fc2_pre"),
             fc2_post=layer_bank("moe_fc2_post"),
+            fc1_rank1_down=layer_bank("moe_fc1_rank1_down"),
+            fc1_rank1_up=layer_bank("moe_fc1_rank1_up"),
+            fc2_rank1_down=layer_bank("moe_fc2_rank1_down"),
+            fc2_rank1_up=layer_bank("moe_fc2_rank1_up"),
         )
 
     # Publish only after validation, allocation, and all hot-path bindings

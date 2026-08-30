@@ -216,6 +216,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         backend = get_bf16_gemm_backend()
+        rank1_input = x
         if layer.es_pre_delta_bank is not None:
             from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
@@ -244,18 +245,24 @@ class UnquantizedLinearMethod(LinearMethodBase):
             )
 
             if layer.es_post_delta_bank is None:
-                return triton_bf16_linear(x, layer.weight, bias)
+                output = triton_bf16_linear(x, layer.weight, bias)
+            else:
+                from sglang.srt.diag_es.ops import get_diag_es_post_inputs
 
-            from sglang.srt.diag_es.ops import get_diag_es_post_inputs
+                post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
+                output = triton_bf16_linear(
+                    x,
+                    layer.weight,
+                    bias,
+                    post_delta_bank=post_delta_bank,
+                    candidate_slots=candidate_slots,
+                )
 
-            post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
-            return triton_bf16_linear(
-                x,
-                layer.weight,
-                bias,
-                post_delta_bank=post_delta_bank,
-                candidate_slots=candidate_slots,
-            )
+            if getattr(layer, "es_rank1_down_bank", None) is not None:
+                from sglang.srt.diag_es.ops import maybe_apply_rank1_es
+
+                output = maybe_apply_rank1_es(layer, rank1_input, output)
+            return output
 
         elif (
             backend.is_cutedsl()
@@ -295,6 +302,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         """Run an inference-only BF16 linear into caller-owned storage."""
         backend = get_bf16_gemm_backend()
+        rank1_input = x
         if layer.es_pre_delta_bank is not None:
             from sglang.srt.diag_es.ops import maybe_apply_diag_es_pre
 
@@ -306,19 +314,25 @@ class UnquantizedLinearMethod(LinearMethodBase):
             )
 
             if layer.es_post_delta_bank is None:
-                return triton_bf16_linear_out(x, layer.weight, output, bias)
+                result = triton_bf16_linear_out(x, layer.weight, output, bias)
+            else:
+                from sglang.srt.diag_es.ops import get_diag_es_post_inputs
 
-            from sglang.srt.diag_es.ops import get_diag_es_post_inputs
+                post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
+                result = triton_bf16_linear_out(
+                    x,
+                    layer.weight,
+                    output,
+                    bias,
+                    post_delta_bank=post_delta_bank,
+                    candidate_slots=candidate_slots,
+                )
 
-            post_delta_bank, candidate_slots = get_diag_es_post_inputs(layer)
-            return triton_bf16_linear_out(
-                x,
-                layer.weight,
-                output,
-                bias,
-                post_delta_bank=post_delta_bank,
-                candidate_slots=candidate_slots,
-            )
+            if getattr(layer, "es_rank1_down_bank", None) is not None:
+                from sglang.srt.diag_es.ops import maybe_apply_rank1_es
+
+                result = maybe_apply_rank1_es(layer, rank1_input, result)
+            return result
 
         if (
             backend.is_cutedsl()

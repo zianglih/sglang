@@ -523,6 +523,184 @@ class TestDiagEsTritonMoe(CustomTestCase):
         doubled = run(fc2_delta=fc2_post)
         torch.testing.assert_close(doubled, baseline * 2, rtol=0, atol=0)
 
+    def test_block_fp8_rank1_preserves_sorted_tma_identity_and_graph(self):
+        if torch.cuda.get_device_capability()[0] < 9:
+            self.skipTest("block FP8 TMA requires Hopper or newer")
+
+        from sglang.kernels.ops.moe.fused_moe_triton_kernels import (
+            support_tensor_descriptor,
+        )
+        import importlib
+
+        fused_moe_module = importlib.import_module(
+            "sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe"
+        )
+
+        if not support_tensor_descriptor():
+            self.skipTest("Triton tensor descriptors are unavailable")
+
+        torch.manual_seed(20260830)
+        num_tokens, hidden_size, intermediate_size = 9, 256, 128
+        num_experts, topk, physical_slots = 3, 2, 3
+        hidden_states = torch.randn(
+            (num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16
+        )
+        w13, w13_scale = _quantize_block_fp8(
+            torch.randn(
+                (num_experts, 2 * intermediate_size, hidden_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.04
+        )
+        w2, w2_scale = _quantize_block_fp8(
+            torch.randn(
+                (num_experts, hidden_size, intermediate_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.04
+        )
+        topk_ids = torch.tensor(
+            [
+                [0, 1],
+                [1, 2],
+                [2, 0],
+                [0, 2],
+                [1, 0],
+                [2, 1],
+                [0, 1],
+                [1, 2],
+                [2, 0],
+            ],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        topk_weights = torch.softmax(
+            torch.randn((num_tokens, topk), device="cuda", dtype=torch.float32),
+            dim=-1,
+        ).contiguous()
+        token_slots = torch.tensor(
+            [0, 1, 2, 1, 2, 0, 2, 1, 0],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        fc1_down = (
+            torch.randn(
+                (num_experts, physical_slots, hidden_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.01
+        )
+        fc1_up = torch.zeros(
+            (num_experts, physical_slots, 2 * intermediate_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
+        fc2_down = (
+            torch.randn(
+                (num_experts, physical_slots, intermediate_size),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            * 0.01
+        )
+        fc2_up = torch.zeros(
+            (num_experts, physical_slots, hidden_size),
+            device="cuda",
+            dtype=torch.float32,
+        )
+
+        original_prepare = fused_moe_module._prepare_fused_moe_run
+        preflight = original_prepare(
+            hidden_states,
+            w13,
+            w2,
+            topk_ids,
+            use_fp8_w8a8=True,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            per_channel_quant=False,
+            block_shape=[128, 128],
+        )
+        routes = num_tokens * topk
+        used_sorted_rows = int(preflight[5].item())
+        self.assertGreater(used_sorted_rows, routes)
+        self.assertTrue(
+            torch.any(preflight[3][:used_sorted_rows] == routes).item(),
+            "the forced-TMA integration case must contain padding sentinels",
+        )
+
+        def force_tma(*args, **kwargs):
+            prepared = list(original_prepare(*args, **kwargs))
+            # B300 images can legitimately have no tuned down-GEMM config for
+            # this tiny test shape. The generic gate/up config is still valid
+            # for the down GEMM and lets the test exercise the TMA descriptors,
+            # sorted activation layout, and rank-1 mapping instead of skipping.
+            if prepared[1] is None:
+                prepared[1] = dict(prepared[0])
+            prepared[2] = True
+            return tuple(prepared)
+
+        def run(rank1: bool):
+            return fused_moe_module.fused_experts_impl(
+                hidden_states,
+                w13,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation="silu",
+                is_gated=True,
+                use_fp8_w8a8=True,
+                w1_scale=w13_scale,
+                w2_scale=w2_scale,
+                block_shape=[128, 128],
+                filter_expert=False,
+                diag_es_token_slots=token_slots if rank1 else None,
+                diag_es_fc1_rank1_down=fc1_down if rank1 else None,
+                diag_es_fc1_rank1_up=fc1_up if rank1 else None,
+                diag_es_fc2_rank1_down=fc2_down if rank1 else None,
+                diag_es_fc2_rank1_up=fc2_up if rank1 else None,
+            )
+
+        with patch.object(
+            fused_moe_module, "_prepare_fused_moe_run", side_effect=force_tma
+        ):
+            baseline = run(False)
+            identity = run(True)
+            torch.testing.assert_close(identity, baseline, rtol=0, atol=0)
+
+            fc1_up[:, 1:].uniform_(-0.1, 0.1)
+            fc2_up[:, 1:].uniform_(-0.1, 0.1)
+            active = run(True)
+            identity_tokens = token_slots == 0
+            self.assertTrue(
+                torch.equal(active[identity_tokens], baseline[identity_tokens])
+            )
+            self.assertFalse(
+                torch.equal(active[~identity_tokens], baseline[~identity_tokens])
+            )
+
+            run(True)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = run(True)
+
+            token_slots.copy_((token_slots + 1) % physical_slots)
+            fc1_down.uniform_(-0.02, 0.02)
+            fc1_up[:, 1:].uniform_(-0.2, 0.2)
+            fc2_down.uniform_(-0.02, 0.02)
+            fc2_up[:, 1:].uniform_(-0.2, 0.2)
+            topk_weights.copy_(torch.softmax(torch.randn_like(topk_weights), dim=-1))
+            graph.replay()
+            torch.cuda.synchronize()
+            expected = run(True)
+            torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
     def test_both_delta_cuda_graph_observes_live_slots_and_banks(self):
         torch.manual_seed(20260821)
         num_tokens, hidden_size, intermediate_size = 5, 64, 32
