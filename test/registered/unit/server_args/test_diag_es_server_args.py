@@ -356,6 +356,7 @@ def test_invalid_role_placement_is_rejected():
 
 def test_diag_es_runner_role_helpers():
     from sglang.srt.diag_es import get_diag_es_placement, is_diag_es_enabled
+    from sglang.srt.diag_es.roles import get_diag_es_mtp_max_correct_drafts
 
     args = SimpleNamespace(
         diag_es_target_placement="both",
@@ -379,3 +380,12 @@ def test_diag_es_runner_role_helpers():
     )
     assert get_diag_es_placement(mixed_args, is_draft_worker=False) == "rank1"
     assert get_diag_es_placement(mixed_args, is_draft_worker=True) == "post"
+
+    # Target-only steering must not evaluate an absent MTP draft-token limit.
+    rank1_args.speculative_num_draft_tokens = None
+    assert get_diag_es_mtp_max_correct_drafts(rank1_args, is_draft_worker=False) is None
+    assert get_diag_es_mtp_max_correct_drafts(rank1_args, is_draft_worker=True) is None
+
+    mixed_args.speculative_num_draft_tokens = 4
+    assert get_diag_es_mtp_max_correct_drafts(mixed_args, is_draft_worker=False) is None
+    assert get_diag_es_mtp_max_correct_drafts(mixed_args, is_draft_worker=True) == 3

@@ -11,6 +11,7 @@ DiagESMTPRolePlacement = Literal["off", "pre", "post", "both"]
 class _DiagESRoleArgs(Protocol):
     diag_es_target_placement: DiagESTargetRolePlacement
     diag_es_mtp_placement: DiagESMTPRolePlacement
+    speculative_num_draft_tokens: int | None
 
 
 def get_diag_es_placement(
@@ -32,3 +33,16 @@ def is_diag_es_enabled(server_args: _DiagESRoleArgs, *, is_draft_worker: bool) -
     return (
         get_diag_es_placement(server_args, is_draft_worker=is_draft_worker) is not None
     )
+
+
+def get_diag_es_mtp_max_correct_drafts(
+    server_args: _DiagESRoleArgs, *, is_draft_worker: bool
+) -> int | None:
+    """Return the MTP-only acceptance bound without touching target-only args."""
+
+    if not is_draft_worker or server_args.diag_es_mtp_placement == "off":
+        return None
+    num_draft_tokens = server_args.speculative_num_draft_tokens
+    if num_draft_tokens is None:
+        raise ValueError("MTP steering requires speculative_num_draft_tokens")
+    return num_draft_tokens - 1
