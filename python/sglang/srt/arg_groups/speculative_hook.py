@@ -590,13 +590,35 @@ def _handle_dspark(server_args: ServerArgs) -> None:
 
     # dp_size==1 with dp_attention is a degenerate flag under DSV4 CP; skip DP-only checks.
     if cfg.enable_dp_attention and cfg.dp_size > 1:
+        # The bundled V4 draft keeps its MXFP4 experts on the TRT runner even
+        # when the target uses NVFP4 MegaMoE. The worker scopes both backends.
+        fixed_mxfp4_draft = (
+            cfg.speculative_moe_a2a_backend == "none"
+            and cfg.speculative_moe_runner_backend == "flashinfer_mxfp4"
+        )
         if not cfg.enable_dp_lm_head:
             raise ValueError("DSpark with dp attention requires --enable-dp-lm-head.")
-        if not _is_npu and cfg.moe_a2a_backend not in ("none", "megamoe", "mori"):
+        if not _is_npu and cfg.moe_a2a_backend not in (
+            "none",
+            "megamoe",
+            "mori",
+            "flashinfer_megamoe",
+        ):
             raise ValueError(
                 "DSpark with dp attention supports moe_a2a_backend 'none' "
-                "(built-in TP MoE), 'megamoe', or 'mori', got "
+                "(built-in TP MoE), 'megamoe', 'mori', or 'flashinfer_megamoe', got "
                 f"{cfg.moe_a2a_backend!r}."
+            )
+        if (
+            not _is_npu
+            and cfg.moe_a2a_backend == "flashinfer_megamoe"
+            and not fixed_mxfp4_draft
+        ):
+            raise ValueError(
+                "DSpark with FlashInfer MegaMoE requires "
+                "--speculative-moe-a2a-backend none and "
+                "--speculative-moe-runner-backend flashinfer_mxfp4 "
+                "to preserve the bundled MXFP4 draft."
             )
         if not _is_npu and cfg.moe_a2a_backend != "none":
             from sglang.srt.speculative.ragged_verify import (
@@ -619,10 +641,12 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             not _is_npu
             and cfg.speculative_moe_a2a_backend is not None
             and cfg.speculative_moe_a2a_backend != cfg.moe_a2a_backend
+            and not fixed_mxfp4_draft
         ):
             raise ValueError(
-                "DSpark ignores --speculative-moe-a2a-backend; with dp attention it "
-                f"must match the target moe_a2a_backend={cfg.moe_a2a_backend!r} "
+                "DSpark with dp attention requires the draft A2A backend to "
+                f"match the target moe_a2a_backend={cfg.moe_a2a_backend!r}, "
+                "or the fixed none/flashinfer_mxfp4 draft pair "
                 f"(got {cfg.speculative_moe_a2a_backend!r})."
             )
 

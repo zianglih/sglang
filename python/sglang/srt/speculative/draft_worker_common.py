@@ -79,9 +79,9 @@ def build_draft_tp_worker(
 
     # The draft's model construction runs its own MoE gates; the scope routes
     # their fusion decision to the speculative leaf and gives the target its
-    # ACTIVE value back. It deliberately does not swap runner_backend: these
-    # workers run the draft outside speculative_moe_backend_context, so a
-    # construction-only swap would build and execute under different backends.
+    # ACTIVE value back. Backend overrides belong to the caller, which must
+    # scope both construction and execution (as DSpark's fixed MXFP4 draft
+    # does); a construction-only swap would prepare the wrong weight layout.
     with draft_model_build_scope():
         draft_worker = draft_worker_cls(
             server_args=server_args,
@@ -139,7 +139,6 @@ def make_draft_block_spec_info(
 
 
 def make_draft_sampler_capture_hook(draft_sampler):
-
     def capture_hook(runner, out, forward_batch, num_tokens):
         del runner, num_tokens
         if not isinstance(out, LogitsProcessorOutput) or out.hidden_states is None:
