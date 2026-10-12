@@ -1712,6 +1712,7 @@ class TestFlashinferMegaMoeConfig(CustomTestCase):
             "DeepseekV32ForCausalLM",
             "DeepseekV4ForCausalLM",
             "Glm4MoeForCausalLM",
+            "GlmMoeDsaForCausalLM",
             "NemotronHForCausalLM",
             "NemotronHPuzzleForCausalLM",
             "Qwen2MoeForCausalLM",
