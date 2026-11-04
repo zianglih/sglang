@@ -1,0 +1,12 @@
+{
+  "commit": "354f91325a07fe327b10a29f4f2239a94cd5fa2e",
+  "base": "58484246d26523eaf1a7f16ab524deee288d2120",
+  "files": {
+    "python/sglang/srt/layers/moe/moe_runner/flashinfer_cutedsl.py": "10cfefc43c0e35b67aaeea1d4268dbd72b859cb2575a5ac446550824eda5fc9f",
+    "python/sglang/srt/layers/quantization/modelopt_quant.py": "250baa269f64335b6e8b0db83f1cfd9bcd8ba623328b426c845754af577bd35e",
+    "python/sglang/srt/model_loader/loader.py": "714b45a24f100e4b743c1eb6e35cf935bcdf024295560d82810864ba78529306",
+    "test/registered/unit/layers/quantization/test_modelopt_nvfp4_moe_scales.py": "b2c2df26200da3d7ab64d0c067d5d27118686355db79d22d56227d33c8916552",
+    "test/registered/unit/layers/quantization/test_nvfp4_moe_backends.py": "ab0046dc06cc283e3afa081ba4c6bd314f2a13a773d8f34882f8c77bdc77fe30",
+    "test/registered/unit/model_loader/test_presharded_loader.py": "5f5c3d7f2400f880e80aadf5e870c86020698398af7f73b4f080b63b79cb1f9a"
+  }
+}

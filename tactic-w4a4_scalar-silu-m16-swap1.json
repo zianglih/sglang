@@ -1,0 +1,51 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.7.3",
+    "cuda_version": "13.0",
+    "cublas_version": "13.1.1",
+    "cudnn_version": "92400",
+    "cudnn_frontend_version": "1.32.1",
+    "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+    "gpu": "NVIDIA B300 SXM6 AC"
+  },
+  "('CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB', 'CuteDslFusedMoERunner', ((16, 3584), (16, 448), (16, 8), (16, 8), (32, 4096, 3584), (32, 4, 32, 4, 112, 32), (32,), (1,), (32, 7168, 1024), (32, 4, 56, 4, 32, 32), (32,), (16, 7168)), ('w4a4', 3, 1.0, 0.0, 3.4028234663852886e+38, None, None, 32, False, torch.bfloat16, True, 'swap_ab'))": [
+    "CuteDslFusedMoERunner",
+    [
+      16,
+      [
+        [
+          256,
+          16
+        ],
+        [
+          2,
+          1
+        ],
+        false
+      ],
+      [
+        [
+          256,
+          16
+        ],
+        [
+          2,
+          1
+        ],
+        false
+      ],
+      [
+        8,
+        8
+      ],
+      true
+    ],
+    [
+      "cuda_graph_profile_replays",
+      null,
+      "l2_cache_policy",
+      "cold"
+    ]
+  ],
+  "_generation": "132d9b9eb0db309da6c06806890ea94627bca3a10a06a8d5acb718cae2de79c1"
+}

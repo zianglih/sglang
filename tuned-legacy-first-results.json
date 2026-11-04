@@ -1,0 +1,1611 @@
+{
+  "environment": {
+    "python": "3.12.16",
+    "torch": "2.14.1+cu130",
+    "cuda": "13.0",
+    "gpu": "NVIDIA B300 SXM6 AC",
+    "capability": [
+      10,
+      3
+    ],
+    "flashinfer": "0.7.3",
+    "flashinfer_file": "/scratch/ziangli/sglang-flashinfer-swap-ab/flashinfer/flashinfer/__init__.py",
+    "sglang_file": "/scratch/ziangli/sglang-flashinfer-swap-ab/sglang/python/sglang/__init__.py",
+    "visible_devices": "1",
+    "matmul_allow_tf32": false,
+    "inherited_kernel_environment": {
+      "FLASHINFER_NVFP4_4OVER6": null,
+      "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": null,
+      "FLASHINFER_NVFP4_4OVER6_ERR_MODE": null,
+      "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": null,
+      "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": null,
+      "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": null,
+      "TRTLLM_ENABLE_PDL": null,
+      "FLASHINFER_DIST_AWARE_AUTOTUNE": null,
+      "FLASHINFER_CUTE_DSL_STRICT_CACHE_KEY": null,
+      "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
+      "CUTE_DSL_CACHE_DIR": "/scratch/ziangli/sglang-flashinfer-swap-ab/cache/cute-gpu1",
+      "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": null,
+      "SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": null,
+      "SGLANG_FLASHINFER_MOE_FUSED_FINALIZE": null,
+      "SGLANG_MOE_NVFP4_DISPATCH": null
+    },
+    "nvfp4_4over6_config": "None"
+  },
+  "arguments": {
+    "output": "results/tuned-legacy-first",
+    "tokens": "16",
+    "cases": "w4a4_scalar:silu,w4a4_per_token:silu",
+    "hidden": 7168,
+    "intermediate": 2048,
+    "experts": 32,
+    "topk": 8,
+    "timing": true,
+    "autotune": true,
+    "tactic_cache_dir": "results/tuned-cache",
+    "arm_order": "legacy-first",
+    "warmup": 10,
+    "iters": 100,
+    "port": 29673
+  },
+  "method": "Real SGLang FusedMoE TP1/EP1; serialized NVFP4 through production loaders. Identical checkpoints, BF16 inputs and precomputed routes in both arms. Both arms use exact FlashInfer #7290 merge; legacy forces swap_ab=False. Deterministic unfused finalize; each mode/layout tunes only the requested token bucket before measurement, then retains the same selected cache for the reverse-order repeat. W4A16 has an independent dequantized-weight FP32 matmul/BF16-activation reference; W4A4 checks cross-layout parity, graph equality and reload. Optional timings use CUDA events around one whole-forward graph replay per sample, warm L2, initial quantization included, reload/weight prep/capture excluded; tactics are independently selected per mode/layout and frozen across repeats; this is not an isolated common-tactic kernel or CUPTI study.",
+  "arms": [
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 16,
+      "swap_ab": false,
+      "autotune": {
+        "cache": "results/tuned-cache/w4a4_scalar-silu-m16-swap0.json",
+        "cache_sha256": "42a10dd4225e215a8d0eba25cc89e35b20610b0081902013893f46825eb7e883",
+        "loaded_existing_cache": false,
+        "tuning_buckets": [
+          16
+        ],
+        "selection": {
+          "_metadata": {
+            "flashinfer_version": "0.7.3",
+            "cuda_version": "13.0",
+            "cublas_version": "13.1.1",
+            "cudnn_version": "92400",
+            "cudnn_frontend_version": "1.32.1",
+            "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+            "gpu": "NVIDIA B300 SXM6 AC"
+          },
+          "('CuteDslMoEWrapper::run::w4a4::Swiglu', 'CuteDslFusedMoERunner', ((16, 3584), (16, 448), (16, 8), (16, 8), (32, 4096, 3584), (32, 4, 32, 4, 112, 32), (32,), (1,), (32, 7168, 1024), (32, 4, 56, 4, 32, 32), (32,), (16, 7168)), ('w4a4', 3, 1.0, 0.0, 3.4028234663852886e+38, None, None, 32, False, torch.bfloat16, True))": [
+            "CuteDslFusedMoERunner",
+            [
+              128,
+              [
+                [
+                  128,
+                  128
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ],
+              [
+                [
+                  128,
+                  128
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ]
+            ],
+            [
+              "cuda_graph_profile_replays",
+              null,
+              "l2_cache_policy",
+              "cold"
+            ]
+          ],
+          "_generation": "ca6505314d5f0b875b0b7fa512923132ff9b9cd73d92948ed29bee9bec29ceb5"
+        },
+        "statistics_after_selection": "Cache misses: 0\nTuned operations:\n  CuteDslMoEWrapper::run::w4a4::Swiglu:\n    - Total configs tried: 1\n    - Successful configs: 1\n    - Failed profiling count: 0\n    - Success rate: 100.0%\n"
+      },
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 134993204477952,
+        "w2_weight": 134992969596928,
+        "w13_blockscale_mma": 135014345867264,
+        "w2_blockscale_mma": 134999848255488,
+        "resolved_scale_0": 135013836235776,
+        "resolved_scale_1": 135013836231680,
+        "resolved_scale_2": 135013836234752,
+        "resolved_input_scale": 135013836233216
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [
+        147.2959965467453,
+        146.91199362277985,
+        145.91999351978302,
+        145.6959992647171,
+        147.039994597435,
+        146.59200608730316,
+        146.43199741840363,
+        147.0080018043518,
+        145.47200500965118,
+        147.45600521564484,
+        147.0080018043518,
+        146.01600170135498,
+        147.39200472831726,
+        147.23199605941772,
+        148.03199470043182,
+        146.81600034236908,
+        146.88000082969666,
+        147.67999947071075,
+        146.43199741840363,
+        147.64800667762756,
+        145.21600306034088,
+        147.10399508476257,
+        146.7200070619583,
+        146.04799449443817,
+        145.82400023937225,
+        148.15999567508698,
+        145.85599303245544,
+        145.47200500965118,
+        146.68799936771393,
+        147.13600277900696,
+        145.34400403499603,
+        147.16799557209015,
+        147.23199605941772,
+        147.67999947071075,
+        146.4959979057312,
+        145.08800208568573,
+        146.84799313545227,
+        146.7200070619583,
+        147.5200057029724,
+        145.34400403499603,
+        145.6640064716339,
+        146.5280055999756,
+        146.7200070619583,
+        145.6640064716339,
+        146.7839926481247,
+        148.0640023946762,
+        147.64800667762756,
+        147.67999947071075,
+        147.71200716495514,
+        147.42399752140045,
+        146.94400131702423,
+        146.91199362277985,
+        146.68799936771393,
+        146.11199498176575,
+        145.53600549697876,
+        147.5840061903,
+        144.99199390411377,
+        148.0640023946762,
+        146.88000082969666,
+        146.65600657463074,
+        147.13600277900696,
+        148.92800152301788,
+        147.45600521564484,
+        147.5200057029724,
+        145.50399780273438,
+        146.27200365066528,
+        146.97599411010742,
+        147.5519984960556,
+        147.039994597435,
+        147.8399932384491,
+        148.00000190734863,
+        147.32800424098969,
+        146.40000462532043,
+        149.02399480342865,
+        146.91199362277985,
+        147.48799800872803,
+        145.79200744628906,
+        146.5280055999756,
+        146.81600034236908,
+        147.2959965467453,
+        146.14400267601013,
+        145.11999487876892,
+        145.1520025730133,
+        147.2959965467453,
+        146.97599411010742,
+        147.23199605941772,
+        146.91199362277985,
+        146.11199498176575,
+        147.5840061903,
+        146.7200070619583,
+        147.39200472831726,
+        147.5519984960556,
+        146.43199741840363,
+        147.93600142002106,
+        147.90399372577667,
+        147.0080018043518,
+        146.91199362277985,
+        144.57599818706512,
+        148.67199957370758,
+        147.13600277900696
+      ],
+      "median_us": 146.91199362277985,
+      "selected_tactics_outside_tuning": [
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        }
+      ],
+      "cache_misses_after_tuning": 0,
+      "elapsed_seconds": 21.28578165899671
+    },
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 16,
+      "swap_ab": true,
+      "autotune": {
+        "cache": "results/tuned-cache/w4a4_scalar-silu-m16-swap1.json",
+        "cache_sha256": "1e284d2d7d7ff6eb0a4d6b2e56b8377c85b37a2519b5c9b1dc64ba1e0133f3b6",
+        "loaded_existing_cache": false,
+        "tuning_buckets": [
+          16
+        ],
+        "selection": {
+          "_metadata": {
+            "flashinfer_version": "0.7.3",
+            "cuda_version": "13.0",
+            "cublas_version": "13.1.1",
+            "cudnn_version": "92400",
+            "cudnn_frontend_version": "1.32.1",
+            "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+            "gpu": "NVIDIA B300 SXM6 AC"
+          },
+          "('CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB', 'CuteDslFusedMoERunner', ((16, 3584), (16, 448), (16, 8), (16, 8), (32, 4096, 3584), (32, 4, 32, 4, 112, 32), (32,), (1,), (32, 7168, 1024), (32, 4, 56, 4, 32, 32), (32,), (16, 7168)), ('w4a4', 3, 1.0, 0.0, 3.4028234663852886e+38, None, None, 32, False, torch.bfloat16, True, 'swap_ab'))": [
+            "CuteDslFusedMoERunner",
+            [
+              16,
+              [
+                [
+                  256,
+                  16
+                ],
+                [
+                  2,
+                  1
+                ],
+                false
+              ],
+              [
+                [
+                  256,
+                  16
+                ],
+                [
+                  2,
+                  1
+                ],
+                false
+              ],
+              [
+                8,
+                8
+              ],
+              true
+            ],
+            [
+              "cuda_graph_profile_replays",
+              null,
+              "l2_cache_policy",
+              "cold"
+            ]
+          ],
+          "_generation": "132d9b9eb0db309da6c06806890ea94627bca3a10a06a8d5acb718cae2de79c1"
+        },
+        "statistics_after_selection": "Cache misses: 0\nTuned operations:\n  CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB:\n    - Total configs tried: 1\n    - Successful configs: 1\n    - Failed profiling count: 0\n    - Success rate: 100.0%\n"
+      },
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 134991124103168,
+        "w2_weight": 134992734715904,
+        "w13_blockscale_mma": 134999378493440,
+        "w2_blockscale_mma": 134999445602304,
+        "resolved_scale_0": 135013836242432,
+        "resolved_scale_1": 135013836238336,
+        "resolved_scale_2": 135013836241408,
+        "resolved_input_scale": 135013836239872
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [
+        135.0719928741455,
+        133.18400084972382,
+        131.32800161838531,
+        132.4159950017929,
+        133.2480013370514,
+        132.4480026960373,
+        132.89600610733032,
+        130.5599957704544,
+        132.192000746727,
+        132.9279989004135,
+        131.071999669075,
+        130.68799674510956,
+        131.6159963607788,
+        132.22399353981018,
+        130.72000443935394,
+        132.47999548912048,
+        133.08799266815186,
+        132.54399597644806,
+        132.57600367069244,
+        132.28799402713776,
+        133.15199315547943,
+        130.8159977197647,
+        133.7919980287552,
+        131.1360001564026,
+        133.08799266815186,
+        133.18400084972382,
+        131.04000687599182,
+        133.08799266815186,
+        132.89600610733032,
+        130.5920034646988,
+        133.69600474834442,
+        130.94399869441986,
+        132.1599930524826,
+        132.9279989004135,
+        130.97600638866425,
+        132.76800513267517,
+        130.5599957704544,
+        130.65600395202637,
+        131.55199587345123,
+        133.7279975414276,
+        132.76800513267517,
+        132.22399353981018,
+        133.02400708198547,
+        131.04000687599182,
+        130.94399869441986,
+        130.94399869441986,
+        131.32800161838531,
+        134.14399325847626,
+        131.3920021057129,
+        132.22399353981018,
+        131.99999928474426,
+        130.20800054073334,
+        132.9919993877411,
+        132.47999548912048,
+        132.51200318336487,
+        131.52000308036804,
+        130.46400249004364,
+        132.57600367069244,
+        131.6159963607788,
+        132.86399841308594,
+        132.7359974384308,
+        132.89600610733032,
+        132.7359974384308,
+        131.71200454235077,
+        130.49599528312683,
+        130.5920034646988,
+        132.57600367069244,
+        130.20800054073334,
+        131.26400113105774,
+        130.5920034646988,
+        132.22399353981018,
+        131.8719983100891,
+        132.9919993877411,
+        132.25600123405457,
+        131.58400356769562,
+        131.45600259304047,
+        132.32000172138214,
+        132.4159950017929,
+        131.55199587345123,
+        132.76800513267517,
+        131.67999684810638,
+        133.34399461746216,
+        132.1280002593994,
+        132.25600123405457,
+        131.67999684810638,
+        133.2480013370514,
+        132.22399353981018,
+        131.9040060043335,
+        132.51200318336487,
+        130.52800297737122,
+        131.9359987974167,
+        132.32000172138214,
+        131.99999928474426,
+        131.55199587345123,
+        132.06399977207184,
+        131.80799782276154,
+        132.76800513267517,
+        133.27999413013458,
+        132.9919993877411,
+        131.67999684810638
+      ],
+      "median_us": 132.22399353981018,
+      "selected_tactics_outside_tuning": [
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                256,
+                16
+              ],
+              [
+                2,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              8
+            ],
+            true
+          ],
+          "tuning_mode": false
+        }
+      ],
+      "cache_misses_after_tuning": 0,
+      "elapsed_seconds": 128.979256067003
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 16,
+      "swap_ab": false,
+      "autotune": {
+        "cache": "results/tuned-cache/w4a4_per_token-silu-m16-swap0.json",
+        "cache_sha256": "3336bfb357a710db09db5313bb7ecfd7b161298faa0e99b9b7a0c22180215489",
+        "loaded_existing_cache": false,
+        "tuning_buckets": [
+          16
+        ],
+        "selection": {
+          "_metadata": {
+            "flashinfer_version": "0.7.3",
+            "cuda_version": "13.0",
+            "cublas_version": "13.1.1",
+            "cudnn_version": "92400",
+            "cudnn_frontend_version": "1.32.1",
+            "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+            "gpu": "NVIDIA B300 SXM6 AC"
+          },
+          "('CuteDslMoEWrapper::run::w4a4::Swiglu', 'CuteDslFusedMoERunner', ((16, 3584), (16, 448), (16, 8), (16, 8), (32, 4096, 3584), (32, 4, 32, 4, 112, 32), (32,), (1,), (32, 7168, 1024), (32, 4, 56, 4, 32, 32), (32,), (16,), (16, 7168)), ('w4a4', 3, 1.0, 0.0, 3.4028234663852886e+38, None, None, 32, False, torch.bfloat16, True))": [
+            "CuteDslFusedMoERunner",
+            [
+              128,
+              [
+                [
+                  128,
+                  128
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ],
+              [
+                [
+                  128,
+                  128
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ]
+            ],
+            [
+              "cuda_graph_profile_replays",
+              null,
+              "l2_cache_policy",
+              "cold"
+            ]
+          ],
+          "_generation": "7da315f515e7dd40a9b4ebded2026a33841969d632433be9f47697928d731ba2"
+        },
+        "statistics_after_selection": "Cache misses: 0\nTuned operations:\n  CuteDslMoEWrapper::run::w4a4::Swiglu:\n    - Total configs tried: 1\n    - Successful configs: 1\n    - Failed profiling count: 0\n    - Success rate: 100.0%\n"
+      },
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 135003874787328,
+        "w2_weight": 134993233838080,
+        "w13_blockscale_mma": 135014287147008,
+        "w2_blockscale_mma": 135014008225792,
+        "resolved_scale_0": 134999439284224,
+        "resolved_scale_1": 135012793823232,
+        "resolved_scale_2": 134999439282176,
+        "resolved_input_scale": 134999439283712
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [
+        161.8880033493042,
+        161.82400286197662,
+        160.47999262809753,
+        160.41600704193115,
+        160.89600324630737,
+        160.41600704193115,
+        159.42400693893433,
+        160.76800227165222,
+        160.35200655460358,
+        158.52800011634827,
+        161.21600568294525,
+        160.44799983501434,
+        158.87999534606934,
+        162.4000072479248,
+        160.8320027589798,
+        159.07199680805206,
+        162.49600052833557,
+        159.39199924468994,
+        158.75199437141418,
+        160.92799603939056,
+        161.15200519561768,
+        160.76800227165222,
+        160.288006067276,
+        158.39999914169312,
+        160.0320041179657,
+        159.9999964237213,
+        160.16000509262085,
+        158.1760048866272,
+        160.70400178432465,
+        158.24000537395477,
+        158.59200060367584,
+        160.47999262809753,
+        159.743994474411,
+        159.90400314331055,
+        161.0880047082901,
+        159.64800119400024,
+        160.51200032234192,
+        159.93599593639374,
+        160.64000129699707,
+        160.35200655460358,
+        160.89600324630737,
+        160.7999950647354,
+        158.62399339675903,
+        160.5760008096695,
+        158.75199437141418,
+        160.73599457740784,
+        160.22400557994843,
+        160.73599457740784,
+        158.4639996290207,
+        160.863995552063,
+        160.22400557994843,
+        160.67199409008026,
+        159.04000401496887,
+        160.76800227165222,
+        160.0639969110489,
+        160.99199652671814,
+        159.87199544906616,
+        160.19199788570404,
+        162.7199947834015,
+        160.25599837303162,
+        160.5760008096695,
+        161.85599565505981,
+        160.19199788570404,
+        160.5439931154251,
+        160.44799983501434,
+        159.4880074262619,
+        160.67199409008026,
+        159.90400314331055,
+        159.87199544906616,
+        161.02400422096252,
+        159.8079949617386,
+        161.95200383663177,
+        160.7999950647354,
+        160.35200655460358,
+        160.73599457740784,
+        160.5760008096695,
+        158.9439958333969,
+        161.31199896335602,
+        159.96800363063812,
+        161.5999937057495,
+        159.10400450229645,
+        161.05599701404572,
+        160.12799739837646,
+        162.33600676059723,
+        160.96000373363495,
+        160.0320041179657,
+        160.288006067276,
+        161.6320013999939,
+        159.10400450229645,
+        159.64800119400024,
+        159.9999964237213,
+        159.04000401496887,
+        161.21600568294525,
+        160.67199409008026,
+        158.78400206565857,
+        159.8079949617386,
+        160.44799983501434,
+        160.288006067276,
+        160.76800227165222,
+        159.90400314331055
+      ],
+      "median_us": 160.38400679826736,
+      "selected_tactics_outside_tuning": [
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            128,
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                128
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ]
+          ],
+          "tuning_mode": false
+        }
+      ],
+      "cache_misses_after_tuning": 0,
+      "elapsed_seconds": 6.214262895999127
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 16,
+      "swap_ab": true,
+      "autotune": {
+        "cache": "results/tuned-cache/w4a4_per_token-silu-m16-swap1.json",
+        "cache_sha256": "a4d26f53c4eabf1c8a28dd64bac3dd7ab52e5ab8162c5b3298d0f0da6860c580",
+        "loaded_existing_cache": false,
+        "tuning_buckets": [
+          16
+        ],
+        "selection": {
+          "_metadata": {
+            "flashinfer_version": "0.7.3",
+            "cuda_version": "13.0",
+            "cublas_version": "13.1.1",
+            "cudnn_version": "92400",
+            "cudnn_frontend_version": "1.32.1",
+            "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+            "gpu": "NVIDIA B300 SXM6 AC"
+          },
+          "('CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB', 'CuteDslFusedMoERunner', ((16, 3584), (16, 448), (16, 8), (16, 8), (32, 4096, 3584), (32, 4, 32, 4, 112, 32), (32,), (1,), (32, 7168, 1024), (32, 4, 56, 4, 32, 32), (32,), (16,), (16, 7168)), ('w4a4', 3, 1.0, 0.0, 3.4028234663852886e+38, None, None, 32, False, torch.bfloat16, True, 'swap_ab'))": [
+            "CuteDslFusedMoERunner",
+            [
+              16,
+              [
+                [
+                  128,
+                  16
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ],
+              [
+                [
+                  128,
+                  16
+                ],
+                [
+                  1,
+                  1
+                ],
+                false
+              ],
+              [
+                8,
+                4
+              ],
+              true
+            ],
+            [
+              "cuda_graph_profile_replays",
+              null,
+              "l2_cache_policy",
+              "cold"
+            ]
+          ],
+          "_generation": "31f9fc8000ef1e052af39bd0432d18bb84d4884e5d6722dc0401809799882ff7"
+        },
+        "statistics_after_selection": "Cache misses: 0\nTuned operations:\n  CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB:\n    - Total configs tried: 1\n    - Successful configs: 1\n    - Failed profiling count: 0\n    - Success rate: 100.0%\n"
+      },
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 135004344549376,
+        "w2_weight": 135004814311424,
+        "w13_blockscale_mma": 134993468719104,
+        "w2_blockscale_mma": 134993527439360,
+        "resolved_scale_0": 134999439290880,
+        "resolved_scale_1": 134999439288832,
+        "resolved_scale_2": 134999439286784,
+        "resolved_input_scale": 134999439290368
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [
+        139.8400068283081,
+        141.24800264835358,
+        139.93600010871887,
+        139.13600146770477,
+        138.33600282669067,
+        140.73599874973297,
+        139.13600146770477,
+        136.03200018405914,
+        138.49599659442902,
+        137.63199746608734,
+        140.9280002117157,
+        139.8719996213913,
+        137.37599551677704,
+        139.55199718475342,
+        136.4479959011078,
+        136.31999492645264,
+        140.32000303268433,
+        139.93600010871887,
+        137.7280056476593,
+        139.3599957227707,
+        140.47999680042267,
+        138.11199367046356,
+        138.87999951839447,
+        138.62399756908417,
+        139.55199718475342,
+        139.615997672081,
+        136.9599997997284,
+        136.80000603199005,
+        140.6400054693222,
+        138.94400000572205,
+        140.51200449466705,
+        140.06400108337402,
+        138.40000331401825,
+        135.6479972600937,
+        136.80000603199005,
+        136.86400651931763,
+        138.0160003900528,
+        137.85600662231445,
+        140.22399485111237,
+        139.77600634098053,
+        137.69599795341492,
+        140.86399972438812,
+        140.03199338912964,
+        136.63999736309052,
+        138.91200721263885,
+        138.8159990310669,
+        142.17600226402283,
+        138.43199610710144,
+        138.20800185203552,
+        140.25600254535675,
+        139.3599957227707,
+        136.73600554466248,
+        137.31199502944946,
+        136.31999492645264,
+        138.62399756908417,
+        136.9599997997284,
+        137.2160017490387,
+        138.94400000572205,
+        139.1039937734604,
+        138.49599659442902,
+        137.66400516033173,
+        141.08799397945404,
+        138.33600282669067,
+        140.6400054693222,
+        136.7039978504181,
+        139.8719996213913,
+        136.80000603199005,
+        139.00800049304962,
+        139.13600146770477,
+        139.96799290180206,
+        139.29599523544312,
+        137.37599551677704,
+        140.51200449466705,
+        139.3280029296875,
+        139.0720009803772,
+        139.64800536632538,
+        139.39200341701508,
+        141.184002161026,
+        138.5599970817566,
+        136.60800457000732,
+        137.02400028705597,
+        135.55200397968292,
+        139.90400731563568,
+        139.23199474811554,
+        136.7039978504181,
+        141.95199310779572,
+        139.90400731563568,
+        138.43199610710144,
+        140.4159963130951,
+        137.05599308013916,
+        136.9280070066452,
+        138.2720023393631,
+        139.67999815940857,
+        136.9280070066452,
+        137.37599551677704,
+        134.94400680065155,
+        139.0399932861328,
+        139.0399932861328,
+        138.14400136470795,
+        138.75199854373932
+      ],
+      "median_us": 138.89600336551666,
+      "selected_tactics_outside_tuning": [
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        },
+        {
+          "op": "CuteDslMoEWrapper::run::w4a4::Swiglu::SwapAB",
+          "runner": "CuteDslFusedMoERunner",
+          "tactic": [
+            16,
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              [
+                128,
+                16
+              ],
+              [
+                1,
+                1
+              ],
+              false
+            ],
+            [
+              8,
+              4
+            ],
+            true
+          ],
+          "tuning_mode": false
+        }
+      ],
+      "cache_misses_after_tuning": 0,
+      "elapsed_seconds": 139.41156615200453
+    }
+  ],
+  "comparisons": [
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 16,
+      "initial": {
+        "cosine": 1.0000044107437134,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 1.734375,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000042915344238,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 2.171875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "legacy_median_us": 146.91199362277985,
+      "swap_ab_median_us": 132.22399353981018,
+      "legacy_over_swap_ab": 1.1110842267711978
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 16,
+      "initial": {
+        "cosine": 1.0000033378601074,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 1.7265625,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000042915344238,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 2.1875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "legacy_median_us": 160.38400679826736,
+      "swap_ab_median_us": 138.89600336551666,
+      "legacy_over_swap_ab": 1.1547057000351781
+    }
+  ],
+  "complete": true
+}
