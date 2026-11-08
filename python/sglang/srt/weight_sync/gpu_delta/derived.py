@@ -33,7 +33,7 @@ class DerivedUpdate:
 
     ``overrides`` contains complete tensors keyed by ``id(original_source)``.
     The caller assembles any partial canonical updates before preparation and
-    applies the returned copies only after successful DE/apply completion.
+    applies the returned copies only after successful decode/apply completion.
     """
 
     sources: tuple[torch.Tensor, ...]

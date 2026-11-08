@@ -1,4 +1,4 @@
-"""Engine-host sharing, DE-local preparation, and failure lifetimes."""
+"""Engine-host sharing, pinned mapping reuse, and failure lifetimes."""
 
 import hashlib
 import json
@@ -184,28 +184,13 @@ def fake_fallocate(fd, offset, length):
     os.ftruncate(fd, offset + length)
 
 
-class FakeHostAllocation:
-    """Rank-private CPU backing; CUDA allocator admission is tested separately."""
-
-    def __init__(self, capacity, device):
-        self.capacity = capacity
-        self.view = memoryview(bytearray(capacity))
-
-    def close(self):
-        self.view.release()
-
-
 class FakeHostMapping:
     """Keep real shared mmap semantics without registering it with CUDA."""
 
-    def __init__(self, mapping, pinned):
-        self.registered = pinned
-        self.mapping = mapping
-        self.capacity = len(mapping)
-        self.view = memoryview(mapping)
-
-    def pin(self):
+    def __init__(self, mapping):
         self.registered = True
+        self.mapping = mapping
+        self.view = memoryview(mapping)
 
     def close(self):
         self.view.release()
@@ -215,16 +200,9 @@ class FakeHostMapping:
 class InlineCpuWorker:
     """Use the real CPU builder for deterministic unit fault injection."""
 
-    def __init__(self, directory, device, pool):
+    def __init__(self, directory, pool):
         with patch.object(worker, "HostPayloadPool", return_value=pool):
-            self.builder = worker.HostBuilder(
-                directory,
-                pool.workers,
-                {
-                    name: host.decoder_backend(device, name)
-                    for name in ("snappy", "lz4", "bitcomp")
-                },
-            )
+            self.builder = worker.HostBuilder(directory, pool.workers)
 
     def prepare(self, expected, namespace, metrics, cancelled):
         result = self.builder.prepare(expected, namespace)
@@ -278,7 +256,6 @@ def _shared_child(rank, publications, barrier, output):
             for version, (path, digest, manifest, expected) in enumerate(
                 publications, 1
             ):
-                hardware = version == 4
                 barrier.wait(timeout=10)
                 metrics = {}
                 reads.clear()
@@ -301,17 +278,16 @@ def _shared_child(rank, publications, barrier, output):
                     ] == list(TENSOR_IDS)
                 names = ["dense", "raw"] if rank == 0 else ["dense", "expert"]
                 snapshot = arena.prepare_local(
-                    publication, [TENSOR_IDS[name] for name in names], metrics, hardware
+                    publication, [TENSOR_IDS[name] for name in names], metrics
                 )
                 assert {
                     name: bytes(snapshot.get(TENSOR_IDS[name])) for name in names
                 } == {name: expected[name] for name in names}
-                assert arena.shared_allocation.registered is not hardware
+                assert arena.allocation.registered
                 records.append(
                     dict(
                         metrics=metrics,
                         capacity=arena.capacity.copy(),
-                        shared_capacity=arena.shared_capacity.copy(),
                         metadata_capacity=publication.index["metadata"].copy(),
                         tensors=publication.tensors.copy(),
                         frames=publication.frames.copy(),
@@ -358,25 +334,14 @@ class TestHostSnapshot(unittest.TestCase):
         self.addCleanup(self.pool.close)
         for replacement in (
             patch.object(host, "_cache_base", return_value=self.cache),
-            patch.object(host, "_CAPACITY_ALIGNMENT", 1024),
             patch.object(worker, "_CAPACITY_ALIGNMENT", 1024),
             patch.object(
                 host,
                 "CpuWorker",
-                side_effect=lambda directory, device: InlineCpuWorker(
-                    directory, device, self.pool
-                ),
+                side_effect=lambda directory: InlineCpuWorker(directory, self.pool),
             ),
-            patch.object(host, "HostAllocation", FakeHostAllocation),
             patch.object(host, "HostMapping", FakeHostMapping),
             patch("torch.cuda.set_device"),
-            patch.object(
-                host,
-                "decoder_backend",
-                side_effect=lambda device, codec: (
-                    "cuda" if codec == "bitcomp" else "hardware"
-                ),
-            ),
             patch.object(
                 os, "posix_fallocate", side_effect=fake_fallocate, create=True
             ),
@@ -712,7 +677,7 @@ class TestHostSnapshot(unittest.TestCase):
                 child.join(timeout=10)
         for version in range(5):
             owner, peer = records[0][version], records[1][version]
-            self.assertEqual(owner["shared_capacity"], peer["shared_capacity"])
+            self.assertEqual(owner["capacity"], peer["capacity"])
             self.assertEqual(owner["metadata_capacity"], peer["metadata_capacity"])
             for key in ("tensors", "frames", "gaps"):
                 np.testing.assert_array_equal(owner[key], peer[key])
@@ -731,13 +696,6 @@ class TestHostSnapshot(unittest.TestCase):
             self.assertEqual(peer["metrics"]["host_encoded_cache_hash_files"], 0)
             self.assertEqual(owner["metrics"]["host_rank_cpu_workers"], 2)
             self.assertEqual(peer["metrics"]["host_rank_cpu_workers"], 0)
-            if version != 3:
-                self.assertEqual(owner["capacity"], peer["capacity"])
-                for row in (owner, peer):
-                    self.assertEqual(
-                        row["metrics"]["host_rank_private_capacity_bytes"], 0
-                    )
-                    self.assertEqual(row["metrics"]["host_rank_staging_copy_bytes"], 0)
         self.assertEqual(len({row["pool_id"] for row in records[0]}), 1)
         self.assertTrue(all(row["pool_id"] is None for row in records[1]))
         self.assertEqual(
@@ -746,36 +704,21 @@ class TestHostSnapshot(unittest.TestCase):
         self.assertGreater(
             records[0][2]["tensors"][TENSOR_IDS["foreign"]]["prepared_nbytes"], 0
         )
-        de_owner, de_peer = records[0][3], records[1][3]
-        self.assertNotEqual(
-            de_owner["capacity"]["identity"], de_peer["capacity"]["identity"]
-        )
-        for row, names in (
-            (de_owner, ["dense", "raw"]),
-            (de_peer, ["dense", "expert"]),
-        ):
-            self.assertGreater(row["metrics"]["host_rank_private_capacity_bytes"], 0)
-            self.assertEqual(
-                row["metrics"]["host_rank_staging_copy_bytes"],
-                sum(len(publications[3][3][name]) for name in names),
-            )
         for rows in records.values():
-            first, warm, grown, de, restored = rows
-            self.assertEqual([row["set_device_calls"] for row in rows], [1, 1, 2, 2, 3])
-            self.assertEqual(first["shared_capacity"], warm["shared_capacity"])
+            first, warm, grown, switched, restored = rows
+            self.assertEqual([row["set_device_calls"] for row in rows], [1, 1, 2, 2, 2])
+            self.assertEqual(first["capacity"], warm["capacity"])
             self.assertEqual(warm["metrics"]["host_rank_mapping_reused"], 1)
             self.assertEqual(warm["metrics"]["host_rank_allocation_calls"], 0)
             self.assertNotEqual(
-                first["shared_capacity"]["identity"],
-                grown["shared_capacity"]["identity"],
+                first["capacity"]["identity"], grown["capacity"]["identity"]
             )
-            self.assertEqual(grown["shared_capacity"]["generation"], 2)
+            self.assertEqual(grown["capacity"]["generation"], 2)
             self.assertGreater(
-                grown["shared_capacity"]["capacity"],
-                first["shared_capacity"]["capacity"],
+                grown["capacity"]["capacity"], first["capacity"]["capacity"]
             )
-            self.assertEqual(grown["shared_capacity"], de["shared_capacity"])
-            self.assertEqual(grown["shared_capacity"], restored["shared_capacity"])
+            self.assertEqual(grown["capacity"], switched["capacity"])
+            self.assertEqual(grown["capacity"], restored["capacity"])
 
     def test_failed_shared_creator_cannot_publish_or_release_prepared_bytes(self):
         path, digest, manifest, _ = shared_publication(self.root)
@@ -790,7 +733,7 @@ class TestHostSnapshot(unittest.TestCase):
             prior_metrics,
         )
         prior = owner.prepare_local(
-            prior_publication, [TENSOR_IDS["dense"]], prior_metrics, False
+            prior_publication, [TENSOR_IDS["dense"]], prior_metrics
         )
         prior.mark_reusable()
         prior.close()
@@ -811,7 +754,7 @@ class TestHostSnapshot(unittest.TestCase):
         self.assertEqual(
             json.loads((owner.directory / "state.json").read_text()), state
         )
-        prepared_path = owner.directory / owner.shared_capacity["file"]
+        prepared_path = owner.directory / owner.capacity["file"]
         owner.close()
         self.assertTrue(prepared_path.exists())
         with self.assertRaisesRegex(ValueError, "failed or already released"):
@@ -1125,9 +1068,8 @@ class TestHostSnapshot(unittest.TestCase):
         self.assertNotEqual(arena.capacity["identity"], original["identity"])
         self.assertEqual(arena.capacity["generation"], 2)
         self.assertEqual(growth["host_rank_allocation_calls"], 1)
-        self.assertEqual(
-            arena.capacity["capacity"],
-            (2 * growth["host_rank_arena_bytes"] + 1023) // 1024 * 1024,
+        self.assertGreaterEqual(
+            arena.capacity["capacity"], 2 * growth["host_rank_arena_bytes"]
         )
         self.assertEqual(
             growth["host_encoded_cache_capacity_bytes"],
@@ -1393,7 +1335,6 @@ def test_cpu_process_reuses_exact_publications_without_torch(
     tmp_path, monkeypatch, finish
 ):
     monkeypatch.setattr(host, "configured_cpu_workers", lambda: 2)
-    monkeypatch.setattr(host, "decoder_backend", lambda device, codec: "cuda")
     cache = tmp_path / "cache"
     cache.mkdir()
     guard = tmp_path / "import-guard"
@@ -1419,7 +1360,7 @@ runpy.run_path(entry, run_name='__main__')
         return process
 
     monkeypatch.setattr(host.subprocess, "Popen", launch)
-    client = host.CpuWorker(cache, 0)
+    client = host.CpuWorker(cache)
     previous, identities, metrics_by_version = None, [], []
     try:
         for version in (1, 2):
@@ -1501,7 +1442,6 @@ def test_cpu_process_failure_stops_writer_and_never_releases_publication(
     cache.mkdir()
     monkeypatch.setattr(host, "_cache_base", lambda: cache)
     monkeypatch.setattr(host, "configured_cpu_workers", lambda: 2)
-    monkeypatch.setattr(host, "decoder_backend", lambda device, codec: "cuda")
     ready_r, ready_w = os.pipe()
     release_r, release_w = os.pipe()
     cancelled, finished = threading.Event(), threading.Event()

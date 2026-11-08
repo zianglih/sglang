@@ -302,8 +302,8 @@ class TestReceiverPreparation(unittest.TestCase):
 
         prepared = receiver.PreparedDelta.__new__(receiver.PreparedDelta)
         prepared.stream, prepared.io_stream = Stream("compute"), Stream("h2d")
-        prepared.decoded_ready = [Event(f"ready{i}") for i in range(2)]
-        prepared.decoded_free = [Event(f"free{i}") for i in range(2)]
+        prepared.input_ready = [Event(f"ready{i}") for i in range(2)]
+        prepared.input_free = [Event(f"free{i}") for i in range(2)]
         prepared.batches = [
             SimpleNamespace(
                 decoder=SimpleNamespace(
@@ -318,7 +318,7 @@ class TestReceiverPreparation(unittest.TestCase):
         ]
         with patch.object(torch.cuda, "stream", return_value=nullcontext()):
             prepared._copy_batch(prepared.batches[0], 0)
-            prepared._apply_cuda_batches()
+            prepared._apply_batches()
         for i in range(4):
             self.assertLess(events.index(("copy", i)), events.index(("decode", i)))
             self.assertLess(events.index(("decode", i)), events.index(("status", i)))
@@ -356,8 +356,7 @@ class TestReceiverPreparation(unittest.TestCase):
                 dtype="<i8",
             ),
         )
-        # DE offsets differ from the shared prepared image; both must produce
-        # the same decoded geometry without changing the shared metadata.
+        # Rebased shared-image offsets preserve decoded geometry and metadata.
         original_frames, original_gaps = (
             publication.frames.copy(),
             publication.gaps.copy(),
@@ -401,7 +400,7 @@ class TestReceiverPreparation(unittest.TestCase):
     def test_prepare_uses_shared_publication_and_only_local_ordinals(self):
         backend, catalog = TestCanonicalPlanCache().publication()
         backend.device = torch.device("cpu")
-        backend.decoders = {"lz4": SimpleNamespace(backend="hardware")}
+        backend.decoders = {"lz4": SimpleNamespace()}
         refs = []
 
         class TrackedEntry(dict):
@@ -417,16 +416,14 @@ class TestReceiverPreparation(unittest.TestCase):
         publication = SimpleNamespace(
             header={
                 "codec": "lz4-zstd",
-                "backend": "hardware",
                 "target_version": 7,
                 "plan_digest": catalog["plan_digest"],
             },
             read_catalog=read_catalog,
         )
 
-        def prepare_local(actual, tensor_ids, timings, hardware):
+        def prepare_local(actual, tensor_ids, timings):
             self.assertIs(actual, publication)
-            self.assertTrue(hardware)
             self.assertIsNone(refs[-1]())
             self.assertEqual(tuple(tensor_ids), (1,))
             raise RuntimeError("stop at local preparation boundary")

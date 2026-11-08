@@ -14,8 +14,7 @@
 """Verified engine-host encoded cache and persistent pinned input arenas.
 
 Each engine host shares a prepared tmpfs image built by its persistent CPU child.
-CUDA decoders consume it directly; DE decoders stage only their local spans into
-rank-private hardware-decompression-capable input storage.
+Each rank registers that image once and copies its inputs to device buffers.
 """
 
 import fcntl
@@ -37,17 +36,14 @@ import numpy as np
 import orjson
 
 from sglang.srt.weight_sync.gpu_delta import profiling
-from sglang.srt.weight_sync.gpu_delta.codec import decoder_backend
 from sglang.srt.weight_sync.gpu_delta.host_worker import (
-    _CAPACITY_ALIGNMENT,
     _identity,
     _metadata_views,
     configured_cpu_workers,
-    copy_bytes,
     new_metrics,
     publication_token,
 )
-from sglang.srt.weight_sync.gpu_delta.memory import HostAllocation, HostMapping
+from sglang.srt.weight_sync.gpu_delta.memory import HostMapping
 
 
 def _cache_base():
@@ -100,14 +96,10 @@ def host_cache_id(engine_id):
 class CpuWorker:
     """One clean interpreter per owner, with descriptor-only request/reply IPC."""
 
-    def __init__(self, directory, device):
+    def __init__(self, directory):
         self.configuration = {
             "directory": str(directory),
             "workers": configured_cpu_workers(),
-            "backends": {
-                name: decoder_backend(device, name)
-                for name in ("snappy", "lz4", "bitcomp")
-            },
         }
         local, child = socket.socketpair()
         parent_fd = None
@@ -243,8 +235,6 @@ class HostArena:
         self.identity = identity
         self.allocation = self.mapping = self.tensor = None
         self.capacity = None
-        self.hardware = None
-        self.shared_allocation = self.shared_capacity = None
         self.directory = None
         self._namespace = None
         self.owner = False
@@ -255,81 +245,39 @@ class HostArena:
     def root(self):
         return _cache_root(self.engine_id)
 
-    def _reserve_rank_arena(self, size, metrics):
+    def _attach_shared_arena(self, prepared, metrics):
         import torch
 
-        if (
-            self.capacity is not None
-            and size <= self.capacity["capacity"]
-            and self.hardware
-        ):
+        if self.capacity == prepared:
             metrics["host_rank_mapping_reused"] = 1
+            metrics["host_rank_prepare_call_s"] = 0.0
             return
-        previous = self.capacity if self.hardware else None
-        capacity = size if previous is None else 2 * size
-        capacity = (
-            (capacity + _CAPACITY_ALIGNMENT - 1)
-            // _CAPACITY_ALIGNMENT
-            * _CAPACITY_ALIGNMENT
-        )
         started = time.perf_counter()
-        allocation = None
-        if capacity:
-            allocation = HostAllocation(capacity, self.device)
-        self._close_private()
-        self.allocation = allocation
-        self.hardware = True
-        self.mapping = allocation.view if allocation is not None else None
+        self._close_shared()
+        if prepared["capacity"]:
+            with (self.directory / prepared["file"]).open("r+b") as source:
+                if _identity(os.fstat(source.fileno())) != prepared["identity"]:
+                    raise ValueError("prepared cache inode or extent changed")
+                mapping = mmap.mmap(
+                    source.fileno(),
+                    prepared["capacity"],
+                    flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
+                )
+            # A fresh preparation thread may have no current CUDA context.
+            torch.cuda.set_device(self.device)
+            self.allocation = HostMapping(mapping)
+            self.mapping = self.allocation.view
+        self.capacity = prepared
+        metrics["host_rank_allocation_calls"] = int(self.allocation is not None)
+        metrics["host_rank_allocation_bytes"] = prepared["capacity"]
+        metrics["host_rank_allocation_s"] = time.perf_counter() - started
+        bind_started = time.perf_counter()
         self.tensor = (
             torch.frombuffer(self.mapping, dtype=torch.uint8)
             if self.mapping is not None
             else torch.empty(0, dtype=torch.uint8)
         )
-        generation = previous["generation"] + 1 if previous else 1
-        self.capacity = {
-            "generation": generation,
-            "capacity": allocation.capacity if allocation is not None else 0,
-            "identity": uuid.uuid4().hex,
-        }
-        metrics["host_rank_allocation_s"] = time.perf_counter() - started
-        metrics["host_rank_allocation_calls"] = int(allocation is not None)
-        metrics["host_rank_allocation_bytes"] = self.capacity["capacity"]
-
-    def _attach_shared_arena(self, prepared, metrics, hardware):
-        replace = self.shared_capacity != prepared or (
-            hardware
-            and self.shared_allocation is not None
-            and self.shared_allocation.registered
-        )
-        started = time.perf_counter()
-        if replace:
-            self._close_shared()
-            if prepared["capacity"]:
-                with (self.directory / prepared["file"]).open("r+b") as source:
-                    if _identity(os.fstat(source.fileno())) != prepared["identity"]:
-                        raise ValueError("prepared cache inode or extent changed")
-                    mapping = mmap.mmap(
-                        source.fileno(),
-                        prepared["capacity"],
-                        flags=mmap.MAP_SHARED | mmap.MAP_POPULATE,
-                    )
-                self.shared_allocation = HostMapping(mapping, pinned=False)
-            self.shared_capacity = prepared
-        if not hardware:
-            if (
-                self.shared_allocation is not None
-                and not self.shared_allocation.registered
-            ):
-                import torch
-
-                # A fresh preparation thread may have no current CUDA context.
-                torch.cuda.set_device(self.device)
-                self.shared_allocation.pin()
-                metrics["host_rank_allocation_calls"] = 1
-                metrics["host_rank_allocation_bytes"] = prepared["capacity"]
-                metrics["host_rank_allocation_s"] += time.perf_counter() - started
-            else:
-                metrics["host_rank_mapping_reused"] = 1
+        metrics["host_rank_prepare_call_s"] = time.perf_counter() - bind_started
 
     def _attach_metadata(self, allocation):
         if self._metadata_capacity != allocation:
@@ -386,7 +334,7 @@ class HostArena:
         metrics = new_metrics()
         if self.owner:
             if self._worker is None:
-                self._worker = CpuWorker(self.directory, self.device)
+                self._worker = CpuWorker(self.directory)
             index = self._worker.prepare(expected, namespace, metrics, cancelled)
         else:
             token = publication_token(expected)
@@ -453,92 +401,31 @@ class HostArena:
         return result
 
     @profiling.annotate("gpu_delta.host.prepare_local")
-    def prepare_local(self, publication, tensor_ids, timings, hardware=True):
-        """Bind rank inputs using canonical ordinals, with DE-local rebasing."""
-        if publication.header["backend"] != ("hardware" if hardware else "cuda"):
-            raise ValueError("engine-host decoder backends differ")
+    def prepare_local(self, publication, tensor_ids, timings):
+        """Bind rank inputs to their canonical spans in the shared pinned image."""
         index, tensors = publication.index, publication.tensors
-        self._attach_shared_arena(index["prepared"], timings, hardware)
+        self._attach_shared_arena(index["prepared"], timings)
         layout_started = time.perf_counter()
         selected = np.asarray(tensor_ids, dtype=np.int64)
-        sizes = tensors["prepared_nbytes"][selected]
-        size = int(sizes.sum())
-        staging_bytes = 0
-        offsets = tensors["prepared_offset"]
-        if hardware:
-            selected = selected[np.argsort(offsets[selected], kind="stable")]
-            sizes = tensors["prepared_nbytes"][selected]
-            aligned = (sizes + 15) // 16 * 16
-            positions = np.cumsum(aligned) - aligned
-            offsets = np.zeros(len(tensors), dtype=np.int64)
-            offsets[selected] = positions
-            size = int(np.max((positions + sizes)[sizes != 0], initial=0))
+        size = int(tensors["prepared_nbytes"][selected].sum())
         timings["host_rank_layout_s"] = time.perf_counter() - layout_started
-        if hardware:
-            self._reserve_rank_arena(size, timings)
-            prepare_started = time.perf_counter()
-            for tensor_id in selected:
-                count = int(tensors["prepared_nbytes"][tensor_id])
-                if count:
-                    source = int(tensors["prepared_offset"][tensor_id])
-                    target = int(offsets[tensor_id])
-                    copy_bytes(
-                        self.mapping[target : target + count],
-                        self.shared_allocation.view[source : source + count],
-                    )
-                    staging_bytes += count
-            staging_s = time.perf_counter() - prepare_started
-        else:
-            import torch
-
-            prepare_started = time.perf_counter()
-            if self.hardware is not False or self.capacity != index["prepared"]:
-                self._close_private()
-                self.mapping = (
-                    self.shared_allocation.view
-                    if self.shared_allocation is not None
-                    else None
-                )
-                self.tensor = (
-                    torch.frombuffer(self.mapping, dtype=torch.uint8)
-                    if self.mapping is not None
-                    else torch.empty(0, dtype=torch.uint8)
-                )
-                self.hardware, self.capacity = False, index["prepared"]
-            staging_s = 0.0
-        timings["host_rank_prepare_call_s"] = time.perf_counter() - prepare_started
         timings.update(
             host_rank_arena_bytes=size,
             host_rank_capacity_bytes=self.capacity["capacity"],
             host_rank_capacity_generation=self.capacity["generation"],
-            host_rank_private_capacity_bytes=self.capacity["capacity"]
-            if hardware
-            else 0,
-            host_rank_staging_copy_s=staging_s,
-            host_rank_staging_copy_bytes=staging_bytes,
         )
-        return HostPreparedSnapshot(self, publication, offsets)
+        return HostPreparedSnapshot(self, publication)
 
-    def _close_private(self):
-        if self.hardware:
-            self.tensor = self.mapping = self.capacity = None
+    def _close_shared(self):
+        self.tensor = self.mapping = self.capacity = None
         if self.allocation is not None:
             self.allocation.close()
             self.allocation = None
-
-    def _close_shared(self):
-        if self.hardware is False:
-            self.tensor = self.mapping = self.capacity = None
-        if self.shared_allocation is not None:
-            self.shared_allocation.close()
-            self.shared_allocation = None
-        self.shared_capacity = None
 
     def close(self):
         if self._worker is not None:
             # Retain the closed client so a poisoned backend cannot respawn it.
             self._worker.close()
-        self._close_private()
         self._close_shared()
         self._metadata_mapping = self._metadata_capacity = None
 
@@ -567,8 +454,9 @@ class HostPublication:
 class HostPreparedSnapshot:
     """One publication's local views into backend-retained pinned host storage."""
 
-    def __init__(self, arena, publication, offsets):
-        self.arena, self.publication, self.offsets = arena, publication, offsets
+    def __init__(self, arena, publication):
+        self.arena, self.publication = arena, publication
+        self.offsets = publication.tensors["prepared_offset"]
         self.worker = arena._worker if arena.owner else None
         index = publication.index
         self.ready_state = {
@@ -589,6 +477,6 @@ class HostPreparedSnapshot:
             self.worker.release(self.ready_state)
 
     def close(self):
-        # Backend retains its mapping after all DE or H2D readers drain.
+        # Backend retains its mapping after all H2D readers drain.
         self.arena = None
         self.publication = self.offsets = None

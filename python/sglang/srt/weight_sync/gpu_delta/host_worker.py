@@ -465,9 +465,8 @@ def _write_record(directory, name, record):
 class HostBuilder:
     """Persistent CPU state; no device, model, CUDA registration or rank objects."""
 
-    def __init__(self, directory, workers, backends):
+    def __init__(self, directory, workers):
         self.directory = Path(directory)
-        self.backends = backends
         self._ordinals = self._shared_order = None
         self._index = None
         self._metadata_mapping = self._metadata_capacity = None
@@ -758,10 +757,7 @@ class HostBuilder:
             for key in ("base_version", "target_version", "plan_digest")
         ):
             raise ValueError("publication header differs from prepare request")
-        index["publication"] = expected | {
-            "codec": manifest["codec"],
-            "backend": self.backends[manifest["codec"].removesuffix("-zstd")],
-        }
+        index["publication"] = expected | {"codec": manifest["codec"]}
         definitions = {}
         for record in manifest["files"]:
             if record["nbytes"] < 0:

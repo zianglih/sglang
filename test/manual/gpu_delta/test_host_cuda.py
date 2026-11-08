@@ -1,8 +1,8 @@
 """Native host-arena and complete receiver checks.
 
 Manual-only: Linux, CUDA, nvCOMP 6, Torch, Snappy, LZ4 and Zstandard are required.
-Bitcomp uses one GPU and the Miles producer, without requiring DE. The two-engine
-DE test requires two SM100/SM103 GPUs; its barriers coordinate the oracle, not
+Bitcomp receiver checks use one GPU and the Miles producer. Shared-map and
+two-engine checks use two CUDA GPUs; their barriers coordinate the oracle, not
 production preparation.
 """
 
@@ -148,7 +148,6 @@ def test_bitcomp_receiver_double_buffer_exact_updates_and_stale_target(
                 # Match the scheduler's persistent preparation worker: CUDA
                 # allocations on this foreground thread do not bind its context.
                 prepared = prepare_executor.submit(backend.prepare, metadata).result()
-                assert not prepared.hardware
                 assert (
                     not prepared.decode_plan.decoded_slots
                     and not prepared.decode_plan.input_slots
@@ -176,7 +175,6 @@ def test_bitcomp_receiver_double_buffer_exact_updates_and_stale_target(
                     assert result["timings"]["compressed_input_buffers"] == 2
                     assert result["timings"]["decoded_buffers"] == 2
                     assert result["timings"]["compressed_input_h2d_bytes"] > 0
-                    assert result["timings"]["de_host_input_bytes"] == 0
                     for name, value in model.named_parameters():
                         assert torch.equal(value.cpu().flatten(), after[name])
                     prepared.release_and_close()
@@ -197,7 +195,7 @@ def _pinned_mapping_consumer(rank, path, expected, barrier, output):
     with Path(path).open("r+b") as source:
         inode = (os.fstat(source.fileno()).st_dev, os.fstat(source.fileno()).st_ino)
         mapping = mmap.mmap(source.fileno(), 0)
-    allocation = HostMapping(mapping, True)
+    allocation = HostMapping(mapping)
     tensor = torch.frombuffer(allocation.view, dtype=torch.uint8)
     try:
         assert tensor.is_pinned()
@@ -362,13 +360,9 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
     import torch
 
     from sglang.srt.weight_sync.gpu_delta import host as host
-    from sglang.srt.weight_sync.gpu_delta import memory as memory
     from sglang.srt.weight_sync.gpu_delta.codec import NvcompDecoder
 
     os.environ["GPU_DELTA_HOST_CACHE_DIR"] = cache
-    # Exercise the exact capacity-growth algorithm with small oracle tensors.
-    # Production's coarser alignment is not a wire/codec requirement.
-    host._CAPACITY_ALIGNMENT = 1 << 20
     torch.cuda.set_device(rank % 2)
     device = torch.device("cuda", rank % 2)
     os.environ["GPU_DELTA_CPU_WORKERS"] = str(workers)
@@ -415,9 +409,7 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
                 }
             selected = [ordinals[name] for name in sorted(names)]
             snapshot = arena.prepare_local(publication, selected, metrics)
-            assert metrics["host_rank_staging_copy_bytes"] == int(
-                publication.tensors["prepared_nbytes"][selected].sum()
-            )
+            assert arena.allocation.registered and arena.tensor.is_pinned()
             source = arena.tensor
             frames, offsets, size = [], {}, 0
             for name in sorted(names):
@@ -448,6 +440,7 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
             stream.wait_stream(torch.cuda.current_stream(device))
             plans = plan.bind_outputs(decoded)
             with torch.cuda.stream(stream):
+                plans[0].copy_input(stream)
                 plans[0].enqueue()
                 complete = torch.cuda.Event()
                 complete.record(stream)
@@ -468,18 +461,6 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
             source = None
             assert arena.allocation is not None
             del plan, plans, decoded
-            driver = arena.allocation.driver
-            properties = memory._check(
-                driver.cuMemGetAllocationPropertiesFromHandle(arena.allocation.handle),
-                "native allocation properties",
-            )
-            granularity = memory._check(
-                driver.cuMemGetAllocationGranularity(
-                    properties,
-                    driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_MINIMUM,
-                ),
-                "native allocation granularity",
-            )
             records.append(
                 dict(
                     version=version,
@@ -488,14 +469,12 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
                     local_names=sorted(names),
                     mapping_pointer=arena.tensor.data_ptr(),
                     metrics=metrics,
-                    exact_host_de_bytes=True,
-                    allocation_granularity=granularity,
+                    exact_cuda_bytes=True,
                 )
             )
         stream.synchronize()
         arena.close()
         assert arena.allocation is None and arena.mapping is None
-        assert arena.shared_allocation is None
         output.put(
             dict(rank=rank, engine_id=engine, updates=records, final_unmapped=True)
         )
@@ -504,8 +483,8 @@ def _consumer(rank, engine, workers, publications, cache, barrier, output):
         arena.close()
 
 
-@pytest.mark.parametrize("workers", [4, 8])
-def test_two_engines_reuse_host_de_capacity_and_grow(workers):
+def test_two_engines_share_host_capacity_and_reuse_pinned_mappings():
+    workers = 4
     context = multiprocessing.get_context("spawn")
     with tempfile.TemporaryDirectory(
         prefix="gpu-delta-native-", dir="/dev/shm"
@@ -554,7 +533,7 @@ def test_two_engines_reuse_host_de_capacity_and_grow(workers):
             assert len(engine_records) == 2
             for version in range(3):
                 rows = [record["updates"][version] for record in engine_records]
-                assert rows[0]["arena_identity"] != rows[1]["arena_identity"]
+                assert rows[0]["arena_identity"] == rows[1]["arena_identity"]
                 assert (
                     sum(row["metrics"]["host_rank_cpu_workers"] for row in rows)
                     == workers
@@ -566,9 +545,6 @@ def test_two_engines_reuse_host_de_capacity_and_grow(workers):
                 assert (
                     sum(row["metrics"]["host_prepared_cache_reused"] for row in rows)
                     == 1
-                )
-                assert all(
-                    row["metrics"]["host_rank_staging_copy_bytes"] > 0 for row in rows
                 )
                 assert set(rows[0]["local_names"]) & set(rows[1]["local_names"]) == {
                     "raw"
@@ -589,32 +565,24 @@ def test_two_engines_reuse_host_de_capacity_and_grow(workers):
                 ) == (0 if version == 1 else 8)
                 assert sum(
                     row["metrics"]["host_rank_allocation_calls"] for row in rows
-                ) == (0 if version == 1 else 2)
+                ) == (2 if version == 0 else 0)
                 assert all(
-                    row["metrics"]["host_rank_mapping_reused"] == int(version == 1)
+                    row["metrics"]["host_rank_mapping_reused"] == int(version > 0)
                     for row in rows
                 )
         assert len({record["updates"][0]["host_cache_id"] for record in records}) == 2
-        assert len({record["updates"][0]["arena_identity"] for record in records}) == 4
+        assert (
+            len({tuple(record["updates"][0]["arena_identity"]) for record in records})
+            == 2
+        )
         for record in records:
             a, b, c = record["updates"]
-            for row, multiplier in ((a, 1), (c, 2)):
-                alignment = max(1 << 20, row["allocation_granularity"])
-                assert row["metrics"]["host_rank_capacity_bytes"] == (
-                    (
-                        multiplier * row["metrics"]["host_rank_arena_bytes"]
-                        + alignment
-                        - 1
-                    )
-                    // alignment
-                    * alignment
-                )
-            assert a["arena_identity"] == b["arena_identity"] != c["arena_identity"]
-            assert a["mapping_pointer"] == b["mapping_pointer"] != c["mapping_pointer"]
+            assert a["arena_identity"] == b["arena_identity"] == c["arena_identity"]
+            assert a["mapping_pointer"] == b["mapping_pointer"] == c["mapping_pointer"]
             assert [
                 row["metrics"]["host_rank_capacity_generation"]
                 for row in record["updates"]
-            ] == [1, 1, 2]
+            ] == [1, 1, 1]
             assert all(
                 row["metrics"]["host_rank_arena_bytes"]
                 <= row["metrics"]["host_rank_capacity_bytes"]

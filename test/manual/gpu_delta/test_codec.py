@@ -1,9 +1,7 @@
-"""GPU conformance for the prebuilt nvCOMP ABI; no extension compilation.
+"""Native nvCOMP CUDA conformance, two-buffer reuse and stream ownership.
 
-Manual-only: DE cases require SM100/SM103; CUDA decode cases do not require DE.
-All cases use the paired Miles image, nvCOMP 6, zstandard, python-snappy, and lz4.
-Missing hardware or dependencies fail this suite. Both decoder paths preserve known
-bytes. Tests intentionally never feed malformed compressed streams to the GPU decoder.
+Requires the paired Miles image with nvCOMP 6. Missing CUDA or dependencies fail.
+Tests never feed malformed compressed streams to the GPU decoder.
 """
 
 import sys
@@ -17,7 +15,6 @@ import torch
 from sglang.srt.weight_sync.gpu_delta.apply import prepare_status_check
 from sglang.srt.weight_sync.gpu_delta.codec import NvcompDecoder
 from sglang.srt.weight_sync.gpu_delta.host_worker import TENSOR_DTYPE
-from sglang.srt.weight_sync.gpu_delta.memory import HostAllocation, device_empty
 from sglang.srt.weight_sync.gpu_delta.receiver import (
     PreparedDelta,
     _plan_decode,
@@ -32,14 +29,21 @@ def _frame_table(batches):
 
 
 def _encode(values, codec, offsets=None):
-    import lz4.block
-    import snappy
+    from miles.utils.gpu_delta.nvcomp import NvcompCompressor
 
-    compress = (
-        snappy.compress
-        if codec == "snappy-zstd"
-        else lambda value: lz4.block.compress(value, store_size=False)
-    )
+    device = torch.device("cuda", 0)
+    stream = torch.cuda.current_stream(device)
+    tensors = [
+        torch.frombuffer(bytearray(value), dtype=torch.uint8).to(device)
+        for value in values
+    ]
+    result = NvcompCompressor(codec, device).compress(tensors, stream)
+    stream.synchronize()
+    assert result.statuses.tolist() == [0] * len(values)
+    encoded_frames = [
+        value[:size].cpu().numpy().tobytes()
+        for value, size in zip(result.outputs, result.sizes.tolist())
+    ]
     payload = bytearray()
     frames = []
     offset = 0
@@ -47,30 +51,19 @@ def _encode(values, codec, offsets=None):
         if offsets is not None:
             offset = offsets[index]
         payload.extend(bytes((-len(payload)) % 16))
-        encoded = compress(value)
+        encoded = encoded_frames[index]
         frames.append((len(payload), len(encoded), len(value), offset))
         payload.extend(encoded)
         offset += len(value)
     return payload, frames
 
 
-# Outer Zstd unwrapping is covered by the CPU payload suite; this exercises the two
-# distinct inner decoders with two output slots and both sorting settings.
-@pytest.mark.parametrize(
-    "codec,sort_chunks",
-    [
-        ("snappy-zstd", "0"),
-        ("snappy-zstd", "1"),
-        ("lz4", "0"),
-        ("lz4", "1"),
-    ],
-)
-def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
-    codec, sort_chunks, monkeypatch
-):
-    monkeypatch.setenv("GPU_DELTA_SORT_BEFORE_HW_DECOMPRESS", sort_chunks)
+# Outer Zstd is covered by the host suite. Exercise each native inner codec
+# through the same production H2D/decode/apply loop, including empty batches.
+@pytest.mark.parametrize("codec", ["snappy", "lz4", "bitcomp"])
+def test_batched_plans_share_metadata_and_reuse_tensor_scratch(codec):
     device = torch.device("cuda", 0)
-    decoder = NvcompDecoder(device, codec.removesuffix("-zstd"))
+    decoder = NvcompDecoder(device, codec)
     # Full 4 MiB nonzero frame, 1 MiB zero frame, and a partial final frame.
     values = [
         [bytes(1 << 20), bytes(range(256)) * 16384, bytes(range(253)) * 3],
@@ -78,13 +71,12 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     ]
     payload_a, frames_a = _encode(values[0], codec)
     assert frames_a[1][2] == 4 << 20
-    assert decoder.backend == "hardware" and decoder._options.backend == 1
+    assert decoder._options.backend == 2
     # A different frame count, partial final frame and sparse output offsets
     # exercise views whose row stride is the complete metadata slab's width.
     payload_b, frames_b = _encode(values[1], codec, [128, 128 + (64 << 10) + 256])
     input_b = (len(payload_a) + 15) // 16 * 16
-    allocation = HostAllocation(input_b + len(payload_b), device.index)
-    host = torch.frombuffer(allocation.view, dtype=torch.uint8)
+    host = torch.empty(input_b + len(payload_b), dtype=torch.uint8, pin_memory=True)
     host[: len(payload_a)].numpy()[:] = memoryview(payload_a)
     host[input_b : input_b + len(payload_b)].numpy()[:] = memoryview(payload_b)
     batches = [
@@ -97,23 +89,24 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     batches = [batches[index % 2] for index in range(5)]
     batches[-1] = []  # A fully omitted final batch still zeroes/reuses its slot.
     stream = torch.cuda.Stream(device=device)
-    de_stream = torch.cuda.Stream(device=device)
+    h2d_stream = torch.cuda.Stream(device=device)
     table, counts = _frame_table(batches)
-    plan = decoder.prepare_batches(table, counts, host, de_stream)
-    assert plan.stream is de_stream
+    plan = decoder.prepare_batches(table, counts, host, stream)
+    assert plan.stream is stream
     workspace = plan.workspace
     # Large outputs are allocated only at the paused binding boundary.
     decoded = [
-        device_empty(sum(map(len, values[0])), dtype=torch.uint8, device=device)
+        torch.empty(sum(map(len, values[0])), dtype=torch.uint8, device=device)
         for _ in range(2)
     ]
     plans = plan.bind_outputs(decoded)
+    assert len(plan.input_slots) == 2
+    assert plan.input_capacity_bytes <= 2 * host.numel()
     # Native status/size views exercise both typed allocation paths, including
     # nonzero-offset ring slots; successful decode below verifies their contents.
     assert workspace.statuses.dtype == torch.int32
     assert workspace.actual_sizes.dtype == plan.metadata.dtype == torch.int64
     assert workspace.statuses.device == workspace.actual_sizes.device == device
-    plan.record_stream(stream)
     del plan
     assert plans[0].metadata.untyped_storage().data_ptr() == (
         plans[1].metadata.untyped_storage().data_ptr()
@@ -128,16 +121,15 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     assert plans[0].actual_sizes.data_ptr() == plans[2].actual_sizes.data_ptr()
     assert all(plan.host_input is host for plan in plans)
     for batch in plans:
-        assert batch.stream is de_stream
+        assert batch.stream is stream
         assert batch._arguments[-1] == batch.stream.cuda_stream
         temporary = workspace.temporary
         assert batch._arguments[5:7] == (temporary.data_ptr(), temporary.numel())
     prepared = PreparedDelta.__new__(PreparedDelta)
     prepared.device = device
-    prepared.stream, prepared.io_stream = stream, de_stream
-    prepared.hardware = True
-    prepared.decoded_ready = [torch.cuda.Event() for _ in range(2)]
-    prepared.decoded_free = [torch.cuda.Event() for _ in range(2)]
+    prepared.stream, prepared.io_stream = stream, h2d_stream
+    prepared.input_ready = [torch.cuda.Event() for _ in range(2)]
+    prepared.input_free = [torch.cuda.Event() for _ in range(2)]
     # B leaves a prefix, an interior hole and a short tail; the unused part of
     # larger scratch retains its prior bytes and is not read by B's apply plan.
     output_sizes = [
@@ -146,8 +138,8 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     ]
     output_sizes[-1] = 64
     prepared_batches = []
-    # Output/workspace allocation happened on the current stream. The setup
-    # event below carries this dependency onward to the DE stream as well.
+    # Output allocation happened on the caller stream; the compute stream
+    # waits before any decode or apply.
     stream.wait_stream(torch.cuda.current_stream(device))
     with torch.cuda.device(device), torch.cuda.stream(stream):
         prepared.error = torch.zeros(1, dtype=torch.int32, device=device)
@@ -189,12 +181,12 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
             output.fill_(0xA5)
         ready = torch.cuda.Event()
         ready.record(stream)
-    de_stream.wait_event(ready)
+    h2d_stream.wait_event(ready)
     assert not prepared_batches[0].zero_ranges
     assert [view.numel() for view in prepared_batches[1].zero_ranges] == [128, 256, 64]
     observations = []
 
-    # Run the production DE/apply loop, retaining snapshots as an ordered
+    # Run the production H2D/decode/apply loop, retaining snapshots as an ordered
     # apply consumer. Prepared metadata/output binding above is already real.
     # Distinct A/B bytes cross two ring boundaries, including the final empty
     # batch reusing the first output/status slot after both earlier decodes.
@@ -214,7 +206,7 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     )
     prepared._allocate_paused = lambda: None
     prepared._apply_batch = observe
-    prepared.timings, prepared.events = {}, {}
+    prepared.timings = {}
     prepared.raw_copies, prepared.derived = {}, []
     prepared.batches = list(prepared_batches)
     prepared.status_checks, prepared.apply_bindings, prepared.apply_source_patches = (
@@ -253,7 +245,7 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     assert bytes(host[: len(payload_a)].numpy()) == payload_a
     assert bytes(host[input_b : input_b + len(payload_b)].numpy()) == payload_b
     # Each slot's callback reads its own status/size row. Mutate metadata only
-    # after the real DE work completes.
+    # after the real CUDA work completes.
     for index, batch in enumerate(prepared_batches[:2]):
         field = batch.decoder.statuses if index % 2 == 0 else batch.decoder.actual_sizes
         prepared.error.zero_()
@@ -286,8 +278,7 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
         field[index].copy_(before)
         check()
         assert prepared.error.item() == 1
-    assert decoder.backend == "hardware"
-    # Exercise the same final-release path after all DE/apply/status work drains.
+    # Exercise the same final-release path after all H2D/decode/apply work drains.
     # Per-batch leases keep every decoded slot alive after the plan is discarded.
     output_refs = [weakref.ref(output) for output in decoded]
     prepared.batches = prepared_batches
@@ -306,89 +297,6 @@ def test_batched_plans_share_metadata_and_reuse_tensor_scratch(
     assert all(ref() is None for ref in output_refs)
     # Original host input is released only after all streams' readers finish.
     del host
-    allocation.close()
-
-
-@pytest.mark.parametrize("algorithm", ["bitcomp", "snappy", "lz4"])
-def test_cuda_decode_overlaps_h2d_and_reuses_double_buffer(algorithm, monkeypatch):
-    from miles.utils.gpu_delta.nvcomp import NvcompCompressor
-
-    from sglang.srt.weight_sync.gpu_delta import codec
-
-    # Force the CUDA path for Snappy/LZ4 even on the Blackwell validation node.
-    monkeypatch.setattr(codec, "decoder_backend", lambda device, inner_codec: "cuda")
-    device = torch.device("cuda", 0)
-    compute, h2d = [torch.cuda.Stream(device=device) for _ in range(2)]
-    values = [bytes(1 << 20), bytes(range(251)) * 3, bytes([17]) * (64 << 10)]
-    with torch.cuda.stream(compute):
-        tensors = [
-            torch.frombuffer(bytearray(value), dtype=torch.uint8).to(device)
-            for value in values
-        ]
-        encoded = NvcompCompressor(algorithm, device).compress(tensors, compute)
-    compute.synchronize()
-    assert encoded.statuses.tolist() == [0] * len(values)
-    payload, frames = bytearray(), []
-    for value, output, size in zip(values, encoded.outputs, encoded.sizes.tolist()):
-        payload.extend(bytes((-len(payload)) % 16))
-        frames.append((len(payload), size, len(value), 0))
-        payload.extend(output[:size].cpu().numpy().tobytes())
-    host = torch.empty(len(payload), dtype=torch.uint8, pin_memory=True)
-    host.numpy()[:] = np.frombuffer(payload, dtype=np.uint8)
-    groups = [[0, 1], [2], [1, 2], [0], [2, 0, 1], []]
-    batches, references = [], []
-    for group in groups:
-        rows, reference = [], bytearray()
-        for index in group:
-            reference.extend(bytes([0xA5]) * ((-len(reference)) % 16))
-            source, encoded_size, decoded_size, _ = frames[index]
-            rows.append((source, encoded_size, decoded_size, len(reference)))
-            reference.extend(values[index])
-        batches.append(rows)
-        references.append(bytes(reference))
-    decoder = NvcompDecoder(device, algorithm)
-    assert decoder.backend == "cuda" and decoder._options.backend == 2
-    table, counts = _frame_table(batches)
-    plan = decoder.prepare_batches(table, counts, host, compute)
-    assert not plan.input_slots  # No compressed device arena before the pause.
-    with torch.cuda.stream(compute):
-        outputs = [
-            torch.empty(max(map(len, references)), dtype=torch.uint8, device=device)
-            for _ in range(2)
-        ]
-        plans = plan.bind_outputs(outputs)
-        error = torch.zeros(1, dtype=torch.int32, device=device)
-        checks = [prepare_status_check(batch, error) for batch in plans]
-        initialized = torch.cuda.Event()
-        initialized.record(compute)
-    h2d.wait_event(initialized)
-    ready, free = [[torch.cuda.Event() for _ in range(2)] for _ in range(2)]
-    snapshots = []
-    plans[0].copy_input(h2d)
-    ready[0].record(h2d)
-    for index, batch in enumerate(plans):
-        slot = index % 2
-        compute.wait_event(ready[slot])
-        if index + 1 < len(plans):
-            next_slot = (index + 1) % 2
-            if index >= 1:
-                h2d.wait_event(free[next_slot])
-            plans[index + 1].copy_input(h2d)
-            ready[next_slot].record(h2d)
-        with torch.cuda.stream(compute):
-            outputs[slot].fill_(0xA5)
-            batch.enqueue()
-            free[slot].record(compute)
-            checks[index]()
-            if batches[index]:
-                snapshots.append(outputs[slot][: len(references[index])].clone())
-    compute.synchronize()
-    h2d.synchronize()
-    assert error.item() == 0
-    assert len(plan.input_slots) == 2
-    assert plan.input_capacity_bytes <= 2 * len(payload)
-    for index, actual in enumerate(snapshots):
-        assert actual.cpu().numpy().tobytes() == references[index]
 
 
 if __name__ == "__main__":

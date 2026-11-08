@@ -159,18 +159,17 @@ with a positive integer `frame_bytes` up to 4 MiB (default 1 MiB). Miles default
 both initial synchronization and subsequent updates to `bitcomp-zstd`. SGLang
 selects the codec from each publication's manifest; it has no codec environment
 variable or independent default. Bitcomp uses sparse, lossless U8 encoding; it
-never requantizes weights. GPU-delta does not require Blackwell: the decoder selects
-DE for Snappy/LZ4 on SM100/SM103 and CUDA kernels otherwise. Each inference backend
-retains its own hardware and weight-format requirements. DE frames must fit the
-device's compressed and decoded limits. All paths validate geometry, alignment and
-capacity. Streams can change codec without changing their canonical plan; native
+never requantizes weights. All three inner codecs use the nvCOMP 6 CUDA backend.
+Each inference backend retains its own hardware and weight-format requirements.
+The receiver validates frame geometry, alignment and capacity. Streams can change
+codec without changing their canonical plan; native
 decoders are cached by inner codec.
 
 Wrapped matrix frames use independent GPU-compressed outer Zstd chunks with at
 most 1 MiB output. CPU workers unwrap them into shared host storage. Plain
 LZ4/Bitcomp has an empty outer `frames` list and equal encoded/decoded extents;
-workers copy the inner compressed bytes. DE reads its host arena directly;
-CUDA decoders receive batch-sized H2D copies through two GPU slots.
+workers copy the inner compressed bytes. The receiver transfers batch-sized
+compressed spans through two GPU slots.
 There is no full-publication HBM copy.
 Unchanged frames are omitted. Scalars/vectors use `raw_bytes`: complete target
 values, no XOR/compression, and no payload when unchanged.
@@ -197,19 +196,15 @@ remain bounded by their logical files. `multi_decompress_to_buffer(threads=0)`
 checks declared decoded sizes, then workers scatter temporary ordinary CPU output
 into the persistent image. Native decoding creates no extra workers.
 Every rank maps that same prepared tmpfs inode.
-CUDA decoders register their mappings for asynchronous H2D; rank-local plans
+Ranks register their mappings for asynchronous H2D; rank-local plans
 select the required tensors without another host copy.
 Followers create no payload pool; abort cancels their owner wait. Global manifest
 and encoded mappings are dropped after host preparation.
 
-DE ranks own private CUDA 13 `HOST_NUMA`/`PINNED` allocations with
-`CU_MEM_CREATE_USAGE_HW_DECOMPRESS`; these are never exported/imported. Each DE rank
-maps the shared prepared image without registration and copies only its required
-tensor spans into its private arena, without another file read, hash or
-outer decode. All arenas and caches fit the initial extent, rounded to allocation
-granularity. Growth reserves twice the required extent; fitting
-updates reuse storage and CUDA registrations. Shared prepared capacity is counted
-once per engine-host, while DE rank-private capacity is counted per rank.
+Encoded, prepared and numeric-metadata caches fit the initial extent rounded to
+allocation granularity. Growth reserves twice the required extent; fitting
+updates reuse storage and CUDA registrations. Every rank maps the same prepared
+capacity, which is counted once per engine-host when reporting physical memory.
 
 Successful all-rank apply precedes resume. The owner queues exact-state release
 after its resume, and ordered release/view cleanup on the same FIFO executor
@@ -236,13 +231,9 @@ most four resident waves for packed/general; custom grids are test-only controls
 There is no online autotuning or pause-time scratch fitting.
 
 After the reader fence, exactly two largest-batch decoded HBM slots are allocated
-when compressed work exists. One DE stream shares temporary workspace; each slot
-has its own status/size row. One apply stream owns the sticky error gate. DE slot
-`i % 2` is reused only after its prior apply completes. DE0 starts first, overlapping
-small raw-target copies. Apply i is queued before host submission of DE i+1 because
-nvCOMP's Async call can wait for prior work on its calling stream.
-
-The CUDA path uses one compute stream for decode, status checks and Triton apply.
+when compressed work exists. One compute stream shares temporary workspace and
+orders decode, the sticky status check and Triton apply. Each slot has its own
+status/size row.
 A separate copy stream prefetches compressed data into two batch-sized slots.
 The next H2D is queued before the current decode; a slot may be overwritten only
 after its previous decode completes. Contiguous host spans, including alignment
@@ -256,8 +247,8 @@ binding patches the prepared pointer slab and uploads it once. Unexpected source
 misalignment rebuilds conservative runtime descriptors; later aligned binding
 restores the template. Derived consumer copies are gated by the sticky error.
 Completion joins transfer, decode and apply before scratch release; failed cleanup
-attempts to drain both streams. Foreign tensor aliases retain allocations and registered
-producer/consumer streams are fenced before free in their original CUDA context.
+attempts to drain both streams. Torch stream recording preserves input/output storage through asynchronous work.
+Shared host mappings are unregistered in their original CUDA context after readers drain.
 The ordinary Torch allocator and its settings remain unchanged.
 
 Raw targets are packed once into an aligned pinned arena and uploaded during
@@ -272,19 +263,18 @@ identity cannot detect unrelated same-buffer writes by another updater.
 
 Feature environment variables are development controls, not a stable public API.
 Keep them fixed for the stream's lifetime. Batch size is captured at backend
-creation, worker count when its pool is first needed, and sorting by each decoder.
+creation and worker count when its pool is first needed.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `GPU_DELTA_LAYERS_PER_BATCH` | `1` | Positive count of active adjacent model layers per batch |
 | `GPU_DELTA_CPU_WORKERS` | `32` | Reusable workers on one owner per engine-host, for every codec; range 1–64 |
-| `GPU_DELTA_SORT_BEFORE_HW_DECOMPRESS` | `0` | `0`/`1`, native sorting on the paused DE call |
 | `GPU_DELTA_HOST_CACHE_DIR` | `/dev/shm/sglang-gpu-delta-<uid>` | Private user-owned tmpfs visible to the engine's host-local cohort |
 | `SGLANG_ENABLE_NVTX_OPERATIONS` | `0` | Standard SGLang detailed operation annotations, including GPU delta |
 
 There is no decode-depth or legacy timing/NVTX knob. Wrapped workers have independent
 Zstd contexts and at most four tasks per worker. Two host-local EP4 engines use two
-preparation pools on either decoder path. Engine IDs and
+preparation pools. Engine IDs and
 `host_cache_id`, not hostname alone, define cache
 sharing. Independent engines share no cache locks or release lifecycle.
 
@@ -320,16 +310,15 @@ device bandwidth from host durations.
 | `host_rank_metadata_release_s` | CPU child drops the parsed manifest and encoded view after shared preparation |
 | `host_cpu_worker_spawn_s`, `host_cpu_worker_wait_s` | Owner's process-launch call / complete preparation IPC wait; wait includes child work and is not additive with its phases |
 | `host_cpu_worker_pid`, `host_cpu_worker_start_ticks` | Shared child identity, repeated on the engine's ranks; followers do not own another child |
-| `host_rank_prepare_call_s` | DE-local copy loop or CUDA tensor-view binding after layout/allocation; nested inside the rank preparation span |
+| `host_rank_prepare_call_s` | Tensor-view binding on mapping creation; zero for a reused mapping and nested inside the rank preparation span |
 | `host_encoded_cache_access_s` | Publication access through shared numeric-metadata attachment; includes child work or follower wait |
-| `host_rank_layout_s`, `host_rank_allocation_s` | Local ordering/offset planning / arena growth |
+| `host_rank_layout_s`, `host_rank_allocation_s` | Local tensor selection / shared mapping registration |
 | `host_raw_pack_s`, `raw_bytes`, `raw_h2d_bytes` | CPU raw packing, direct bytes, aligned arena upload bytes |
 | `host_metadata_prepare_s`, `host_metadata_wait_s` | Small GPU input/status setup including its own stream waits / those waits alone |
 | `host_apply_kernel_prepare_s`, `apply_kernel_cache_misses`, `apply_kernel_cache_reused` | Record construction and fixed-module cache lookup; misses are Python cache misses, not necessarily compilation |
 | `paused_setup_host_s`, `paused_apply_host_wall_s` | Slot allocation/binding/uploads / complete apply through completion and scratch release |
 | `h2d_bytes`, `apply_metadata_h2d_bytes`, `apply_descriptor_h2d_bytes`, `decoder_metadata_h2d_bytes` | Explicit raw, metadata and CUDA compressed-input uploads; descriptor bytes are a subset of apply metadata bytes |
-| `compressed_input_buffers`, `compressed_input_capacity_bytes`, `compressed_input_h2d_bytes` | CUDA input-slot count, total input-slot capacity and copied bytes including alignment padding; zero on DE |
-| `de_host_input_bytes` | Compressed bytes read directly by DE, not an explicit H2D transfer |
+| `compressed_input_buffers`, `compressed_input_capacity_bytes`, `compressed_input_h2d_bytes` | CUDA input-slot count, total input-slot capacity and copied bytes including alignment padding |
 | `decode_stages`, `decoded_buffers`, `decoded_scratch_bytes`, `decoder_workspace_bytes` | Fixed 2; actual slots (0 for raw-only); total slot bytes; temporary workspace, not peak HBM |
 | `decoded_zero_ranges`, `decoded_zero_bytes` | Omitted canonical ranges cleared before decode |
 | Batch/tensor/group/contract/grid counters | Actual runtime work; kernel cache reuse is a per-rank boolean |
@@ -355,15 +344,12 @@ CPU slab construction and launch prebinding are outside
   exclude raw targets. Inactive codec counters are zero.
 - `host_rank_{arena_bytes,capacity_bytes,capacity_generation,mapping_reused}` and
   `host_rank_allocation_{s,calls,bytes}` describe local mappings and required bytes.
-  CUDA ranks share physical capacity; its allocation calls count registrations.
-  `host_rank_private_capacity_bytes` counts only private DE input storage.
-  `host_rank_staging_copy_{s,bytes}` measures DE's local copy from the shared image;
-  it is zero for CUDA decode.
+  Ranks share physical capacity; allocation calls count CUDA registrations.
   `host_encoded_cache_capacity_{bytes,generation}` and creator-only
   `host_encoded_cache_allocation_{s,calls,bytes}` describe shared tmpfs.
   `host_prepared_cache_*` describes the shared prepared image; `build_s` repeats
   its owner duration on followers and must not be summed. `host_rank_cpu_workers`
-  records pool size, zero for followers on either path. Capacity counters exclude
+  records pool size, zero for followers. Capacity counters exclude
   temporary native Zstd output slabs and do not measure total host RAM usage.
 
 `scheduler_timing.blocked_s` is the pause metric: process-local `monotonic_ns` from
@@ -399,7 +385,6 @@ python -m pytest -q test/registered/unit/gpu_delta_weight_sync/test_gpu_delta_la
 python -m pytest -q test/manual/gpu_delta/test_codec.py
 python -m pytest -q test/manual/gpu_delta/test_host_cuda.py
 python -m pytest -q test/manual/gpu_delta/test_apply_cuda.py
-python -m pytest -q test/manual/gpu_delta/test_device_allocator_cuda.py
 ```
 
 CPU cases register in `base-a-test-cpu`; layout CUDA cases register in
@@ -408,23 +393,12 @@ nvCOMP. They compare against ordinary loader/preprocessing helpers and check
 padding, independent/aliased images, exact bytes, failure gates and graph addresses.
 
 Manual tests use the paired CUDA 13 Miles image, `nvidia-libnvcomp-cu13==6.0.0.12`,
-`zstandard`, `python-snappy` and `lz4`; missing prerequisites fail. The Snappy/LZ4
-DE cases and the DE allocator test require SM100/SM103. CUDA Bitcomp/Snappy/LZ4
-cases do not require DE. Together they exercise sorting off/on, fixed-slot reuse,
-known byte output and ownership without sending malformed compressed streams into
-nvCOMP. The host tests additionally check one-owner preparation, shared bytes and
-capacity reuse/growth, cancellation and failure lifetimes. The host CUDA test
-checks shared registered mappings and asynchronous H2D after a peer unregisters,
-plus private DE rank allocations and once-per-engine file verification. Its
-two-engine DE case
-and the allocator context-restoration test each require two DE-capable devices.
-Use separate fresh processes for each ambient allocator mode:
-
-```bash
-PYTORCH_ALLOC_CONF=backend:native,expandable_segments:True \
-  python -m pytest -q test/manual/gpu_delta/test_device_allocator_cuda.py test/manual/gpu_delta/test_codec.py
-PYTORCH_ALLOC_CONF=backend:cudaMallocAsync,expandable_segments:False \
-  python -m pytest -q test/manual/gpu_delta/test_device_allocator_cuda.py test/manual/gpu_delta/test_codec.py
-```
-
-See [NVIDIA's DE requirements](https://docs.nvidia.com/cuda/nvcomp/decompression_engine_faq.html).
+`zstandard`, `python-snappy` and `lz4`; missing prerequisites fail. Each native
+Snappy/LZ4/Bitcomp case checks the production H2D/decode/apply loop, fixed-slot reuse,
+sparse/empty batches, known output bytes, status gating and storage lifetime.
+No malformed compressed streams are submitted to nvCOMP. Host tests cover one-owner
+preparation, shared bytes, capacity reuse/growth, cancellation and failure lifetimes.
+The native host suite uses two CUDA devices to check shared pinned mappings after
+peer unregister and two independent engines reusing their shared images across
+codec changes. Bitcomp producer/receiver checks also cover raw replacements and
+stale consumer identity.
