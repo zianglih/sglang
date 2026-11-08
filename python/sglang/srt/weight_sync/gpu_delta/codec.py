@@ -4,19 +4,17 @@ Preparation allocates small metadata and workspace; decoded output slots are bou
 only after generation pauses.
 The hot path calls the public C API directly: no nvCOMP Python array finalizers,
 implicit size discovery, host scalar reads or wrapper-added synchronization.
-The nvCOMP DE backend and Bitcomp batched decoder may wait for earlier work on
-the calling stream before submitting decompression, despite the Async API name.
-CUDA decoding uses two compressed device slots so H2D can overlap decode/apply.
+The Bitcomp batched decoder may wait for earlier work on the calling stream before
+submitting decompression, despite the Async API name. Two compressed device slots
+let H2D overlap CUDA decode/apply on one compute stream.
 """
 
 from __future__ import annotations
 
 import ctypes
 import importlib.metadata
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import cache
 
 import numpy as np
 import torch
@@ -24,6 +22,7 @@ import torch
 from sglang.srt.weight_sync.gpu_delta import profiling
 
 
+# Keep nvCOMP 6's complete ABI layout; unused hardware fields stay zero.
 class _SnappyOptions(ctypes.Structure):
     _fields_ = [
         ("backend", ctypes.c_int),
@@ -55,34 +54,6 @@ _MAX_FRAME_BYTES = 4 << 20
 _INT64_MAX = np.iinfo(np.int64).max
 
 
-def _require_hardware_device(device: torch.device, algorithm: str) -> int:
-    from sglang.srt.weight_sync.gpu_delta.memory import _driver
-
-    driver = _driver()
-    status, mask = driver.cuDeviceGetAttribute(
-        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_ALGORITHM_MASK,
-        device.index,
-    )
-    if status:
-        raise RuntimeError(f"GPU-delta DE device admission failed: CUDA {status}")
-    status, maximum = driver.cuDeviceGetAttribute(
-        driver.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_MAXIMUM_LENGTH,
-        device.index,
-    )
-    if status:
-        raise RuntimeError(f"GPU-delta DE device admission failed: CUDA {status}")
-    algorithms = driver.CUmemDecompressAlgorithm
-    required = {
-        "Snappy": algorithms.CU_MEM_DECOMPRESS_ALGORITHM_SNAPPY,
-        "LZ4": algorithms.CU_MEM_DECOMPRESS_ALGORITHM_LZ4,
-    }[algorithm]
-    if not mask & required:
-        raise RuntimeError(f"Device has no hardware {algorithm} decompressor")
-    if maximum <= 0:
-        raise RuntimeError("Device has no positive hardware decompression limit")
-    return maximum
-
-
 class _Alignments(ctypes.Structure):
     _fields_ = [
         ("input", ctypes.c_size_t),
@@ -98,17 +69,8 @@ class DecodeWorkspace:
     statuses: torch.Tensor
 
 
-@cache
-def decoder_backend(device, inner_codec):
-    """One backend choice for the decoder and its engine-host publication."""
-    hardware = inner_codec in {"snappy", "lz4"} and torch.cuda.get_device_capability(
-        device
-    ) in {(10, 0), (10, 3)}
-    return "hardware" if hardware else "cuda"
-
-
 class NvcompDecoder:
-    """DE for Snappy/LZ4 on SM100/103; CUDA decoding for other combinations."""
+    """Explicit nvCOMP CUDA decoding for Snappy, LZ4 and Bitcomp."""
 
     def __init__(self, device: torch.device, inner_codec: str):
         self.device = torch.device(device)
@@ -118,29 +80,17 @@ class NvcompDecoder:
             raise ValueError("GPU delta inner codec must be snappy, lz4 or bitcomp")
         self.inner_codec = inner_codec
         self._algorithm, options_type = _DECOMPRESS_OPTIONS[inner_codec]
-        sorting = os.environ.get("GPU_DELTA_SORT_BEFORE_HW_DECOMPRESS", "0")
-        if sorting not in {"0", "1"}:
-            raise ValueError("GPU_DELTA_SORT_BEFORE_HW_DECOMPRESS must be 0 or 1")
         cuda_major = torch.version.cuda.split(".")[0]
         package = f"nvidia-libnvcomp-cu{cuda_major}"
         distribution = importlib.metadata.distribution(package)
         major_version = int(distribution.version.split(".")[0])
         if major_version != 6 or ctypes.sizeof(ctypes.c_size_t) != 8:
             raise RuntimeError("Direct GPU deltas require the 64-bit nvCOMP 6 ABI")
-        self.backend = decoder_backend(self.device, inner_codec)
-        hardware = self.backend == "hardware"
         self._options = options_type()
-        self._options.backend = 1 if hardware else 2
-        if inner_codec in {"snappy", "lz4"}:
-            self._options.sort_before_hw_decompress = int(sorting) if hardware else 0
+        self._options.backend = 2  # NVCOMP_DECOMPRESS_BACKEND_CUDA
         if self._algorithm == "LZ4":
             self._options.data_type = 0  # NVCOMP_TYPE_CHAR
             self._options.bitshuffle_mode = 0  # NVCOMP_BITSHUFFLE_NONE
-        self.maximum_chunk_bytes = (
-            _require_hardware_device(self.device, self._algorithm)
-            if hardware
-            else _INT64_MAX
-        )
         self._library = ctypes.CDLL(
             str(distribution.locate_file("nvidia/libnvcomp/lib64/libnvcomp.so.6"))
         )
@@ -183,7 +133,7 @@ class NvcompDecoder:
     def _check(self, status):
         if status != 0:
             raise RuntimeError(
-                f"nvCOMP {self.inner_codec}/{self.backend} failed: status={status}"
+                f"nvCOMP {self.inner_codec}/cuda failed: status={status}"
             )
 
     def temporary_bytes(self, geometry: tuple[int, int, int], cuda_stream: int) -> int:
@@ -208,21 +158,6 @@ class NvcompDecoder:
         self._temporary_sizes[key] = size.value
         return size.value
 
-    def _empty(self, shape, dtype):
-        if self.backend == "hardware":
-            from sglang.srt.weight_sync.gpu_delta.memory import device_empty
-
-            return device_empty(shape, dtype=dtype, device=self.device)
-        return torch.empty(shape, dtype=dtype, device=self.device)
-
-    def _record_stream(self, tensor, stream):
-        if self.backend == "hardware":
-            from sglang.srt.weight_sync.gpu_delta.memory import record_device_stream
-
-            record_device_stream(tensor, stream)
-        else:
-            tensor.record_stream(stream)
-
     def _allocate_workspace(self, geometry, cuda_stream) -> DecodeWorkspace:
         """One decode stream shares scratch; statuses/sizes belong to two slots."""
 
@@ -231,9 +166,9 @@ class NvcompDecoder:
             (self.temporary_bytes(batch, cuda_stream) for batch in geometry), default=0
         )
         workspace = DecodeWorkspace(
-            self._empty((temporary,), torch.uint8),
-            self._empty((2, maximum_count), torch.int64),
-            self._empty((2, maximum_count), torch.int32),
+            torch.empty(temporary, dtype=torch.uint8, device=self.device),
+            torch.empty((2, maximum_count), dtype=torch.int64, device=self.device),
+            torch.empty((2, maximum_count), dtype=torch.int32, device=self.device),
         )
         if temporary and workspace.temporary.data_ptr() % self.alignments.temp:
             raise ValueError("Misaligned decoder workspace")
@@ -250,7 +185,6 @@ class NvcompDecoder:
         if not 0 <= input_base <= _INT64_MAX - input_bytes:
             raise ValueError("Input pointer arithmetic exceeds signed metadata")
         bounds, remainders, geometry = [0, 0], [None, None], []
-        maximum = self.maximum_chunk_bytes
         offset = 0
         for index, count in enumerate(counts):
             inputs, encoded, decoded, outputs = table[:, offset : offset + count]
@@ -259,18 +193,13 @@ class NvcompDecoder:
             if not count:
                 geometry.append((0, 0, 0))
                 continue
-            # HARDWARE does not check oversized buffers. Check actual lengths,
-            # not the compressor's worst-case allocation: compressible 4 MiB
-            # frames can fit the device limit.
             if (
                 np.any(decoded <= 0)
-                or np.any(decoded > min(_MAX_FRAME_BYTES, maximum))
+                or np.any(decoded > _MAX_FRAME_BYTES)
                 or np.any(encoded <= 0)
-                or np.any(encoded > maximum)
             ):
                 raise ValueError(
-                    "GPU-delta frames require positive lengths, <=4 MiB "
-                    f"output and both lengths <= device limit {maximum}"
+                    "GPU-delta frames require positive lengths and <=4 MiB output"
                 )
             if np.any(inputs < 0) or np.any(inputs > input_bytes - encoded):
                 raise ValueError("Encoded frame outside input allocation")
@@ -303,8 +232,8 @@ class NvcompDecoder:
 
         Rows contain relative input offsets, encoded sizes, decoded sizes and
         relative output offsets. The admitted host arena must stay immutable
-        until decoding completes. Size rows and DE input pointers are uploaded now;
-        ``bind_outputs`` fills output pointers and CUDA input pointers while paused.
+        until decoding completes. Size rows are uploaded now; ``bind_outputs``
+        fills input and output device pointers while paused.
         """
         if (
             host_input.device.type != "cpu"
@@ -324,12 +253,10 @@ class NvcompDecoder:
                 table.shape, dtype=torch.int64, device="cpu", pin_memory=True
             )
             host_rows = host.numpy()
-            np.add(table[0], input_base, out=host_rows[0])
             host_rows[1:3] = table[1:3]
-            metadata = self._empty(host.shape, torch.int64)
+            metadata = torch.empty(host.shape, dtype=torch.int64, device=self.device)
             if metadata.numel():
-                first = 0 if self.backend == "hardware" else 1
-                metadata[first:3].copy_(host[first:3], non_blocking=True)
+                metadata[1:3].copy_(host[1:3], non_blocking=True)
         return PreparedDecodePlan(
             self,
             counts,
@@ -384,7 +311,7 @@ class PreparedDecodePlan:
         output_offsets,
         output_bounds,
         output_remainders,
-        input_frames=None,
+        input_frames,
     ):
         self.decoder, self.stream = decoder, stream
         self.workspace = workspace
@@ -419,15 +346,12 @@ class PreparedDecodePlan:
                 statuses.data_ptr(),
                 stream.cuda_stream,
             )
-            if decoder.backend == "cuda":
-                inputs, sizes = input_frames[:, offset : offset + count]
-                input_offsets, copy_ranges, capacity = _pack_inputs(
-                    inputs, sizes, decoder.alignments.input
-                )
-                self.input_bounds[slot] = max(self.input_bounds[slot], capacity)
-                self.input_bytes += sum(length for _, _, length in copy_ranges)
-            else:
-                input_offsets, copy_ranges = None, ()
+            inputs, sizes = input_frames[:, offset : offset + count]
+            input_offsets, copy_ranges, capacity = _pack_inputs(
+                inputs, sizes, decoder.alignments.input
+            )
+            self.input_bounds[slot] = max(self.input_bounds[slot], capacity)
+            self.input_bytes += sum(length for _, _, length in copy_ranges)
             self.batches.append(
                 PreparedDecode(
                     decoder,
@@ -450,21 +374,6 @@ class PreparedDecodePlan:
                 )
             )
             offset += count
-        self.record_stream(stream)
-
-    def record_stream(self, stream):
-        """Register every consumer before it can enqueue storage readers."""
-        if stream.device != self.decoder.device:
-            raise ValueError("Decoder consumer stream/device mismatch")
-        for tensor in (
-            self.metadata,
-            self.workspace.temporary,
-            self.workspace.actual_sizes,
-            self.workspace.statuses,
-            *self.decoded_slots,
-            *self.input_slots,
-        ):
-            self.decoder._record_stream(tensor, stream)
 
     @profiling.annotate("gpu_delta.pause.bind_decoder_outputs")
     def bind_outputs(
@@ -476,8 +385,6 @@ class PreparedDecodePlan:
         The caller waits for prior apply readers before reusing each output and
         its status/actual-size row. Scratch is reused on the selected decode stream.
         """
-        from sglang.srt.weight_sync.gpu_delta.memory import require_de_capable
-
         if len(decoded_slots) != 2:
             raise ValueError("Decoded output count differs from prepared slots")
         for tensor in decoded_slots:
@@ -509,33 +416,29 @@ class PreparedDecodePlan:
             ):
                 raise ValueError("Misaligned decoded frame")
         for tensor in decoded_slots:
-            self.decoder._record_stream(tensor, self.stream)
+            tensor.record_stream(self.stream)
         with torch.cuda.device(self.decoder.device), torch.cuda.stream(self.stream):
-            if self.decoder.backend == "hardware":
-                for base, capacity in zip(bases, capacities):
-                    if capacity:
-                        require_de_capable(base)
-            else:
-                self.input_slots[:] = [
-                    self.decoder._empty(size, torch.uint8) for size in self.input_bounds
-                ]
-                self.input_capacity_bytes = sum(self.input_bounds)
-                for index, batch in enumerate(self.batches):
-                    slot = self.input_slots[index % 2]
-                    np.add(
-                        batch.input_offsets,
-                        slot.data_ptr(),
-                        out=batch.host_metadata[0].numpy(),
+            self.input_slots[:] = [
+                torch.empty(size, dtype=torch.uint8, device=self.decoder.device)
+                for size in self.input_bounds
+            ]
+            self.input_capacity_bytes = sum(self.input_bounds)
+            for index, batch in enumerate(self.batches):
+                slot = self.input_slots[index % 2]
+                np.add(
+                    batch.input_offsets,
+                    slot.data_ptr(),
+                    out=batch.host_metadata[0].numpy(),
+                )
+                batch.input_copies[:] = [
+                    (
+                        slot[destination : destination + length],
+                        batch.host_input[source : source + length],
                     )
-                    batch.input_copies[:] = [
-                        (
-                            slot[destination : destination + length],
-                            batch.host_input[source : source + length],
-                        )
-                        for source, destination, length in batch.copy_ranges
-                    ]
-                if self.metadata.numel():
-                    self.metadata[0].copy_(self.host_metadata[0], non_blocking=True)
+                    for source, destination, length in batch.copy_ranges
+                ]
+            if self.metadata.numel():
+                self.metadata[0].copy_(self.host_metadata[0], non_blocking=True)
             for index, batch in enumerate(self.batches):
                 np.add(
                     batch.output_offsets,
@@ -564,14 +467,14 @@ class PreparedDecode:
     output_offsets: np.ndarray
     output_pointers: np.ndarray
     input_slots: list[torch.Tensor]
-    input_offsets: np.ndarray | None
+    input_offsets: np.ndarray
     copy_ranges: tuple
     input_copies: list
 
     @profiling.annotate("gpu_delta.pause.h2d_input")
     def copy_input(self, stream) -> None:
         if self.input_copies:
-            self.decoder._record_stream(self.input_copies[0][0], stream)
+            self.input_copies[0][0].record_stream(stream)
         with torch.cuda.stream(stream):
             for destination, source in self.input_copies:
                 destination.copy_(source, non_blocking=True)
@@ -583,8 +486,7 @@ class PreparedDecode:
         This object and all storage must outlive the submitted work. There is no
         explicit synchronization here; nvCOMP Bitcomp may synchronize internally
         to inspect headers. The receiver queues the next H2D transfer first.
-        The session owns the final fence and calling-stream context. Foreign
-        allocation finalizers also fence their recorded consumers before freeing.
+        The session owns the final fence and calling-stream context.
         """
         if not self.statuses.numel():
             return

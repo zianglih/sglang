@@ -35,32 +35,17 @@ def _frame_table(batches):
 
 
 @pytest.mark.parametrize(
-    "name,algorithm,options_type,reserved_offset,capability,hardware",
+    "name,algorithm,options_type,reserved_offset",
     [
-        ("snappy", "Snappy", codec._SnappyOptions, 8, (10, 0), True),
-        ("lz4", "LZ4", codec._Lz4Options, 16, (10, 3), True),
-        ("snappy", "Snappy", codec._SnappyOptions, 8, (9, 0), False),
-        ("lz4", "LZ4", codec._Lz4Options, 16, (9, 0), False),
-        ("bitcomp", "Bitcomp", codec._BitcompOptions, 4, (10, 3), False),
-        ("bitcomp", "Bitcomp", codec._BitcompOptions, 4, (9, 0), False),
+        ("snappy", "Snappy", codec._SnappyOptions, 8),
+        ("lz4", "LZ4", codec._Lz4Options, 16),
+        ("bitcomp", "Bitcomp", codec._BitcompOptions, 4),
     ],
 )
-@pytest.mark.parametrize("sorting", ["0", "1"])
-def test_codec_abi_and_frozen_hardware_options(
-    monkeypatch,
-    request,
-    name,
-    algorithm,
-    options_type,
-    reserved_offset,
-    capability,
-    hardware,
-    sorting,
+def test_codec_abi_uses_cuda_options(
+    monkeypatch, name, algorithm, options_type, reserved_offset
 ):
-    codec.decoder_backend.cache_clear()
-    request.addfinalizer(codec.decoder_backend.cache_clear)
-    # Match nvCOMP 6 shared_types.h, snappy.h and lz4.h. In particular, LZ4
-    # inserts two enums before reserved bytes despite both structs being 64B.
+    # nvCOMP 6 retains the hardware-sort ABI field even for CUDA decoding.
     assert ctypes.sizeof(options_type) == 64
     assert ctypes.alignment(options_type) == ctypes.alignment(ctypes.c_int)
     assert options_type.backend.offset == 0
@@ -70,31 +55,7 @@ def test_codec_abi_and_frozen_hardware_options(
     if name == "lz4":
         assert options_type.data_type.offset == 8
         assert options_type.bitshuffle_mode.offset == 12
-    monkeypatch.setenv("GPU_DELTA_SORT_BEFORE_HW_DECOMPRESS", sorting)
-    calls, device_queries = [], []
-    attributes = {136: {"Snappy": 2, "LZ4": 4, "Bitcomp": 0}[algorithm], 137: 4 << 20}
-
-    def device_attribute(attribute, device):
-        device_queries.append((attribute, device))
-        return 0, attributes[attribute]
-
-    monkeypatch.setitem(
-        sys.modules,
-        "sglang.srt.weight_sync.gpu_delta.memory",
-        SimpleNamespace(
-            _driver=lambda: SimpleNamespace(
-                CUdevice_attribute=SimpleNamespace(
-                    CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_ALGORITHM_MASK=136,
-                    CU_DEVICE_ATTRIBUTE_MEM_DECOMPRESS_MAXIMUM_LENGTH=137,
-                ),
-                CUmemDecompressAlgorithm=SimpleNamespace(
-                    CU_MEM_DECOMPRESS_ALGORITHM_SNAPPY=2,
-                    CU_MEM_DECOMPRESS_ALGORITHM_LZ4=4,
-                ),
-                cuDeviceGetAttribute=device_attribute,
-            )
-        ),
-    )
+    calls = []
 
     class Function:
         def __init__(self, suffix):
@@ -128,35 +89,10 @@ def test_codec_abi_and_frozen_hardware_options(
     monkeypatch.setattr(codec.ctypes, "CDLL", load_library)
     monkeypatch.setattr(torch.version, "cuda", "13.0")
     monkeypatch.setattr(torch.cuda, "device", lambda _: nullcontext())
-    capability_queries = []
-    monkeypatch.setattr(
-        torch.cuda,
-        "get_device_capability",
-        lambda device: capability_queries.append(device) or capability,
-    )
-    for allocator_api in (
-        "get_allocator_backend",
-        "_snapshot",
-        "_set_allocator_settings",
-    ):
-        monkeypatch.setattr(
-            torch.cuda.memory,
-            allocator_api,
-            lambda *a: pytest.fail("global allocator access"),
-        )
     decoder = codec.NvcompDecoder(torch.device("cuda", 0), name)
     assert decoder.inner_codec == name
-    assert decoder.backend == ("hardware" if hardware else "cuda")
-    assert codec.decoder_backend(decoder.device, name) == decoder.backend
-    assert codec.decoder_backend(decoder.device, name) == decoder.backend
-    assert capability_queries == ([decoder.device] if name != "bitcomp" else [])
-    assert decoder.maximum_chunk_bytes == ((4 << 20) if hardware else codec._INT64_MAX)
-    assert decoder._options.backend == (1 if hardware else 2)
-    if name != "bitcomp":
-        assert decoder._options.sort_before_hw_decompress == (
-            int(sorting) if hardware else 0
-        )
-    assert bytes(decoder._options)[8:] == bytes(56)
+    assert decoder._options.backend == 2
+    assert bytes(decoder._options)[4:] == bytes(60)
     align_function = functions[
         f"nvcompBatched{algorithm}DecompressGetRequiredAlignments"
     ]
@@ -192,19 +128,6 @@ def test_codec_abi_and_frozen_hardware_options(
     ]
     assert calls[0][1] == calls[1][1]
     assert decoder.temporary_bytes(geometry, 7) == 64
-    assert device_queries == ([(136, 0), (137, 0)] if hardware else [])
-    # Allocation capability alone does not prove this codec exists. Frame
-    # lengths are checked against the cached device limit during preparation.
-    if hardware:
-        attributes[136] = 0
-        with pytest.raises(RuntimeError, match="no hardware"):
-            codec.NvcompDecoder(decoder.device, name)
-        attributes[136] = {"Snappy": 2, "LZ4": 4}[algorithm]
-        attributes[137] = 1 << 20
-        assert codec.NvcompDecoder(decoder.device, name).maximum_chunk_bytes == 1 << 20
-        attributes[137] = 0
-        with pytest.raises(RuntimeError, match="positive hardware decompression limit"):
-            codec.NvcompDecoder(decoder.device, name)
     distribution.version = "5.3.0.16"
     with pytest.raises(RuntimeError, match="nvCOMP 6 ABI"):
         codec.NvcompDecoder(decoder.device, name)
@@ -216,7 +139,6 @@ def test_workspace_query_cache_uses_geometry_and_stream_and_preserves_failure(
     # Exercise the real query/cache code without a CUDA allocation or library.
     decoder = object.__new__(codec.NvcompDecoder)
     decoder.device = torch.device("cuda", 0)
-    decoder.backend = "hardware"
     decoder.inner_codec = "snappy"
     decoder._options = codec._SnappyOptions()
     decoder._temporary_sizes = {}
@@ -243,7 +165,7 @@ def test_workspace_query_cache_uses_geometry_and_stream_and_preserves_failure(
     fail = False
     assert decoder.temporary_bytes((2, 20, 31), 7) == 0
     assert decoder.temporary_bytes((2, 20, 31), 7) == 0
-    # Query the actual DE stream once, then retain its own zero-sized cache entry.
+    # Query the actual compute stream once, then retain its own zero-sized cache entry.
     assert decoder.temporary_bytes((2, 20, 30), 9) == 0
     assert decoder.temporary_bytes((2, 20, 30), 9) == 0
     assert decoder.temporary_bytes((2, 20, 30), 7) == 0
@@ -252,23 +174,18 @@ def test_workspace_query_cache_uses_geometry_and_stream_and_preserves_failure(
 
 def test_prepared_stream_scratch_and_slot_status_ownership(monkeypatch):
     # Real tensor views/pointers exercise nonzero, non-aligned native workspace
-    # requirements without a device. Native tests cover actual DE and ring reuse.
+    # requirements without a device. Native cases cover decoding and buffer reuse.
     decoder = object.__new__(codec.NvcompDecoder)
     decoder.device = torch.device("cpu")
-    decoder.backend = "hardware"
     decoder.alignments = codec._Alignments(16, 16, 16)
     decoder._options = codec._SnappyOptions()
     decoder.temporary_bytes = lambda geometry, stream: geometry[0] * 13
     recorded = []
-    monkeypatch.setitem(
-        sys.modules,
-        "sglang.srt.weight_sync.gpu_delta.memory",
-        SimpleNamespace(
-            device_empty=lambda shape, dtype, device: torch.empty(shape, dtype=dtype),
-            require_de_capable=lambda _: None,
-            record_device_stream=lambda tensor, stream: recorded.append(
-                (tensor.untyped_storage().data_ptr(), stream.cuda_stream)
-            ),
+    monkeypatch.setattr(
+        torch.Tensor,
+        "record_stream",
+        lambda tensor, stream: recorded.append(
+            (tensor.untyped_storage().data_ptr(), stream.cuda_stream)
         ),
     )
     monkeypatch.setattr(torch.cuda, "device", lambda _: nullcontext())
@@ -291,6 +208,7 @@ def test_prepared_stream_scratch_and_slot_status_ownership(monkeypatch):
         np.zeros(sum(counts), dtype=np.int64),
         [128, 128],
         [0, 0],
+        np.zeros((2, sum(counts)), dtype=np.int64),
     )
     assert workspace.temporary.shape == (39,)
     assert workspace.temporary.data_ptr() % decoder.alignments.temp == 0
@@ -311,21 +229,9 @@ def test_prepared_stream_scratch_and_slot_status_ownership(monkeypatch):
             batch.enqueue()  # Empty metadata must not call the native decoder.
     outputs = [torch.empty(128, dtype=torch.uint8) for _ in range(2)]
     assert plan.bind_outputs(outputs) is plan.batches
-    consumer = SimpleNamespace(device=decoder.device, cuda_stream=2)
-    plan.record_stream(consumer)
-    with pytest.raises(ValueError, match="consumer stream/device mismatch"):
-        plan.record_stream(SimpleNamespace(device=torch.device("cuda", 0)))
-    for tensor in (
-        metadata,
-        workspace.temporary,
-        workspace.statuses,
-        workspace.actual_sizes,
-        *outputs,
-    ):
-        assert {
-            (tensor.untyped_storage().data_ptr(), s.cuda_stream)
-            for s in (stream, consumer)
-        } <= set(recorded)
+    assert recorded == [
+        (tensor.untyped_storage().data_ptr(), stream.cuda_stream) for tensor in outputs
+    ]
     offset = 0
     for index, count in enumerate(counts):
         assert (
@@ -340,9 +246,7 @@ def test_host_input_plans_reject_invalid_geometry_before_device_work(monkeypatch
     # vector arithmetic and output-lease failures here without a fake CUDA API.
     decoder = object.__new__(codec.NvcompDecoder)
     decoder.device = torch.device("cpu")
-    decoder.backend = "hardware"
     decoder.inner_codec = "snappy"
-    decoder.maximum_chunk_bytes = 4 << 20
     decoder.alignments = codec._Alignments(16, 16, 16)
     table, counts = _frame_table([[(0, 20, 64, 0), (32, 17, 32, 128)]])
     geometry, bounds, remainders = decoder._frame_geometry(table, counts, 0, 512)
@@ -364,18 +268,12 @@ def test_host_input_plans_reject_invalid_geometry_before_device_work(monkeypatch
     for invalid in (table.astype(np.int32), table[:, ::-1], table[:, :-1]):
         with pytest.raises(ValueError, match="contiguous int64"):
             decoder._frame_geometry(invalid, counts, 0, 512)
-    maximum = decoder.maximum_chunk_bytes
-    # A compressible full 4 MiB output is legal; either actual length exceeding
-    # hardware's bound is not. This is independent of the inner algorithm.
+    maximum = codec._MAX_FRAME_BYTES
     assert decoder._frame_geometry(*_frame_table([[(0, 20, maximum, 0)]]), 0, 512)[
         1
     ] == [maximum, 0]
-    for encoded, decoded in ((maximum + 1, 64), (20, maximum + 1)):
-        with pytest.raises(ValueError, match="device limit"):
-            decoder._frame_geometry(*_frame_table([[(0, encoded, decoded, 0)]]), 0, 512)
-    decoder.maximum_chunk_bytes = 1 << 20
-    with pytest.raises(ValueError, match="device limit"):
-        decoder._frame_geometry(*_frame_table([[(0, 20, maximum, 0)]]), 0, 512)
+    with pytest.raises(ValueError, match="<=4 MiB output"):
+        decoder._frame_geometry(*_frame_table([[(0, 20, maximum + 1, 0)]]), 0, 512)
     assert decoder._frame_geometry(*_frame_table([[], []]), 0, 512) == (
         [(0, 0, 0), (0, 0, 0)],
         [0, 0],
@@ -388,15 +286,6 @@ def test_host_input_plans_reject_invalid_geometry_before_device_work(monkeypatch
     plan.decoded_slots = []
     # Every malformed output must fail before CUDA context, allocation or upload.
     monkeypatch.setattr(torch.cuda, "device", lambda _: pytest.fail("entered CUDA"))
-    monkeypatch.setitem(
-        sys.modules,
-        "sglang.srt.weight_sync.gpu_delta.memory",
-        SimpleNamespace(
-            device_empty=lambda *a, **kw: pytest.fail("allocated device storage"),
-            require_de_capable=lambda _: pytest.fail("queried device"),
-            record_device_stream=lambda *a: pytest.fail("recorded device"),
-        ),
-    )
     with pytest.raises(ValueError, match="Decoder stream/device mismatch"):
         decoder.prepare_batches(
             table,

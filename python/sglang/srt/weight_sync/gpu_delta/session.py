@@ -42,7 +42,7 @@ class DeltaSession:
 
     ``prepare`` owns immutable host inputs, small GPU metadata/workspace and CPU
     plans. ``apply`` allocates large decoded slots after the reader fence, joins
-    DE/application streams and releases scratch before resume. Error cleanup
+    copy/compute streams and releases scratch before resume. Error cleanup
     retains buffers until both streams have drained.
     """
 
