@@ -1,0 +1,55 @@
+{
+  "source_commit": "a6464c0a9fda681a797a7b315c2d571a44d1df69",
+  "source_base": "a7d9f81ee24c5cceeceeb4ccb9072f68d56cb10d",
+  "image": "lmsysorg/sglang:nightly-dev-cu13-20261108-9d547e19",
+  "amd64_image_digest": "sha256:528d797d1e75b4b985f402f1236dc81e2575c199a05d493ee8cb2a64e977ca5e",
+  "flashinfer_version": "0.7.4rc1",
+  "hardware": "C3 node,8xNVIDIA B300 SXM6 AC; each validation workload uses one GPU",
+  "registered": {
+    "source_commit": "a6464c0a9fda681a797a7b315c2d571a44d1df69",
+    "flashinfer_version": "0.7.4rc1",
+    "hardware": "NVIDIA B300 SXM6 AC",
+    "gpu": 0,
+    "tests_passed": 72,
+    "subtests_passed": 64,
+    "skips": 0,
+    "failures": 0,
+    "deselected": 3,
+    "host_seconds": 23.53,
+    "w4a4_seconds": 42.43,
+    "w4a16_situ_seconds": 19.09,
+    "logs": [
+      "registered-logs/host-contracts.log",
+      "registered-logs/production-w4a4.log",
+      "registered-logs/production-w4a16-situ.log"
+    ]
+  },
+  "graph_reload_summary": "graph-reload-summary.json",
+  "source_postflight": {
+    "files_checked": 12142,
+    "mismatches": []
+  },
+  "package_postflight": {
+    "packages_checked": 373,
+    "unchanged": true,
+    "changes": {},
+    "flashinfer_versions": {
+      "flashinfer-cubin": "0.7.4rc1",
+      "flashinfer-jit-cache": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm100a": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm103a": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm120f": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm80": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm89": "0.7.4rc1+cu130",
+      "flashinfer-jit-cache-sm90a": "0.7.4rc1+cu130",
+      "flashinfer-python": "0.7.4rc1"
+    }
+  },
+  "performance_samples_recorded": 0,
+  "limitations": [
+    "No full-model serving or distributed all-to-all validation",
+    "No sanitizer run",
+    "Native GPU execution only on SM103",
+    "Historical PR performance table was not rerun"
+  ]
+}

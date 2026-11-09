@@ -1,0 +1,554 @@
+{
+  "environment": {
+    "python": "3.12.16",
+    "torch": "2.14.1+cu130",
+    "cuda": "13.0",
+    "gpu": "NVIDIA B300 SXM6 AC",
+    "capability": [
+      10,
+      3
+    ],
+    "flashinfer": "0.7.4rc1",
+    "flashinfer_file": "/opt/sglang/lib/python3.12/site-packages/flashinfer/__init__.py",
+    "sglang_file": "/scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/sglang/python/sglang/__init__.py",
+    "visible_devices": "1",
+    "matmul_allow_tf32": false,
+    "inherited_kernel_environment": {
+      "FLASHINFER_NVFP4_4OVER6": null,
+      "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": null,
+      "FLASHINFER_NVFP4_4OVER6_ERR_MODE": null,
+      "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": null,
+      "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": null,
+      "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": null,
+      "TRTLLM_ENABLE_PDL": null,
+      "FLASHINFER_DIST_AWARE_AUTOTUNE": "0",
+      "FLASHINFER_CUTE_DSL_STRICT_CACHE_KEY": "1",
+      "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
+      "CUTE_DSL_CACHE_DIR": "/scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/cache/cute-graph-reload-gpu1",
+      "SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION": null,
+      "SGLANG_FLASHINFER_CUTEDSL_NVFP4_W4A16": null,
+      "SGLANG_FLASHINFER_MOE_FUSED_FINALIZE": null,
+      "SGLANG_MOE_NVFP4_DISPATCH": null
+    },
+    "nvfp4_4over6_config": "None"
+  },
+  "arguments": {
+    "output": "correctness-matrix",
+    "tokens": "32",
+    "cases": "",
+    "hidden": 1024,
+    "intermediate": 1024,
+    "experts": 8,
+    "topk": 4,
+    "timing": false,
+    "autotune": false,
+    "tactic_cache_dir": null,
+    "arm_order": "legacy-first",
+    "warmup": 10,
+    "iters": 100,
+    "port": 29673
+  },
+  "method": "Real SGLang FusedMoE TP1/EP1; serialized NVFP4 through production loaders. Identical checkpoints, BF16 inputs and precomputed routes in both arms. Both arms use installed FlashInfer v0.7.4rc1; legacy forces swap_ab=False. Deterministic unfused finalize; no autotuning. W4A16 has an independent dequantized-weight FP32 matmul/BF16-activation reference; W4A4 checks cross-layout parity, graph equality and reload. Optional timings use CUDA events around one whole-forward graph replay per sample, warm L2, initial quantization included, reload/weight prep/capture excluded; fixed defaults are mode-specific, not a fixed-tactic or CUPTI study.",
+  "arms": [
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543861854208,
+        "w2_weight": 123543870242816,
+        "w13_blockscale_mma": 123544107220992,
+        "w2_blockscale_mma": 123544106369024,
+        "resolved_scale_0": 123544348978176,
+        "resolved_scale_1": 123544348974080,
+        "resolved_scale_2": 123544348977152,
+        "resolved_input_scale": 123544348975616
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 3.348160043009557
+    },
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543874437120,
+        "w2_weight": 123543973003264,
+        "w13_blockscale_mma": 123544108269568,
+        "w2_blockscale_mma": 123543949934592,
+        "resolved_scale_0": 123544348984832,
+        "resolved_scale_1": 123544348980736,
+        "resolved_scale_2": 123544348983808,
+        "resolved_input_scale": 123544348982272
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 1.658173170988448
+    },
+    {
+      "mode": "w4a4_scalar",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543861854208,
+        "w2_weight": 123543866048512,
+        "w13_blockscale_mma": 123544348395520,
+        "w2_blockscale_mma": 123543967760384,
+        "resolved_scale_0": 123544350458880,
+        "resolved_scale_1": 123544350453760,
+        "resolved_scale_2": 123544350457856,
+        "resolved_input_scale": 123544350456320
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.5353526088874787
+    },
+    {
+      "mode": "w4a4_scalar",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543870242816,
+        "w2_weight": 123543977197568,
+        "w13_blockscale_mma": 123543968284672,
+        "w2_blockscale_mma": 123544105123840,
+        "resolved_scale_0": 123544350465536,
+        "resolved_scale_1": 123544350461440,
+        "resolved_scale_2": 123544350464512,
+        "resolved_input_scale": 123544350462976
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.5304645469877869
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543981391872,
+        "w2_weight": 123543989780480,
+        "w13_blockscale_mma": 123544107220992,
+        "w2_blockscale_mma": 123544106369024,
+        "resolved_scale_0": 123544348975616,
+        "resolved_scale_1": 123544348973568,
+        "resolved_scale_2": 123544348986880,
+        "resolved_input_scale": 123544348975104
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 1.4611929099773988
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123544302256128,
+        "w2_weight": 123544310644736,
+        "w13_blockscale_mma": 123543966711808,
+        "w2_blockscale_mma": 123543951507456,
+        "resolved_scale_0": 123544350433792,
+        "resolved_scale_1": 123544350431744,
+        "resolved_scale_2": 123544350429696,
+        "resolved_input_scale": 123544350433280
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 1.3975528529845178
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123544314839040,
+        "w2_weight": 123544319033344,
+        "w13_blockscale_mma": 123544105648128,
+        "w2_blockscale_mma": 123544340004864,
+        "resolved_scale_0": 123544348963840,
+        "resolved_scale_1": 123544348961792,
+        "resolved_scale_2": 123544348985856,
+        "resolved_input_scale": 123544348963328
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.4720352879958227
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543882825728,
+        "w2_weight": 123543887020032,
+        "w13_blockscale_mma": 123544340529152,
+        "w2_blockscale_mma": 123544348987392,
+        "resolved_scale_0": 123544348920832,
+        "resolved_scale_1": 123544348968448,
+        "resolved_scale_2": 123544348966400,
+        "resolved_input_scale": 123544348920320
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.49474376905709505
+    },
+    {
+      "mode": "w4a16",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.0008582472801208496,
+        "reference_abs_max": 0.19870327413082123,
+        "relative_l2_error": 0.002345034619793296,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123544314839040,
+        "w2_weight": 123543891214336,
+        "w13_blockscale_mma": 123543950458880,
+        "w2_blockscale_mma": 123544341053440,
+        "resolved_scale_0": 123544348946432,
+        "resolved_scale_1": 123544350488064,
+        "resolved_scale_2": 123544348959232,
+        "resolved_input_scale": 123544348958720
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.0009848326444625854,
+        "reference_abs_max": 0.22303132712841034,
+        "relative_l2_error": 0.002349693328142166,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 10.786019899998792
+    },
+    {
+      "mode": "w4a16",
+      "activation": "silu",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.0008582472801208496,
+        "reference_abs_max": 0.19870327413082123,
+        "relative_l2_error": 0.002345034619793296,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543895408640,
+        "w2_weight": 123543993974784,
+        "w13_blockscale_mma": 123543957274624,
+        "w2_blockscale_mma": 123544341577728,
+        "resolved_scale_0": 123544348953088,
+        "resolved_scale_1": 123544348951040,
+        "resolved_scale_2": 123544348948992,
+        "resolved_input_scale": 123544348948480
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.0009848326444625854,
+        "reference_abs_max": 0.22303132712841034,
+        "relative_l2_error": 0.002349693328142166,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 1.0905326990177855
+    },
+    {
+      "mode": "w4a16",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.001701056957244873,
+        "reference_abs_max": 0.5264908671379089,
+        "relative_l2_error": 0.0023295795544981956,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123543998169088,
+        "w2_weight": 123544002363392,
+        "w13_blockscale_mma": 123544340004864,
+        "w2_blockscale_mma": 123544105648128,
+        "resolved_scale_0": 123544348963328,
+        "resolved_scale_1": 123544350465024,
+        "resolved_scale_2": 123544350489088,
+        "resolved_input_scale": 123544350486528
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999971985816956,
+        "max_abs_error": 0.002201169729232788,
+        "reference_abs_max": 0.6315850615501404,
+        "relative_l2_error": 0.0023594899103045464,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 5.2065892110113055
+    },
+    {
+      "mode": "w4a16",
+      "activation": "relu2",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 0.001701056957244873,
+        "reference_abs_max": 0.5264908671379089,
+        "relative_l2_error": 0.0023295795544981956,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123544006557696,
+        "w2_weight": 123544010752000,
+        "w13_blockscale_mma": 123544349511680,
+        "w2_blockscale_mma": 123543956226048,
+        "resolved_scale_0": 123544350471680,
+        "resolved_scale_1": 123544350469632,
+        "resolved_scale_2": 123544350467584,
+        "resolved_input_scale": 123544350467072
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999971985816956,
+        "max_abs_error": 0.002201169729232788,
+        "reference_abs_max": 0.6315850615501404,
+        "relative_l2_error": 0.0023594899103045464,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.5913735029753298
+    },
+    {
+      "mode": "w4a16",
+      "activation": "situ",
+      "tokens": 32,
+      "swap_ab": false,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 2.0428466796875,
+        "reference_abs_max": 546.5579833984375,
+        "relative_l2_error": 0.0023545355070382357,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123540103757824,
+        "w2_weight": 123540112146432,
+        "w13_blockscale_mma": 123543964614656,
+        "w2_blockscale_mma": 123543965663232,
+        "resolved_scale_0": 123544350434816,
+        "resolved_scale_1": 123544348957184,
+        "resolved_scale_2": 123544350485504,
+        "resolved_input_scale": 123544348961792
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 2.3154296875,
+        "reference_abs_max": 534.8570556640625,
+        "relative_l2_error": 0.0023554377257823944,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 2.1928213329520077
+    },
+    {
+      "mode": "w4a16",
+      "activation": "situ",
+      "tokens": 32,
+      "swap_ab": true,
+      "graph_matches_eager_exactly": true,
+      "reference_initial": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 2.0428466796875,
+        "reference_abs_max": 546.5579833984375,
+        "relative_l2_error": 0.0023545355070382357,
+        "bitwise_equal": false
+      },
+      "reload_pointers_unchanged": {
+        "w13_weight": 123540116340736,
+        "w2_weight": 123544281284608,
+        "w13_blockscale_mma": 123544100929536,
+        "w2_blockscale_mma": 123544101978112,
+        "resolved_scale_0": 123544350441472,
+        "resolved_scale_1": 123544350439424,
+        "resolved_scale_2": 123544350437376,
+        "resolved_input_scale": 123544350436864
+      },
+      "graph_reload_matches_eager_exactly": true,
+      "reference_reload": {
+        "cosine": 0.9999972581863403,
+        "max_abs_error": 2.3154296875,
+        "reference_abs_max": 534.8570556640625,
+        "relative_l2_error": 0.0023554377257823944,
+        "bitwise_equal": false
+      },
+      "latency_us_samples": [],
+      "elapsed_seconds": 0.7395647478988394
+    }
+  ],
+  "comparisons": [
+    {
+      "mode": "w4a4_scalar",
+      "activation": "silu",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.0000056028366089,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.2060546875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.000006079673767,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.23046875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a4_scalar",
+      "activation": "relu2",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.0000041723251343,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.494140625,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000041723251343,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.62890625,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "silu",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.0000051259994507,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.1982421875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000053644180298,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.21875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a4_per_token",
+      "activation": "relu2",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.000003695487976,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.5078125,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000044107437134,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.5703125,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a16",
+      "activation": "silu",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.000004768371582,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.19921875,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.000004529953003,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.22265625,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a16",
+      "activation": "relu2",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.0000040531158447,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.52734375,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000042915344238,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 0.6328125,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    },
+    {
+      "mode": "w4a16",
+      "activation": "situ",
+      "tokens": 32,
+      "initial": {
+        "cosine": 1.0000041723251343,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 548.0,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      },
+      "reloaded": {
+        "cosine": 1.0000042915344238,
+        "max_abs_error": 0.0,
+        "reference_abs_max": 536.0,
+        "relative_l2_error": 0.0,
+        "bitwise_equal": true
+      }
+    }
+  ],
+  "complete": true
+}

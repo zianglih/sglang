@@ -1,0 +1,105 @@
+{
+  "python": "3.12.16 (main, Oct 26 2026, 14:08:45) [Clang 23.1.3 ]",
+  "executable": "/opt/sglang/bin/python",
+  "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "versions": {
+    "torch": "2.14.1+cu130",
+    "flashinfer-python": "0.7.4rc1",
+    "flashinfer-cubin": "0.7.4rc1",
+    "flashinfer-jit-cache": "0.7.4rc1+cu130",
+    "nvidia-cutlass-dsl": "4.8.0",
+    "triton": "3.8.0",
+    "pytest": "9.2.0",
+    "sglang-kernel": "0.4.10",
+    "apache-tvm-ffi": "0.1.11"
+  },
+  "cuda_runtime": "13.0",
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 1,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 2,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 3,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 4,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 5,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 6,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 7,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    }
+  ],
+  "nvidia_smi": "index, name, driver_version, memory.total [MiB]\n0, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n1, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n2, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n3, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n4, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n5, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n6, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n7, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n",
+  "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:58:59_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0\n",
+  "api": {
+    "wrapper": "(num_experts: int, top_k: int, hidden_size: int, intermediate_size: int, use_cuda_graph: bool = False, max_num_tokens: Optional[int] = None, num_local_experts: Optional[int] = None, local_expert_offset: int = 0, tile_size: int = 128, sf_vec_size: int = 16, output_dtype: torch.dtype = torch.bfloat16, device: str = 'cuda', enable_pdl: bool = True, activation_type: int = 3, swiglu_alpha: float = 1.0, swiglu_beta: float = 0.0, swiglu_limit: float = 3.4028234663852886e+38, situ_beta: Optional[float] = None, situ_linear_beta: Optional[float] = None, use_fused_finalize: bool = True, quant_mode: str = 'w4a4', clamped_relu2_limit: Optional[torch.Tensor] = None, swap_ab: bool = False)",
+    "prepare": "(weight: 'torch.Tensor', block_scales: 'torch.Tensor', swap_ab: 'bool' = False) -> 'Tuple[torch.Tensor, torch.Tensor]'"
+  },
+  "source_paths": {
+    "flashinfer": "/opt/sglang/lib/python3.12/site-packages/flashinfer/__init__.py",
+    "prepare": "/opt/sglang/lib/python3.12/site-packages/flashinfer/fused_moe/prepare.py",
+    "wrapper": "/opt/sglang/lib/python3.12/site-packages/flashinfer/fused_moe/cute_dsl/fused_moe.py",
+    "modelopt_quant": "/scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/sglang/python/sglang/srt/layers/quantization/modelopt_quant.py",
+    "flashinfer_cutedsl": "/scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/sglang/python/sglang/srt/layers/moe/moe_runner/flashinfer_cutedsl.py"
+  },
+  "swap_ab_selected_gpu0": true
+}

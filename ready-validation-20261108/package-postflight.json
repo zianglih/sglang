@@ -1,0 +1,16 @@
+{
+  "packages_checked": 373,
+  "unchanged": true,
+  "changes": {},
+  "flashinfer_versions": {
+    "flashinfer-cubin": "0.7.4rc1",
+    "flashinfer-jit-cache": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm100a": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm103a": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm120f": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm80": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm89": "0.7.4rc1+cu130",
+    "flashinfer-jit-cache-sm90a": "0.7.4rc1+cu130",
+    "flashinfer-python": "0.7.4rc1"
+  }
+}

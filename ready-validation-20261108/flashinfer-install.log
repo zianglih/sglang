@@ -1,0 +1,95 @@
+Verified flashinfer_python-0.7.4rc1-py3-none-any.whl: 101256060 bytes, sha256=668ccf805cfe8fdf5cbc5d7e5a0f43c2b458f16b40c4a5c6c36daa8029e60ceb, 1.81s
+Verified flashinfer_cubin-0.7.4rc1-py3-none-any.whl: 1764913350 bytes, sha256=1363a39d4ce6e68089ba7ea94d1ce7e2d5bb15a40e6e66522c62fd45046fb6f8, 54.58s
+Verified flashinfer_jit_cache-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 4467 bytes, sha256=59e2db6f5e4ab592be8afe0dfd71faae4050fabb1d4019560ff80a8122432694, 0.46s
+Verified flashinfer_jit_cache_sm100a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 339666614 bytes, sha256=81260f341dbac084ab0e49affe7b6f4725150791eedce00c73d210a6a4fd1245, 11.00s
+Verified flashinfer_jit_cache_sm103a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 344297588 bytes, sha256=9808fc915a70e69470ccf8df1ba1b65123ccf1a73af1cc8b32e78510cfd6200e, 12.91s
+Verified flashinfer_jit_cache_sm120f-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 248167571 bytes, sha256=13c8d615d73b2c405ab903e7d11704e41f4d91f4b9609a7f72bbd0aa39ddc923, 7.21s
+Verified flashinfer_jit_cache_sm80-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 161459007 bytes, sha256=7147e056c27b1c90424b5edeff6e013fe2766f819f9483e3e80a42ad325fe32d, 5.25s
+Verified flashinfer_jit_cache_sm89-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 160306447 bytes, sha256=c5c4438780195c0bd086162387b7032b6f5296e58ff5fdd99fb70ba981a9bfe7, 6.02s
+Verified flashinfer_jit_cache_sm90a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl: 344553420 bytes, sha256=661ea01512e5de7aa5f256d9bcf21b7fa2e515c31639b65920fe724416e26123, 12.23s
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_python-0.7.4rc1-py3-none-any.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_cubin-0.7.4rc1-py3-none-any.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm100a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm103a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm120f-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm80-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm89-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Processing /scratch/ziangli/sglang-flashinfer-swap-ab/ready-20261108/wheels/flashinfer_jit_cache_sm90a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+Installing collected packages: flashinfer-python, flashinfer-jit-cache-sm90a, flashinfer-jit-cache-sm89, flashinfer-jit-cache-sm80, flashinfer-jit-cache-sm120f, flashinfer-jit-cache-sm103a, flashinfer-jit-cache-sm100a, flashinfer-jit-cache, flashinfer-cubin
+  Attempting uninstall: flashinfer-python
+    Found existing installation: flashinfer-python 0.7.3
+    Uninstalling flashinfer-python-0.7.3:
+      Successfully uninstalled flashinfer-python-0.7.3
+  Attempting uninstall: flashinfer-jit-cache-sm90a
+    Found existing installation: flashinfer-jit-cache-sm90a 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm90a-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm90a-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache-sm89
+    Found existing installation: flashinfer-jit-cache-sm89 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm89-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm89-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache-sm80
+    Found existing installation: flashinfer-jit-cache-sm80 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm80-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm80-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache-sm120f
+    Found existing installation: flashinfer-jit-cache-sm120f 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm120f-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm120f-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache-sm103a
+    Found existing installation: flashinfer-jit-cache-sm103a 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm103a-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm103a-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache-sm100a
+    Found existing installation: flashinfer-jit-cache-sm100a 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-sm100a-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-sm100a-0.7.3+cu130
+  Attempting uninstall: flashinfer-jit-cache
+    Found existing installation: flashinfer-jit-cache 0.7.3+cu130
+    Uninstalling flashinfer-jit-cache-0.7.3+cu130:
+      Successfully uninstalled flashinfer-jit-cache-0.7.3+cu130
+  Attempting uninstall: flashinfer-cubin
+    Found existing installation: flashinfer-cubin 0.7.3
+    Uninstalling flashinfer-cubin-0.7.3:
+      Successfully uninstalled flashinfer-cubin-0.7.3
+
+Successfully installed flashinfer-cubin-0.7.4rc1 flashinfer-jit-cache-0.7.4rc1+cu130 flashinfer-jit-cache-sm100a-0.7.4rc1+cu130 flashinfer-jit-cache-sm103a-0.7.4rc1+cu130 flashinfer-jit-cache-sm120f-0.7.4rc1+cu130 flashinfer-jit-cache-sm80-0.7.4rc1+cu130 flashinfer-jit-cache-sm89-0.7.4rc1+cu130 flashinfer-jit-cache-sm90a-0.7.4rc1+cu130 flashinfer-python-0.7.4rc1
+{
+  "flashinfer-cubin": {
+    "before": "0.7.3",
+    "after": "0.7.4rc1"
+  },
+  "flashinfer-jit-cache": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm100a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm103a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm120f": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm80": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm89": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-jit-cache-sm90a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4rc1+cu130"
+  },
+  "flashinfer-python": {
+    "before": "0.7.3",
+    "after": "0.7.4rc1"
+  }
+}

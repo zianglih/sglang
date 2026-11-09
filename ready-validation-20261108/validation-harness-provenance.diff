@@ -1,0 +1,29 @@
+--- validate_production_swap_ab.py
++++ results/gpu-validation-ready-20261108/validate_production_swap_ab.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ """Focused real-SGLang loader/forward/graph/reload validation on SM100/SM103.
+ 
+-Run with the effort's SGLang python/ and exact FlashInfer merge on PYTHONPATH.
++Run with the effort's SGLang python/ on PYTHONPATH and installed FlashInfer v0.7.4rc1.
+ This is a local validation artifact, not an upstream test or benchmark claim.
+ Both arms use the same FlashInfer source; the control forces swap_ab=False.
+ """
+@@ -432,7 +432,7 @@
+         "method": (
+             "Real SGLang FusedMoE TP1/EP1; serialized NVFP4 through production loaders. "
+             "Identical checkpoints, BF16 inputs and precomputed routes in both arms. "
+-            "Both arms use exact FlashInfer #7290 merge; legacy forces swap_ab=False. "
++            "Both arms use installed FlashInfer v0.7.4rc1; legacy forces swap_ab=False. "
+             "Deterministic unfused finalize; no autotuning. W4A16 has an independent "
+             "dequantized-weight FP32 matmul/BF16-activation reference; W4A4 checks "
+             "cross-layout parity, graph equality and reload. Optional timings use "
+@@ -449,7 +449,7 @@
+             .replace(
+                 "no autotuning.",
+                 "each mode/layout tunes only the requested token bucket before measurement, "
+-                "then retains the same selected cache for the reverse-order repeat.",
++                "then retains the selected cache for graph and reload checks.",
+             )
+             .replace(
+                 "fixed defaults are mode-specific, not a fixed-tactic or CUPTI study.",

@@ -1,0 +1,65 @@
+[
+  {
+    "name": "flashinfer-python",
+    "version": "0.7.4rc1",
+    "filename": "flashinfer_python-0.7.4rc1-py3-none-any.whl",
+    "url": "https://files.pythonhosted.org/packages/56/1c/8e9ea7bf2f095a7ca64d68a51e6d112a332463d5b7f4767feeb77add886a/flashinfer_python-0.7.4rc1-py3-none-any.whl",
+    "sha256": "668ccf805cfe8fdf5cbc5d7e5a0f43c2b458f16b40c4a5c6c36daa8029e60ceb"
+  },
+  {
+    "name": "flashinfer-cubin",
+    "version": "0.7.4rc1",
+    "filename": "flashinfer_cubin-0.7.4rc1-py3-none-any.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_cubin-0.7.4rc1-py3-none-any.whl",
+    "sha256": "1363a39d4ce6e68089ba7ea94d1ce7e2d5bb15a40e6e66522c62fd45046fb6f8"
+  },
+  {
+    "name": "flashinfer-jit-cache",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "59e2db6f5e4ab592be8afe0dfd71faae4050fabb1d4019560ff80a8122432694"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm100a",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm100a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm100a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "81260f341dbac084ab0e49affe7b6f4725150791eedce00c73d210a6a4fd1245"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm103a",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm103a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm103a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "9808fc915a70e69470ccf8df1ba1b65123ccf1a73af1cc8b32e78510cfd6200e"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm120f",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm120f-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm120f-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "13c8d615d73b2c405ab903e7d11704e41f4d91f4b9609a7f72bbd0aa39ddc923"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm80",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm80-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm80-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "7147e056c27b1c90424b5edeff6e013fe2766f819f9483e3e80a42ad325fe32d"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm89",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm89-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm89-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "c5c4438780195c0bd086162387b7032b6f5296e58ff5fdd99fb70ba981a9bfe7"
+  },
+  {
+    "name": "flashinfer-jit-cache-sm90a",
+    "version": "0.7.4rc1+cu130",
+    "filename": "flashinfer_jit_cache_sm90a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "url": "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.7.4rc1/flashinfer_jit_cache_sm90a-0.7.4rc1+cu130-cp39-abi3-manylinux_2_28_x86_64.whl",
+    "sha256": "661ea01512e5de7aa5f256d9bcf21b7fa2e515c31639b65920fe724416e26123"
+  }
+]
