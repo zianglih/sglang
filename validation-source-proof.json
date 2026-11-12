@@ -1,0 +1,9 @@
+{
+  "commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+  "files": {
+    "python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9",
+    "python/sglang/srt/layers/moe/flashinfer_megamoe.py": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59",
+    "test/registered/unit/layers/moe/test_flashinfer_megamoe.py": "13636ebff7f4c5940f543b64ac22272b57c16efa6825c2b8907914b73d3baf88"
+  },
+  "harness_sha256": "975a78c68fca5e4c5aa2d760d1769142233ccc979279caab5fdedf24b474bfbd"
+}

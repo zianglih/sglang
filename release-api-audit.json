@@ -1,0 +1,27 @@
+{
+  "release": "v0.7.4",
+  "commit": "77039051b0be921788dc2784ec41423b558878ec",
+  "required_changes": [
+    "https://github.com/flashinfer-ai/flashinfer/pull/6415",
+    "https://github.com/flashinfer-ai/flashinfer/pull/6416"
+  ],
+  "apis": {
+    "MoEEpMegaLayer.get_tuned_knobs": "https://github.com/flashinfer-ai/flashinfer/blob/77039051b0be921788dc2784ec41423b558878ec/flashinfer/moe_ep/modes/mega_layer.py#L498",
+    "MoEEpMegaLayer.create_workspace(knobs=...)": "https://github.com/flashinfer-ai/flashinfer/blob/77039051b0be921788dc2784ec41423b558878ec/flashinfer/moe_ep/modes/mega_layer.py#L213",
+    "native_json_tuple_restoration": "https://github.com/flashinfer-ai/flashinfer/blob/77039051b0be921788dc2784ec41423b558878ec/flashinfer/moe_ep/kernel_src/sm100/cutedsl_megamoe/shim/knob_cache.py#L129",
+    "namespaced_autotuner_records": "https://github.com/flashinfer-ai/flashinfer/blob/77039051b0be921788dc2784ec41423b558878ec/flashinfer/autotuner/autotuner.py#L5009"
+  },
+  "contracts": [
+    "Read copied tuned knobs after temporary warmup and before destroy",
+    "Explicit workspace knobs copied into per-workspace backend; bypass native-file lookup",
+    "W4A16/W4A4/MXFP8 inference populate tuned knobs; fixed knobs participate in workspace pool identity",
+    "Top-level JSON list-to-tuple restoration matches native decoder"
+  ],
+  "upstream_base": "fc6d3b6f91bb3aecc03aff8183c212d0ef8888a1",
+  "surrounding_changes_preserved": [
+    "#49096 enum geometry serialization; native file version parser is removed with file transport",
+    "#46213 optional decode workspace, forward output views, skip log and runtime capture guards"
+  ],
+  "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+  "cache_namespace": "sglang_flashinfer_megamoe_knobs"
+}

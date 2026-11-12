@@ -1,0 +1,79 @@
+{
+  "_metadata": {
+    "flashinfer_version": "0.7.4",
+    "cuda_version": "13.0",
+    "cublas_version": "13.1.1",
+    "cudnn_version": "92400",
+    "cudnn_frontend_version": "1.32.3",
+    "cutlass_dsl_version": "cpython-312;cpython-312-x86_64-linux-gnu;apache-tvm-ffi==0.1.11:cf290d041f7ea14f4d9ebd335408eadf57c8cdf3ad01df784d0d955cc5a3844d;nvidia-cutlass-dsl-libs-base==4.8.0:217af456c26e88a0191173ac475d0d6afd3a184ed42d31de245b2fa38b07a347;nvidia-cutlass-dsl-libs-core==4.8.0:b13540e90431e787e7a8f471bd4d33c33b7523933b5b752e8875d9193d93a25d;nvidia-cutlass-dsl-libs-cu12==4.8.0:a31ec0fab7c927440115179322b0f5e300ea02537fb0b954b8250f1dd40f07ef;nvidia-cutlass-dsl-libs-cu13==4.8.0:b952427c120d0176c9cca03f49c104d27c4ba748ad4bec082dd196c9238be042;nvidia-cutlass-dsl==4.8.0:b166b4850f417452e6b81c6c1e7a02e358786cbb1eef0a4fc5e7b04cdaceff2e;torch==2.14.1+cu130:a26cc27b99b17ce3b22e2035ab4cee22e9d61046ea659a9f7d0c3d021e8c4941",
+    "gpu": "NVIDIA B300 SXM6 AC"
+  },
+  "_records": {
+    "sglang_flashinfer_megamoe_knobs": {
+      "{\"config\": {\"activation\": \"swiglu\", \"activation_clamp\": null, \"apply_routing_weights_before_fc2\": true, \"cluster_shape_mn\": null, \"combine_dtype\": \"bf16\", \"enable_fc1_activation_per_token_scale\": false, \"enable_in_kernel_fc2_reduce\": false, \"fast_math\": true, \"finalize_mode\": \"AUTO\", \"gate_up_clamp\": 1.5, \"intermediate_size\": 256, \"kernel_name\": \"sm100_nvfp4_nvfp4_bf16_cutedsl\", \"kernel_variant\": \"inference\", \"mma_tiler_mnk\": null, \"num_valid_tokens_tensor\": null, \"schedule_policy\": null, \"situ_beta\": null, \"situ_linear_beta\": null, \"swiglu_alpha\": null, \"swiglu_beta\": null, \"top_k\": 4}, \"hidden\": 256, \"mega_use_ncu\": \"0\", \"num_experts\": 8, \"torch\": \"2.14.1+cu130\", \"world_size\": 4}:1": {
+        "cluster_shape_mnk": [
+          2,
+          1,
+          1
+        ],
+        "group_hint": 512,
+        "epi_flag_batch": [
+          2,
+          4
+        ],
+        "load_balance_mode": "atomic_counter",
+        "mma_tiler_mnk": [
+          256,
+          128,
+          256
+        ],
+        "flag_batch": 8,
+        "token_back_mode": "epi_warps",
+        "in_kernel_fc2_reduce": false
+      },
+      "{\"config\": {\"activation\": \"swiglu\", \"activation_clamp\": null, \"apply_routing_weights_before_fc2\": true, \"cluster_shape_mn\": null, \"combine_dtype\": \"bf16\", \"enable_fc1_activation_per_token_scale\": false, \"enable_in_kernel_fc2_reduce\": false, \"fast_math\": true, \"finalize_mode\": \"AUTO\", \"gate_up_clamp\": 1.5, \"intermediate_size\": 256, \"kernel_name\": \"sm100_nvfp4_nvfp4_bf16_cutedsl\", \"kernel_variant\": \"inference\", \"mma_tiler_mnk\": null, \"num_valid_tokens_tensor\": null, \"schedule_policy\": null, \"situ_beta\": null, \"situ_linear_beta\": null, \"swiglu_alpha\": null, \"swiglu_beta\": null, \"top_k\": 4}, \"hidden\": 256, \"mega_use_ncu\": \"0\", \"num_experts\": 8, \"torch\": \"2.14.1+cu130\", \"world_size\": 4}:2": {
+        "cluster_shape_mnk": [
+          2,
+          1,
+          1
+        ],
+        "group_hint": 512,
+        "epi_flag_batch": [
+          2,
+          4
+        ],
+        "load_balance_mode": "atomic_counter",
+        "mma_tiler_mnk": [
+          256,
+          256,
+          256
+        ],
+        "flag_batch": 8,
+        "token_back_mode": "epi_warps",
+        "in_kernel_fc2_reduce": false
+      },
+      "{\"config\": {\"activation\": \"swiglu\", \"activation_clamp\": null, \"apply_routing_weights_before_fc2\": true, \"cluster_shape_mn\": null, \"combine_dtype\": \"bf16\", \"enable_fc1_activation_per_token_scale\": false, \"enable_in_kernel_fc2_reduce\": false, \"fast_math\": true, \"finalize_mode\": \"AUTO\", \"gate_up_clamp\": 1.5, \"intermediate_size\": 256, \"kernel_name\": \"sm100_nvfp4_nvfp4_bf16_cutedsl\", \"kernel_variant\": \"inference\", \"mma_tiler_mnk\": null, \"num_valid_tokens_tensor\": null, \"schedule_policy\": null, \"situ_beta\": null, \"situ_linear_beta\": null, \"swiglu_alpha\": null, \"swiglu_beta\": null, \"top_k\": 4}, \"hidden\": 256, \"mega_use_ncu\": \"0\", \"num_experts\": 8, \"torch\": \"2.14.1+cu130\", \"world_size\": 4}:8": {
+        "cluster_shape_mnk": [
+          2,
+          1,
+          1
+        ],
+        "group_hint": 512,
+        "epi_flag_batch": [
+          2,
+          4
+        ],
+        "load_balance_mode": "atomic_counter",
+        "mma_tiler_mnk": [
+          256,
+          128,
+          256
+        ],
+        "flag_batch": 8,
+        "token_back_mode": "epi_warps",
+        "in_kernel_fc2_reduce": false
+      }
+    }
+  },
+  "_generation": "d5daea56102b4fab27680d8cb0cbed3b23278c61e09034d5f6a0e8fd69762363"
+}

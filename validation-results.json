@@ -1,0 +1,1551 @@
+{
+  "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+  "flashinfer_version": "0.7.4",
+  "unit_tests_passed": 31,
+  "startup_bridge_unit_tests_passed": 1,
+  "native_cases_passed": 6,
+  "native_rank_records": 24,
+  "graph_replays": 216,
+  "all_outputs_bit_exact_to_fixed_control": true,
+  "all_fresh_process_hits_use_zero_auto_calls": true,
+  "all_pool_refcounts": [
+    2,
+    1,
+    0
+  ],
+  "version_check_bypassed": false,
+  "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+  "harness_sha256": "975a78c68fca5e4c5aa2d760d1769142233ccc979279caab5fdedf24b474bfbd",
+  "cases": [
+    {
+      "label": "w4a16-silu-reuse0",
+      "exit_code": 0,
+      "log_sha256": "b844ad397487f107c81af9ecc84dc1016ce64d6976bde903f0980d82e5c1b4ae",
+      "records": [
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "label": "w4a16-silu-reuse1",
+      "exit_code": 0,
+      "log_sha256": "d081774afe822dcc556955ee8069b79ea6a23faa5a6d3f5e48d9cbec81a1fc2d",
+      "records": [
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a16",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "label": "w4a4-silu-reuse0",
+      "exit_code": 0,
+      "log_sha256": "f4c9c730e2bf35658d921083a1dad62bfa760a316ae6a8f6064906e1951b3ad8",
+      "records": [
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "label": "w4a4-silu-reuse1",
+      "exit_code": 0,
+      "log_sha256": "be3d79c616279954ec06aa9c46126189d512d66053b45fda4d34a58a9abde215",
+      "records": [
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "w4a4",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 2,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "label": "mxfp8-silu-reuse0",
+      "exit_code": 0,
+      "log_sha256": "dc41897d3b38fc84e8e7c7947de7d008a9745a422f525e4fca89ba1a413ed578",
+      "records": [
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 3,
+          "reuse_cache": false,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "label": "mxfp8-silu-reuse1",
+      "exit_code": 0,
+      "log_sha256": "573c85b81f6c8ff4d796e56190467d7ed55a864e3d2277f7867df749a8284ed3",
+      "records": [
+        {
+          "rank": 1,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 2,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 3,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        },
+        {
+          "rank": 0,
+          "passed": true,
+          "activation": "silu",
+          "precision": "mxfp8",
+          "flashinfer_version": "0.7.4",
+          "source_commit": "4a92b10daecf6538b8129760fe913756b39458ee",
+          "module_sources": {
+            "adapter": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+              "sha256": "3c001933cb79b6099cab990cb9916b5084de2b6c1ad6c7bcc466dfa4f49fde59"
+            },
+            "autotune": {
+              "path": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py",
+              "sha256": "d0aec43ea4af3137a2eeb9bed0d1afc3e0504f9eba825b50fe65353b2947bed9"
+            }
+          },
+          "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+          "configured_decode_workspace_capacity": 0,
+          "decode_workspace_created": false,
+          "auto_calls": 0,
+          "reuse_cache": true,
+          "capacities": [
+            1,
+            2,
+            8
+          ],
+          "bootstrap_capacity": 4,
+          "decode_num_tokens": 2,
+          "prefill_num_tokens": 8,
+          "startup_contexts": 1,
+          "layers_per_context": 2,
+          "checked_counts": [
+            [
+              0,
+              1,
+              1,
+              2
+            ],
+            [
+              0,
+              1,
+              2,
+              7
+            ],
+            [
+              8,
+              8,
+              8,
+              8
+            ]
+          ],
+          "graph_replays": 9,
+          "bit_exact": true,
+          "borrowed_outputs_cloned": true,
+          "fc1_scale_mutation_observed": true,
+          "pool_refcounts": [
+            2,
+            1,
+            0
+          ]
+        }
+      ]
+    }
+  ]
+}

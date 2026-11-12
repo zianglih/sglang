@@ -1,0 +1,303 @@
+{
+  "python": "3.12.16 (main, Oct 26 2026, 14:08:45) [Clang 23.1.3 ]",
+  "executable": "/opt/sglang/bin/python",
+  "platform": "Linux-6.8.0-146-generic-x86_64-with-glibc2.39",
+  "versions": {
+    "torch": "2.14.1+cu130",
+    "flashinfer-python": "0.7.4",
+    "flashinfer-cubin": "0.7.4",
+    "flashinfer-jit-cache": "0.7.4+cu130",
+    "nvidia-cutlass-dsl": "4.8.0",
+    "nvidia-cutlass-dsl-libs-cu13": "4.8.0",
+    "triton": "3.8.0",
+    "pytest": "9.2.0",
+    "sglang-kernel": "0.4.10",
+    "apache-tvm-ffi": "0.1.11",
+    "nvidia-nvshmem-cu13": "3.4.5",
+    "nvshmem4py-cu13": "0.4.1"
+  },
+  "cuda_runtime": "13.0",
+  "flashinfer_nonoptional_requirements": [
+    {
+      "requirement": "apache-tvm-ffi<0.2,>=0.1.11",
+      "installed": "0.1.11",
+      "satisfied": true
+    },
+    {
+      "requirement": "click",
+      "installed": "8.5.1",
+      "satisfied": true
+    },
+    {
+      "requirement": "cuda-python>=12.0",
+      "installed": "13.5.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "cuda-tile>=1.4.0",
+      "installed": "1.8.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "einops",
+      "installed": "0.8.2",
+      "satisfied": true
+    },
+    {
+      "requirement": "nccl-extensions>=0.1.0",
+      "installed": "0.1.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "nccl4py>=0.4.1",
+      "installed": "0.6.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "ninja",
+      "installed": "1.13.2",
+      "satisfied": true
+    },
+    {
+      "requirement": "numpy",
+      "installed": "2.3.5",
+      "satisfied": true
+    },
+    {
+      "requirement": "nvidia-cudnn-frontend>=1.32.0",
+      "installed": "1.32.3",
+      "satisfied": true
+    },
+    {
+      "requirement": "nvidia-cutlass-dsl>=4.8.0",
+      "installed": "4.8.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "nvidia-ml-py",
+      "installed": "13.615.71",
+      "satisfied": true
+    },
+    {
+      "requirement": "packaging>=24.2",
+      "installed": "26.3",
+      "satisfied": true
+    },
+    {
+      "requirement": "requests",
+      "installed": "2.34.2",
+      "satisfied": true
+    },
+    {
+      "requirement": "tabulate",
+      "installed": "0.10.0",
+      "satisfied": true
+    },
+    {
+      "requirement": "torch",
+      "installed": "2.14.1+cu130",
+      "satisfied": true
+    },
+    {
+      "requirement": "tqdm",
+      "installed": "4.70.1",
+      "satisfied": true
+    }
+  ],
+  "missing_or_incompatible_requirements": [],
+  "nvshmem_files": {
+    "nvidia-nvshmem-cu13": [
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/include/nvshmem.h",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_mpi.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_pmi.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_pmi2.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_pmix.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_shmem.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_bootstrap_uid.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_transport_ibdevx.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_transport_ibgda.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_transport_ibrc.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_transport_libfabric.so.3",
+      "/opt/sglang/lib/python3.12/site-packages/nvidia/nvshmem/lib/nvshmem_transport_ucx.so.3"
+    ],
+    "nvshmem4py-cu13": [
+      "/opt/sglang/lib/python3.12/site-packages/nvshmem/bindings/_internal/nvshmem.cpython-312-x86_64-linux-gnu.so",
+      "/opt/sglang/lib/python3.12/site-packages/nvshmem/bindings/ask_smem.cpython-312-x86_64-linux-gnu.so",
+      "/opt/sglang/lib/python3.12/site-packages/nvshmem/bindings/cynvshmem.cpython-312-x86_64-linux-gnu.so",
+      "/opt/sglang/lib/python3.12/site-packages/nvshmem/bindings/nvshmem.cpython-312-x86_64-linux-gnu.so"
+    ]
+  },
+  "version_check_bypass": null,
+  "gpus": [
+    {
+      "index": 0,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 1,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 2,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 3,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 4,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 5,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 6,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    },
+    {
+      "index": 7,
+      "name": "NVIDIA B300 SXM6 AC",
+      "capability": [
+        10,
+        3
+      ],
+      "total_memory": 287421038592
+    }
+  ],
+  "p2p": [
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  ],
+  "nvidia_smi": "index, name, driver_version, memory.total [MiB]\n0, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n1, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n2, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n3, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n4, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n5, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n6, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n7, NVIDIA B300 SXM6 AC, 595.91.07, 275040 MiB\n",
+  "topology": "\t\u001b[4mGPU0\tGPU1\tGPU2\tGPU3\tGPU4\tGPU5\tGPU6\tGPU7\tNIC0\tNIC1\tNIC2\tNIC3\tNIC4\tNIC5\tNIC6\tNIC7\tNIC8\tNIC9\tCPU Affinity\tNUMA Affinity\tGPU NUMA ID\u001b[0m\nGPU0\t X \tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\tPXB\tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t0-31,128-159\t0\t\tN/A\nGPU1\tNV18\t X \tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\tNODE\tPXB\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t0-31,128-159\t0\t\tN/A\nGPU2\tNV18\tNV18\t X \tNV18\tNV18\tNV18\tNV18\tNV18\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\t32-63,160-191\t1\t\tN/A\nGPU3\tNV18\tNV18\tNV18\t X \tNV18\tNV18\tNV18\tNV18\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\t32-63,160-191\t1\t\tN/A\nGPU4\tNV18\tNV18\tNV18\tNV18\t X \tNV18\tNV18\tNV18\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\t64-95,192-223\t2\t\tN/A\nGPU5\tNV18\tNV18\tNV18\tNV18\tNV18\t X \tNV18\tNV18\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\t64-95,192-223\t2\t\tN/A\nGPU6\tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\t X \tNV18\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\t96-127,224-255\t3\t\tN/A\nGPU7\tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\tNV18\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\t96-127,224-255\t3\t\tN/A\nNIC0\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC1\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC2\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\t X \tPIX\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC3\tNODE\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tNODE\tPIX\t X \tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC4\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC5\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tSYS\tSYS\tSYS\tSYS\t\t\t\t\nNIC6\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\tSYS\tSYS\t\t\t\t\nNIC7\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \tSYS\tSYS\t\t\t\t\nNIC8\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tPXB\tNODE\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\t X \tNODE\t\t\t\t\nNIC9\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\tPXB\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tSYS\tNODE\t X \t\t\t\t\n\nLegend:\n\n  X    = Self\n  SYS  = Connection traversing PCIe as well as the SMP interconnect between NUMA nodes (e.g., QPI/UPI)\n  NODE = Connection traversing PCIe as well as the interconnect between PCIe Host Bridges within a NUMA node\n  PHB  = Connection traversing PCIe as well as a PCIe Host Bridge (typically the CPU)\n  PXB  = Connection traversing multiple PCIe bridges (without traversing the PCIe Host Bridge)\n  PIX  = Connection traversing at most a single PCIe bridge\n  NV#  = Connection traversing a bonded set of # NVLinks\n\nNIC Legend:\n\n  NIC0: mlx5_0\n  NIC1: mlx5_1\n  NIC2: mlx5_2\n  NIC3: mlx5_3\n  NIC4: mlx5_4\n  NIC5: mlx5_5\n  NIC6: mlx5_6\n  NIC7: mlx5_11\n  NIC8: mlx5_12\n  NIC9: mlx5_13\n\n",
+  "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Aug_20_01:58:59_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.88\nBuild cuda_13.0.r13.0/compiler.36424714_0\n",
+  "api": {
+    "get_tuned_knobs": "(self, *, workspace: 'MoEEpMegaWorkspace | None' = None) -> 'dict[str, Any]'",
+    "create_workspace": "(self, max_tokens_per_rank: 'int', *, live_tokens: 'int | None' = None, knobs: 'dict[str, Any] | None' = None) -> 'MoEEpMegaWorkspace'",
+    "get_namespaced_records": "(self, namespace: str) -> dict[str, typing.Any]",
+    "publish_namespaced_records": "(self, namespace: str, records: dict[str, typing.Any]) -> None"
+  },
+  "source_paths": {
+    "flashinfer": "/opt/sglang/lib/python3.12/site-packages/flashinfer/__init__.py",
+    "MoEEpMegaLayer": "/opt/sglang/lib/python3.12/site-packages/flashinfer/moe_ep/modes/mega_layer.py",
+    "sglang_megamoe": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe.py",
+    "sglang_autotune": "/scratch/ziangli/sglang-megamoe-autotune-api-cleanup/ready-20261111/sglang/python/sglang/srt/layers/moe/flashinfer_megamoe_autotune.py"
+  }
+}

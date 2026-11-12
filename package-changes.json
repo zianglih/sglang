@@ -1,0 +1,38 @@
+{
+  "flashinfer-cubin": {
+    "before": "0.7.3",
+    "after": "0.7.4"
+  },
+  "flashinfer-jit-cache": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm100a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm103a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm120f": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm80": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm89": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-jit-cache-sm90a": {
+    "before": "0.7.3+cu130",
+    "after": "0.7.4+cu130"
+  },
+  "flashinfer-python": {
+    "before": "0.7.3",
+    "after": "0.7.4"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "upstream_base": "fc6d3b6f91bb3aecc03aff8183c212d0ef8888a1",
+  "preserved_upstream_function_ast": {
+    "forward_megamoe": true,
+    "_log_decode_workspace_skipped": true,
+    "_capacities": true,
+    "_profile_inputs": true,
+    "MegaMoeTunedForward.__init__": true,
+    "MegaMoeTunedForward._common_tokens": true,
+    "MegaMoeTunedForward._untuned_workspace": true,
+    "MegaMoeTunedForward._geometry_key": true,
+    "MegaMoeTunedForward.__call__": true
+  },
+  "cache_namespace": "sglang_flashinfer_megamoe_knobs",
+  "cache_payload_transport_removed": true
+}

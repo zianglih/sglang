@@ -1,0 +1,105 @@
+--- validation/smoke_autotune_gpu.py
++++ results/readiness-20261111/smoke_autotune_gpu.py
+@@ -1,7 +1,7 @@
+ """Native EP4 integration smoke; exercises real AUTO, pooling and graph replay.
+ 
+ Launch with torchrun, pinned SGLang source on PYTHONPATH, and FlashInfer with
+-get_tuned_knobs()/create_workspace(knobs=...). Run first with --reuse-cache 0,
++the released FlashInfer 0.7.4 getter/workspace APIs. Run first with --reuse-cache 0,
+ then --reuse-cache 1 using the same --cache directory and precision/activation.
+ No candidate or kernel is replaced. The AUTO wrapper only counts invocations.
+ """
+@@ -10,6 +10,7 @@
+ 
+ import argparse
+ import dataclasses
++import hashlib
+ import inspect
+ import json
+ import os
+@@ -36,12 +37,18 @@
+         SGLANG_FLASHINFER_MEGAMOE_IN_KERNEL_FC2_REDUCE="0",
+         SGLANG_FLASHINFER_MEGAMOE_COMBINE_DTYPE="bf16",
+         SGLANG_FLASHINFER_MEGAMOE_MAX_TOKENS_PER_RANK="4",
++        SGLANG_FLASHINFER_MEGAMOE_DECODE_MAX_TOKENS_PER_RANK="2",
+         FLASHINFER_MOE_EP_KNOB_CACHE="0",
+     )
++    import flashinfer
++
++    assert flashinfer.__version__ == "0.7.4", flashinfer.__version__
++    assert os.environ.get("FLASHINFER_DISABLE_VERSION_CHECK", "0") == "0"
+     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+     dist.init_process_group(
+         "nccl", device_id=torch.device("cuda", torch.cuda.current_device())
+     )
++    assert torch.cuda.get_device_capability() in ((10, 0), (10, 3))
+     rank, world = dist.get_rank(), dist.get_world_size()
+     assert world == 4
+     torch.manual_seed(100 + rank)
+@@ -51,11 +58,20 @@
+     from flashinfer.moe_ep.core.kernel.workspace_pool import pooled_workspace_refcount
+     from sglang.srt.layers import dp_attention
+     from sglang.srt.layers.moe import flashinfer_megamoe as adapter
++    from sglang.srt.layers.moe import flashinfer_megamoe_autotune as autotune_adapter
+     from sglang.srt.layers.moe.flashinfer_megamoe_autotune import (
++        _CACHE_NAMESPACE,
+         megamoe_autotune_context,
+     )
+     from sglang.srt.runtime_context import get_parallel
+ 
++    source_root = Path(os.environ["PYTHONPATH"].split(os.pathsep)[0]).resolve()
++    module_sources = {}
++    for name, module in (("adapter", adapter), ("autotune", autotune_adapter)):
++        path = Path(module.__file__).resolve()
++        assert path.is_relative_to(source_root), (name, path, source_root)
++        module_sources[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
++    assert _CACHE_NAMESPACE == "sglang_flashinfer_megamoe_knobs", _CACHE_NAMESPACE
+     assert hasattr(MoEEpMegaLayer, "get_tuned_knobs"), "FlashInfer getter is required"
+     assert "knobs" in inspect.signature(MoEEpMegaLayer.create_workspace).parameters
+ 
+@@ -180,6 +196,9 @@
+         else:
+             adapter.prepare_nvfp4_moe_weights_for_flashinfer_megamoe(layer)
+             adapter.ensure_nvfp4_moe_layer_for_flashinfer_megamoe(layer)
++        state = layer._flashinfer_megamoe_forward
++        assert state._decode_max_tokens_per_rank == (0 if args.precision == "mxfp8" else 2)
++        assert state._decode_workspace is None
+         layers.append(layer)
+ 
+     x = torch.randn(16, hidden, dtype=torch.bfloat16, device="cuda")
+@@ -242,7 +261,7 @@
+         for layer in layers:
+             forward(layer)
+     tuner.save_configs(str(cache_path))
+-    records = tuner.get_namespaced_records("sglang_flashinfer_megamoe_knobs_v1")
++    records = tuner.get_namespaced_records(_CACHE_NAMESPACE)
+     assert len(records) == 3
+     assert all(isinstance(knobs, dict) and knobs for knobs in records.values())
+     assert all("entries" not in knobs for knobs in records.values())
+@@ -256,7 +275,10 @@
+     expected_calls = 0 if args.reuse_cache else len(capacities)
+     assert auto_calls == expected_calls, (auto_calls, expected_calls)
+     for layer in layers:
+-        assert sorted(layer._flashinfer_megamoe_forward.workspaces) == capacities
++        state = layer._flashinfer_megamoe_forward
++        assert sorted(state.workspaces) == capacities
++        # Startup tuning supersedes the optional untuned decode-only profile.
++        assert state._decode_workspace is None
+     for capacity in capacities:
+         left = (
+             layers[0]
+@@ -367,6 +389,14 @@
+                 passed=True,
+                 activation=args.activation,
+                 precision=args.precision,
++                flashinfer_version=flashinfer.__version__,
++                source_commit=os.environ["SGLANG_VALIDATION_COMMIT"],
++                module_sources=module_sources,
++                cache_namespace=_CACHE_NAMESPACE,
++                configured_decode_workspace_capacity=(
++                    0 if args.precision == "mxfp8" else 2
++                ),
++                decode_workspace_created=False,
+                 auto_calls=auto_calls,
+                 reuse_cache=bool(args.reuse_cache),
+                 capacities=capacities,
